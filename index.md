@@ -27,5 +27,6 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 
 ## 研究メモ
 - [開発現場でのSELinuxの位置づけとdisable]({{ '/selinux.html' | relative_url }})
+- [再現可能な自作OS UmuOS-0.1.4-base-stable（telnetd対応ベース安定版）]({{ '/umuos-0.1.4-base-stable.html' | relative_url }})
 
 ※ 随時追加予定
