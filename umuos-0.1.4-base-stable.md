@@ -95,12 +95,12 @@ telnet は平文なので、前提として **自宅 LAN 内に限定**する運
 
 ## リンク
 
-- UmuOS リポジトリ（umu_project）：https://github.com/redzetm/umu_project
+- [UmuOS リポジトリ（umu_project）](https://github.com/redzetm/umu_project)
 - UmuOS-0.1.4-base-stable ディレクトリ：
-	- https://github.com/redzetm/umu_project/tree/main/UmuOS-0.1.4-base-stable
-- 設計書・ノート（docs）：
-	- 基本設計書：https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E5%9F%BA%E6%9C%AC%E8%A8%AD%E8%A8%88%E6%9B%B8.md
-	- 詳細設計書：https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E8%A9%B3%E7%B4%B0%E8%A8%AD%E8%A8%88%E6%9B%B8.md
-	- 実装ノート：https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E5%AE%9F%E8%A3%85%E3%83%8E%E3%83%BC%E3%83%88.md
-	- 使い方：https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E4%BD%BF%E3%81%84%E6%96%B9.md
+  - [UmuOS-0.1.4-base-stable ディレクトリ](https://github.com/redzetm/umu_project/tree/main/UmuOS-0.1.4-base-stable)
+- 設計書・ノート（docs）
+  - [基本設計書](https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E5%9F%BA%E6%9C%AC%E8%A8%AD%E8%A8%88%E6%9B%B8.md)
+  - [詳細設計書](https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E8%A9%B3%E7%B4%B0%E8%A8%AD%E8%A8%88%E6%9B%B8.md)
+  - [実装ノート](https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E5%AE%9F%E8%A3%85%E3%83%8E%E3%83%BC%E3%83%88.md)
+  - [使い方](https://github.com/redzetm/umu_project/blob/main/UmuOS-0.1.4-base-stable/docs/UmuOS-0.1.4-base-stable-%E4%BD%BF%E3%81%84%E6%96%B9.md)
 
