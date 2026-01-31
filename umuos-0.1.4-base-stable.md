@@ -2,7 +2,7 @@
 title: "再現可能な自作OS UmuOS-0.1.4-base-stable"
 ---
 
-# 自作OS UmuOS-0.1.4-base-stable
+# 再現可能な自作OS UmuOS-0.1.4-base-stable
 
 UmuOS-0.1.4-base-stable は、UmuOS のユーザーランド開発へ進むための「ベースOS」です。
 0.1.3 系の最小OSを維持しつつ、LAN 内端末からゲストへログインできるように **BusyBox の telnetd（TCP/23）** を追加した版になります。
