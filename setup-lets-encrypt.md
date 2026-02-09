@@ -33,15 +33,27 @@ Server built: Aug 3 2024 00:00:00
 Certbotクライアントは、EPELリポジトリからインストールことが出来る。 
 EPELリポジトリ（Extra Packages for Enterprise Linux）は、Red Hat Enterprise Linux (RHEL)およびその派生ディストリビューション（CentOS、Rocky Linux など）向けの追加パッケージを提供するリポジトリ。 
 EPELは、オープンソースのパッケージを集めており、多くの開発者が利用する。 EPELリポジトリには、以下のようなパッケージが含まれる 
+
 ◆さまざまなツールやライブラリを提供する。 
+
 ◆セキュリティ関連のパッケージを含む。 
+
 ◆ネットワーク関連のパッケージを含む。 
+
 ◆デバッグやテストツールを提供する。 
+
 EPELリポジトリをインストールした上で、certbotとpython-certbot-apacheをインストールする。 
-※python-certbot-apacheは、Let’s EncryptのCertbotプロジェクトの一部で、Apache HTTPサーバーと統合されたツールです。 このツールを使用すると、以下のようなことができます。 
-〇SSL証明書の自動取得とインストール 　Let’s Encryptから無料のSSL証明書を取得し、Apacheサーバーに　自動的にインストールします。
-〇HTTPS設定の自動化 　Apacheの設定を自動的に調整し、HTTPSトラフィックを有効にします。 
-〇証明書の自動更新：証明書の有効期限が切れる前に自動的に更新します。 　systemdタイマーを自動で設定してくれる。 　全部終わったら systemdctl list-timers で確認する。
+
+※python-certbot-apacheは、Let’s EncryptのCertbotプロジェクトの一部で、Apache HTTPサーバーと統合されたツールです。 
+このツールを使用すると、以下のようなことができます。 
+〇SSL証明書の自動取得とインストール 　
+　Let’s Encryptから無料のSSL証明書を取得し、Apacheサーバーに　自動的にインストールします。
+
+〇HTTPS設定の自動化 　
+　Apacheの設定を自動的に調整し、HTTPSトラフィックを有効にします。 
+
+〇証明書の自動更新：証明書の有効期限が切れる前に自動的に更新します。 　
+　systemdタイマーを自動で設定してくれる。 　全部終わったら systemdctl list-timers で確認する。
 
 今回はすでにepel-release　をインストールしているので念のためアップデートを行う。
 
@@ -51,7 +63,7 @@ dnf -y update epel-release
 
 出力
 ```text
-メタデータの期限切れの最終確認: 0:41:59 前の 2025年01月13日 14時40分40秒 に実施しました。
+メタデータの期限切れの最終確認: 0:41:59 前の 2026年01月13日 14時40分40秒 に実施しました。
 依存関係が解決しました。
 行うべきことはありません。
 完了しました!
