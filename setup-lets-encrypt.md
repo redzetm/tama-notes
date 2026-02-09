@@ -5,10 +5,10 @@ title: "Let's EncryptでSSLで暗号化する"
 # Let's EncryptでSSLで暗号化する
 
 お疲れ様です。
-レンタルサーバーなどですぐ利用できるWordPressサービスとかだとサービス提供会社が無料のSSL証明書「Let's Encrypt」を管理機能から
-申し込みできるけど、シェルログインが許されているVPSサーバーやベアメタルサーバー、もしくは、自身の会社などに立てたオンプレサーバーなどでは、
-直接「Let's Encrypt」に手続きしないといけません。
-しかし、手続きは意外と簡単でLet’s EncryptサーバーとCertbotクライアント間で通信して10分もあればSSL証明書が入手できます。
+レンタルサーバーなどですぐ利用できるWordPressサービスとかだとサービス提供会社が無料のSSL証明書「Let's Encrypt」を管理機能から申し込みできるけど、シェルログインが許されているVPSサーバーやベアメタルサーバー、もしくは、自身の会社などに立てたオンプレサーバーなどでは、直接「Let's Encrypt」に手続きしないといけません。
+
+しかし、手続きは意外と簡単でLet’s EncryptサーバーとCertbotクライアント間で通信して**10分もあればSSL証明書が入手**できます。
+
 証明書を設定しようとしているサーバー機でSSHでシェルにログインしrootになり、Certbotクライアントをインストールします。
 インストールしたCertbotクライアントが、Let’s Encrypt のサーバーとやり取りすることで証明書の発行と設定を自動的に行います。
 ※設定ファイルの手動編集は、あります。
@@ -20,7 +20,6 @@ title: "Let's EncryptでSSLで暗号化する"
 ```bash
 httpd -v
 ```
-
 出力
 ```text
 Server version: Apache/2.4.62 (CentOS Stream)
@@ -32,9 +31,9 @@ Server built: Aug 3 2024 00:00:00
 ## ２　Certbotクライアントをインストール
 
 Certbotクライアントは、EPELリポジトリからインストールことが出来る。
-EPELリポジトリ（Extra Packages for Enterprise Linux）は、Red Hat Enterprise Linux (RHEL)および
-その派生ディストリビューション（CentOS、Rocky Linux など）向けの追加パッケージを提供するリポジトリ。
-EPELは、オープンソースのパッケージを集めており、多くの開発者が利用する。EPELリポジトリには、以下のようなパッケージが含まれる
+EPELリポジトリ（Extra Packages for Enterprise Linux）は、Red Hat Enterprise Linux (RHEL)およびその派生ディストリビューション（CentOS、Rocky Linux など）向けの追加パッケージを提供するリポジトリ。
+EPELは、オープンソースのパッケージを集めており、多くの開発者が利用する。
+EPELリポジトリには、以下のようなパッケージが含まれる
 ◆さまざまなツールやライブラリを提供する。
 ◆セキュリティ関連のパッケージを含む。
 ◆ネットワーク関連のパッケージを含む。
@@ -88,17 +87,16 @@ certbot certonly --webroot -w /var/www/html/ -d www.redzetm.net -d redzetm.net
 
 コマンドの詳細：
 certonly：証明書のみを取得し、インストール作業は手動で行うことを意味します。
---webroot：ウェブルート（Webroot）方式を指定します。この方式では、ウェブサーバーのルートディレクトリに特定のファイルを
-配置してドメインの所有権を確認します。
+--webroot：ウェブルート（Webroot）方式を指定します。この方式では、ウェブサーバーのルートディレクトリに特定のファイルを配置してドメインの所有権を確認します。
 -w /var/www/html/：ウェブサーバーのルートディレクトリを指定します。この場合、/var/www/html/ がウェブルートです。
 -d www.redzetm.net：証明書を取得したいドメイン名を指定します。※-dオプションで、2つを指定してもOK
 
-このコマンドを実行すると、Let's Encryptが指定されたウェブルートディレクトリに所有権確認用のファイルを配置し、
-そのファイルをアクセスして確認します。確認が成功すると、証明書が発行されます。
+このコマンドを実行すると、Let's Encryptが指定されたウェブルートディレクトリに所有権確認用のファイルを配置し、そのファイルをアクセスして確認します。
+確認が成功すると、証明書が発行されます。
 Certbotの実行時に次のようなプロンプトが表示される場合があります。指示に従って設定を完了します。
 証明書の更新も自動で行われるように設定すると便利です。
-証明書の取得後、Apacheの設定ファイル（/etc/httpd/conf.d/ssl.conf など）を編集して、新しい証明書を使用するように設定する必要が
-あります。設定が完了したら、Apacheサーバーを再起動して変更を適用します。
+証明書の取得後、Apacheの設定ファイル（/etc/httpd/conf.d/ssl.conf など）を編集して、新しい証明書を使用するように設定する必要があります。
+設定が完了したら、Apacheサーバーを再起動して変更を適用します。
 
 対話式で進めていきます。
 ```text
@@ -200,10 +198,10 @@ SSLCertificateChainFile /etc/letsencrypt/live/www.redzetm.net/chain.pem
 systemctl restart httpd
 ```
 
-この時、原因不明のエラーで再起動しなかった。ログにAH00526: Syntax error on line 5 of /etc/httpd/conf.d/ssl.confとあり、
-/etc/httpd/conf.d/ssl.confの5行目にシンタックスエラーだとのこと。
-調べたら Listen 443 の設定で確か、httpd.conf にあとでSSLもインストールするからListen 80 と
-Listen 443を設定していたのを思い出した。httpd.confの方のListen 443を削除し再度systemctl restart httpdしたら問題なく起動した。
+この時、原因不明のエラーで再起動しなかった。
+ログにAH00526: Syntax error on line 5 of /etc/httpd/conf.d/ssl.confとあり、/etc/httpd/conf.d/ssl.confの5行目にシンタックスエラーだとのこと。
+調べたら Listen 443 の設定で確か、httpd.conf にあとでSSLもインストールするからListen 80 と Listen 443を設定していたのを思い出した。
+httpd.confの方のListen 443を削除し再度systemctl restart httpdしたら問題なく起動した。
 
 ```bash
 systemctl status httpd
