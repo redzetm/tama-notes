@@ -27,6 +27,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 
 ## 研究メモ
 - [開発現場でのSELinuxの位置づけとdisable]({{ '/selinux.html' | relative_url }})
+- [Let's EncryptでSSLで暗号化する（Certbot + Apache）]({{ '/setup-lets-encrypt.html' | relative_url }})
 - [再現可能な自作OS UmuOS-0.1.4-base-stable（telnetd対応ベース安定版）]({{ '/umuos-0.1.4-base-stable.html' | relative_url }})
 - [ソフトウェア開発者またはシステム基盤担当でも最低限必要なTCP/IP知識]({{ '/tcpip.html' | relative_url }})
 
