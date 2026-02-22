@@ -30,6 +30,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [Let's EncryptでSSLで暗号化する（Certbot + Apache）]({{ '/setup-lets-encrypt.html' | relative_url }})
 - [今どきは必須のSSL/TLSの実装とカーネルSSL（KTLS）通信の基本]({{ '/ssl_tls.html' | relative_url }})
 - [再現可能な自作OS UmuOS-0.1.4-base-stable（telnetd対応ベース安定版）]({{ '/umuos-0.1.4-base-stable.html' | relative_url }})
+- [再現可能な自作OS UmuOS-0.1.7-base-stable（ネットワーク/ログ/認証の観測用・固定版ベース）]({{ '/umuos-0.1.7-base-stable.html' | relative_url }})
 - [ソフトウェア開発者またはシステム基盤担当でも最低限必要なTCP/IP知識]({{ '/tcpip.html' | relative_url }})
 
 ※ 随時追加予定
