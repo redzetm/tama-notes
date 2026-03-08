@@ -510,7 +510,9 @@ kernel は、この段階で大きく次の4つをやります。
 2) そのまま initramfs `/init` のログ（例：`cmdline parsed:`）が出始める
 	- ここまで来たら「段階 2 は突破した」と判断してよい（以降の原因は段階 3 以降へ寄る）。
 
-#### 段階 3: initramfs `/init`
+#### 段階 3: initramfs `/init`　＜最重要＞
+
+参考　実装検証済み（C）：[img/init.c](img/init.c)
 
 | 項目 | 内容 |
 |---|---|
@@ -521,7 +523,9 @@ kernel は、この段階で大きく次の4つをやります。
 | 観測点（成功判定） | initramfs ログに `cmdline parsed: root=UUID=...` と `matched: dev=/dev/vdX` が出る |
 | 失敗時の切り分け | `root=UUID` 欠落/誤り、disk 未接続、ext4 でない、UUID 不一致。 |
 
-#### 段階 4: initramfs `/init`（switch_root）
+#### 段階 4: initramfs `/init`（switch_root）　＜最重要＞
+
+参考　実装検証済み（C）：[img/init.c](img/init.c)
 
 | 項目 | 内容 |
 |---|---|
