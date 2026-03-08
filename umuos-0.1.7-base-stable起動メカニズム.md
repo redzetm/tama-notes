@@ -1,9 +1,9 @@
 ---
-title: "UmuOS-0.1.7-base-stable: 起動メカニズム（起動フローを段階別の表で追う）"
+title: "UmuOS-0.1.7-base-stable: 起動メカニズム徹底解説"
 date: 2026-03-08
 ---
 
-# UmuOS-0.1.7-base-stable: 起動メカニズム（起動フローを段階別の表で追う）
+# UmuOS-0.1.7-base-stable: 起動メカニズム徹底解説
 
 このノートは UmuOS-0.1.7-base-stable の起動メカニズムを、**層（bootloader/kernel/initramfs/rootfs/userspace）ごとに切り分けて観測できる**形でまとめる。
 
