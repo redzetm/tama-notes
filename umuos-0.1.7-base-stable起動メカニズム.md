@@ -454,7 +454,7 @@ kernel は、この段階で大きく次の4つをやります。
 	- これが段階 2 のゴール。
 	- UmuOS の場合、`pid=1` の `/init` が rootfs を UUID で確定し `switch_root` へ進む設計なので、段階 2 は段階 3 の“入口を開ける係”。
 
-### 表の各項目を「自分の言葉」に翻訳
+### 表の各項目の要点
 
 - 入力：`kernel config、cmdline`
 	- **kernel config**：kernel に何の機能・ドライバを入れてビルドしたか。
