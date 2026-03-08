@@ -82,6 +82,101 @@ GRUB も kernel も「出力先（console/serial）」を設定できますが�
 - ゲスト内の `/logs/boot.log`
 	- rcS が明示的に追記する“永続ログ”。ネット経由ログインかどうかに関係なく、rcS が動いていれば残る。
 
+#### 1.1.6 devpts（`/dev/pts`）と pts（pseudo-terminal）とは：telnet/ssh の“端末”の正体
+
+結論から言うと、`pts` は **telnet/ssh 等の「ネットワーク越しログイン」を“端末（tty）として成立させる仕組み”**です。
+シリアルの `ttyS0` と同じく「端末」ですが、**実体が違う**ため、ここを押さえると切り分けが一気に楽になります。
+
+##### まず用語
+
+- **PTY（Pseudo Terminal）**
+	- 「端末のように見えるペア」を作る仕組み。
+	- **master（親側）**と**slave（子側）**の2つがあり、
+		- master 側：サーバ（例：`telnetd`）が掴む
+		- slave 側：ログイン後の `login` / `sh` などが「自分の端末」として掴む
+		という分業になります。
+
+- **`pts`（`/dev/pts/<N>`）**
+	- PTY の **slave 側デバイス**が見える場所。
+	- 例：`/dev/pts/0` が割り当てられると、ログイン後のシェルで `tty` を打つと `pts/0` と出ることがあります。
+	- これは「今あなたが操作している端末はシリアル（`ttyS0`）ではなく、疑似端末（`pts`）です」という意味。
+
+- **`devpts`（ファイルシステム）**
+	- `/dev/pts` を提供する特殊なファイルシステム。
+	- `mount -t devpts devpts /dev/pts` のように mount されて初めて `/dev/pts/0` のようなデバイスが生えます。
+
+- **`ptmx`（`/dev/ptmx` / `/dev/pts/ptmx`）**
+	- PTY を「新しく1本払い出して」とカーネルに頼む入口。
+	- `telnetd` や `sshd` 等は、まずここを開いて master/slave のペアを作ります。
+	- よくある形：
+		- `/dev/ptmx`（devtmpfs が用意するキャラクタデバイス）
+		- `/dev/pts/ptmx`（devpts 側に現れる入口）
+		のどちらか/両方が見える構成。
+
+##### どういう時に pts が効いてくる？（UmuOS 文脈）
+
+- **telnet ログイン**
+	- `telnetd` は、接続が来るたびに「そのセッション専用の端末」を作る必要があります。
+	- その端末が `pts` です（`ttyS0` とは別物）。
+
+- **ssh ログイン**（もし今後 sshd を入れる場合も同様）
+	- ssh も「セッションの端末」を作るため PTY を使います。
+
+- **シリアルログイン（`ttyS0` の getty）**
+	- これは `pts` ではなく、物理（仮想）シリアル端末 `ttyS0` を使います。
+	- なので「シリアルはOKだが telnet だけ死ぬ」の典型原因が、devpts 周りの欠落になります。
+
+##### いちばん大事なイメージ（データの流れ）
+
+（telnet の例）
+
+- クライアント（あなた） ↔ ネットワーク ↔ `telnetd`（サーバ）
+- `telnetd` は PTY を払い出す
+	- master：`telnetd` が保持
+	- slave：`/dev/pts/0` のようなデバイス
+- `login` や `/bin/sh` は slave（`/dev/pts/0`）を自分の標準入出力にして動く
+
+このため、**`/dev/pts` が無い/壊れていると、telnetd が起動していてもログインが成立しません**。
+
+##### 何を見れば「pts が原因」と確定できる？（確認コマンド）
+
+ネットワークは生きている前提で、まずは “devpts が mount されているか” を物証で確認します。
+
+```sh
+# devpts が mount されているか
+mount | grep -E 'on /dev/pts |type devpts'
+
+# /dev/pts が実体として存在するか
+ls -ld /dev/pts
+ls -l /dev/pts | head
+
+# ptmx の入口があるか（環境により見え方が違う）
+ls -l /dev/ptmx 2>/dev/null || true
+ls -l /dev/pts/ptmx 2>/dev/null || true
+
+# 自分の端末が何か（telnet/ssh で入っていると pts になりがち）
+tty
+```
+
+##### 無い場合どう直す？（最低限の復旧方針）
+
+- **まず mount**（rcS や initramfs `/init` の責務）
+	- 代表例：`mount -t devpts devpts /dev/pts`
+	- 既に mount 済みなら「権限/所有者/オプション」問題の可能性もあります。
+
+- **`/dev` そのものが無い/貧弱**
+	- devtmpfs が mount されていない可能性（`/dev/ptmx` が出ない等）。
+	- その場合は devtmpfs の mount（例：`mount -t devtmpfs devtmpfs /dev`）の方が先です。
+
+##### UmuOS ではどこで整備する？（段階との対応）
+
+- initramfs の `/init`（段階 3）でも、観測の土台として `/dev/pts` を mount します。
+	- ここは「緊急時に telnet したい」よりも、初期化のテンプレとして入っている側面が強いです。
+
+- 永続 rootfs 側では `rcS`（段階 6）が devtmpfs/devpts を整備し、
+	- その上で `telnetd` を起動する流れになります。
+	- なので **telnet が死んでいる場合は段階 6（rcS）まで来ているか**と、**devpts が揃っているか**をセットで確認します。
+
 ## 2. 段階別観測表（起動フロー）
 
 ### 2.1 ブート全段の段階別観測表
@@ -917,6 +1012,51 @@ UmuOS-0.1.7-base-stable では `rcS` を “唯一の正” としてテンプ�
 - `NET_MODE=none` で起動していないか（その場合 `eth0` 自体が提供されない）
 - ホスト側 bridge/TAP が成立しているか
 - ゲスト側 `/etc/umu/network.conf` の `MODE=static` と `IP/GW` が揃っているか
+
+### 6.5 telnet ログインできない（`devpts`/`/dev/pts` が原因になりやすい）
+
+「起動はしている（`/logs/boot.log` は伸びる）」「IP疎通もできる」なのに telnet が入れない場合の切り分けです。
+
+補足：ここで `inetd` という語が出てきますが、方式の違いを知っていると混乱しません。
+
+- **rcS から `telnetd` を直起動（standalone）**
+	- rcS が `telnetd -p 23 -l /bin/login` のように起動し、`telnetd` 自体が常駐して LISTEN します。
+	- UmuOS は基本この前提（「初期化は rcS に寄せて観測しやすくする」方針）。
+
+- **`inetd` 方式（スーパーサーバ）**
+	- `inetd` が常駐して LISTEN し、接続が来た瞬間に `telnetd`（や `login`）を子プロセスとして起動します。
+	- この方式だと「`telnetd` が常駐していない」ように見えることがあります（接続中だけ出る）。
+
+1) まず telnetd が起動していて LISTEN しているか
+
+```sh
+ps w | grep -E 'telnetd|inetd' | grep -v grep || true
+ss -lntup 2>/dev/null | grep ':23\b' || netstat -lntup 2>/dev/null | grep ':23\b' || true
+```
+
+2) 次に `devpts` が揃っているか（これが無いとセッション端末が作れない）
+
+```sh
+mount | grep -E 'on /dev/pts |type devpts'
+ls -l /dev/ptmx 2>/dev/null || true
+ls -l /dev/pts/ptmx 2>/dev/null || true
+ls -ld /dev/pts
+```
+
+3) telnet で入れた“はず”の時、端末が `pts/<N>` になっているか
+
+```sh
+tty
+```
+
+見え方の典型：
+
+- `telnetd` がいるのにログインが成立しない／すぐ落ちる
+	- `devpts` 未mount、`/dev/ptmx` 不在、`/dev`（devtmpfs）未整備などが候補。
+
+- `telnetd` 自体がいない
+	- 段階 6（`rcS`）の後半まで到達していない、または rcS 内で起動に失敗している可能性。
+	- まず `/logs/boot.log` を確認して rcS の進捗を確定します。
 
 ## 7. 参考（固定値の一覧）
 
