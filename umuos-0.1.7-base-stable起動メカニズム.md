@@ -431,6 +431,85 @@ initrd /boot/initrd.img-6.18.1
 | 観測点（成功判定） | `console=ttyS0,115200n8` でログが見える |
 | 失敗時の切り分け | `/dev` が出ない場合は `DEVTMPFS` 等のカーネル設定を疑う。 |
 
+この段階（kernel）は「**ISO/GRUB が渡した kernel + initrd を、実際に“OS として動き始める”状態へ持っていく**」層です。
+段階 1（GRUB）と混同しやすいポイントは、**ここから先のログは GRUB ではなく kernel が出している**という点です。
+
+### 段階 2（kernel）の徹底解説：何が起きているか
+
+kernel は、この段階で大きく次の4つをやります。
+
+1) **初期化（CPU/メモリ/割り込み/タイマ等）して自分の足場を作る**
+	- ここは“OS カーネルとしての起動”そのもの。
+	- この時点でのログが見えるかどうかは、ほぼ `console=` の成否で決まる（=観測点）。
+
+2) **デバイスを使えるようにする（virtio-blk / virtio-net 等）**
+	- UmuOS の「次段（initramfs `/init`）が `disk.img` を探せる」ためには、kernel がブロックデバイスを認識して `/dev/vda` 等を作れる必要がある。
+	- ここで virtio-blk が出ないと、段階 3 の `/init` は“探す対象（候補デバイス）”が無くて詰まりやすい。
+
+3) **initramfs（GRUB の `initrd ...` で渡されたもの）を展開し、暫定 rootfs にする**
+	- 重要：`initrd` は GRUB のコマンド名で、実体は initramfs（cpioアーカイブ）であることが多い。
+	- kernel はそれを RAM 上に取り込み、そこを一時的な `/` として扱う。
+
+4) **initramfs の `/init` を `pid=1` として起動する**
+	- これが段階 2 のゴール。
+	- UmuOS の場合、`pid=1` の `/init` が rootfs を UUID で確定し `switch_root` へ進む設計なので、段階 2 は段階 3 の“入口を開ける係”。
+
+### 表の各項目を「自分の言葉」に翻訳
+
+- 入力：`kernel config、cmdline`
+	- **kernel config**：kernel に何の機能・ドライバを入れてビルドしたか。
+		- UmuOS 文脈で重要なのは、少なくとも次が“起動を進めるのに必要になりがち”ということ。
+			- virtio 系ドライバ（virtio-blk/virtio-net）
+			- ext4
+			- devtmpfs（`/dev` を自動生成する仕組み）
+	- **cmdline**：GRUB が `linux ...` 行で渡した起動引数。
+		- kernel 自身が読むもの（`console=`/`loglevel=`/`panic=` など）と、ユーザーランドが読むもの（`root=UUID=...`）が混在する。
+		- ここが段階 1 の固定点で、段階 2 の挙動（ログの見え方含む）をほぼ決める。
+
+- 主要処理：`デバイス初期化（virtio 等）、initrd の /init を pid=1 として実行`
+	- 「virtio 等」は、UmuOS の `disk.img` が **virtio-blk** として見える前提（典型：`/dev/vda`）を含む。
+	- 「`/init` を `pid=1`」は、initramfs の中にある `/init` が“最初のユーザーランド”として起動する、という意味。
+		- ここが成立すると、段階 3 のログ（`cmdline parsed:` / `scan:` / `matched:` 等）が出始める。
+
+- 出力（次段へ）：`initramfs が動作開始`
+	- 言い換えると「kernel が `/init` を起動し、段階 3 の責務（UUIDでrootfs確定）へバトンが渡った」。
+
+- 観測点（成功判定）：`console=ttyS0,115200n8` でログが見える
+	- これは「kernel が生きている」ことの最短の証拠。
+	- さらに精度を上げるなら次が見えると“より確定”になる。
+		- initramfs `/init` のログが出始める（=段階 2 のゴールに到達）
+		- `/proc/cmdline` が期待通り（段階 3/5 以降で確認できる）
+
+### 「ログが見えない」の典型原因（段階 1 と段階 2 の境界で混乱しやすい）
+
+- GRUB は動いているが kernel のログが見えない
+	- `console=ttyS0,115200n8` が無い/速度が違う/出力先が違う可能性。
+	- あるいは QEMU の `-serial ...` の接続が期待と違う可能性。
+	- 切り分けの考え方：
+		- GRUB メニューが見えるなら段階 1 は概ねOK。
+		- そこから先が無音なら「段階 2 のログ経路（kernelのconsole）」をまず疑う。
+
+### 失敗時の切り分け：`/dev` が出ないとは何が困るのか
+
+段階 3（initramfs `/init`）は、`/dev` 配下のブロックデバイス（例：`/dev/vda`）を走査して rootfs を探します。
+なので kernel が `/dev` を用意できないと、段階 3 が成立しません。
+
+- 典型症状
+	- initramfs に入ったが、`/dev/vda` が見えない / そもそも `/dev` が空に近い。
+	- その結果、`scan:` が空振りし続ける／一致が出ない。
+
+- まず疑うポイント
+	- kernel の **devtmpfs** 周り（`CONFIG_DEVTMPFS` と `CONFIG_DEVTMPFS_MOUNT`）
+		- これが無い/自動マウントされないと、udev を使わない最小 initramfs では `/dev` が増えずに詰まりやすい。
+	- initramfs 側が `/dev` を正しく mount していない（段階 3 の責務）可能性もある。
+		- ただし「段階 2 の表」では、まず kernel 側要因として `DEVTMPFS` を挙げている。
+
+### この段階の“正解の見え方”（最短の成功パターン）
+
+1) `console=ttyS0,115200n8` 経由で kernel のログが流れ始める
+2) そのまま initramfs `/init` のログ（例：`cmdline parsed:`）が出始める
+	- ここまで来たら「段階 2 は突破した」と判断してよい（以降の原因は段階 3 以降へ寄る）。
+
 #### 段階 3: initramfs `/init`
 
 | 項目 | 内容 |
