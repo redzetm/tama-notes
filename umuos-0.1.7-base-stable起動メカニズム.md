@@ -1146,3 +1146,83 @@ UmuOS の設計（`/init` が ext4 superblock を読む）では、`root=UUID=` 
 	- 多くは「GRUB の `root=UUID=...` と disk.img の filesystem UUID がズレている」
 	- あるいは disk.img が想定と別物（別ファイル/作り直し/コピー違い）
 
+### 7.2 `switch_root` 前（initramfs）で使う BusyBox コマンド一覧
+
+目的：`switch_root` 前は「initramfs 側の BusyBox（または最小ユーザーランド）」が頼りです。
+ここで使うコマンドを台帳化しておくと、のちに **自作コマンドへ差し替える対象**を明確にできます。
+
+注意：BusyBox の applet は **ビルド設定（`.config`）次第**で増減します。
+この節は「UmuOS が期待している最低限」と「現物から一覧を採取する方法」をセットで書きます。
+
+#### 現物の一覧を採取する（initramfs 側）
+
+initramfs にシェルがある前提なら、次で「入っている BusyBox」を確定できます。
+
+```sh
+# BusyBox 本体の場所は環境差があるので、まず探す
+command -v busybox || ls -l /bin/busybox /sbin/busybox 2>/dev/null || true
+
+# applet 一覧（短い）
+busybox --list 2>/dev/null || true
+
+# applet 一覧（フルパス形式：symlink で使っている場合に便利）
+busybox --list-full 2>/dev/null || true
+```
+
+#### このノート（initramfs 段階）で重要度が高いコマンド
+
+`/init` 自体は C 実装ですが、initramfs での障害切り分けや“保険の手動操作”のために、次があると強いです。
+
+- **プロセス/ログ観測**：`dmesg`, `cat`, `echo`, `printf`, `sleep`
+- **ファイル操作**：`ls`, `mkdir`, `cp`, `mv`, `rm`, `chmod`, `ln`, `stat`
+- **文字列処理**：`grep`, `sed`, `awk`（最低でも `grep`）
+- **マウント関連**：`mount`, `umount`
+- **デバイス最低限**：`mknod`（`/dev/console` などで詰まった時の復旧用）
+- **境界コマンド**：`switch_root`（または `/bin/switch_root` が BusyBox 由来でも可）
+
+ここは「自作 `/init` の責務（探索→mount→`switch_root`）」が中心なので、コマンド数は少なめで良いです。
+
+### 7.3 `switch_root` 後（rootfs）で使う BusyBox コマンド一覧
+
+目的：`switch_root` 後は rootfs 側の BusyBox `init` と `rcS` が主役で、
+**“常用コマンド＝将来差し替え対象”**が一気に増えます。
+ここを一覧化しておくと、「どれを自作で置き換えるか／置き換えた結果どこが壊れるか」が追えます。
+
+#### 現物の一覧を採取する（rootfs 側）
+
+```sh
+# BusyBox の実体と symlink の張られ方を確認
+command -v busybox
+busybox 2>&1 | head -n 2 || true
+
+# applet 一覧（現物）
+busybox --list
+busybox --list-full 2>/dev/null || true
+
+# UmuOS は PATH 先頭が /umu_bin なので、ここに何が生えているかを見る
+echo "$PATH"
+ls -l /umu_bin 2>/dev/null || true
+```
+
+#### このノート（rootfs 段階）で重要度が高いコマンド（差し替え対象になりやすい）
+
+- **init/起動制御**：`init`, `getty`, `login`, `sh`
+- **ログ**：`syslogd`, `klogd`（採用している場合）
+- **プロセス/状態確認**：`ps`, `top`, `free`, `uptime`, `kill`
+- **ファイルシステム**：`mount`, `umount`, `df`, `du`, `sync`
+- **ネットワーク（rcS が触る領域）**：
+	- 低レベル：`ip`（BusyBox の `ip` が有効なら）, もしくは `ifconfig`/`route`
+	- 名前解決：`cat`/`echo`（`/etc/resolv.conf` 書き換え）
+	- 疎通：`ping`
+- **遠隔ログイン系**：`telnetd`（standalone 想定）
+- **時刻**：`date`（+ `ntpd` 等を使うならそれ）
+
+#### 差し替え（自作コマンド化）するときの実務メモ
+
+- BusyBox は「1バイナリ + symlink」で applet を提供することが多いので、差し替えは
+	- `PATH` の前に自作実装を置く（例：`/umu_bin` の設計方針に合わせる）
+	- 既存 symlink を自作バイナリへ差し替える
+	- `rcS` / `inittab` が呼んでいる名前を自作名へ変更する
+	のいずれかになります。
+- 置き換えは **1コマンドずつ**やるのが安全です（`mount` や `sh` のような基盤を早期に替えると、切り分けが難しくなります）。
+
