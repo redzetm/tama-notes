@@ -3,7 +3,7 @@ title: "徹底解説！自作エディタuim（ゆーあいえむ）0.0.2徹底�
 date: 2026-03-09
 ---
 
-# uim 0.0.2 徹底解説（UmuOS Interactive Minimal editor）
+# uim 0.0.2 徹底解説（UmuOS 対話型ミニマルエディタ）
 
 対象: UmuOS-0.1.7-base-stable 想定
 
