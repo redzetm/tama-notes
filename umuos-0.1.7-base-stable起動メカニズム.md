@@ -13,6 +13,13 @@ date: 2026-03-08
 
 - GRUB → Linux kernel → initramfs（/init）→ ext4(rootfs) を UUID で特定 → `switch_root` → BusyBox `init` → `inittab` → `rcS`
 
+適用範囲：このノートは **UmuOS-0.1.7-base-stable の固定構成**を主な例として書いていますが、0.1.x 系の多く（例：0.1.4-base-stable）でも、少なくとも次は同じ発想で追えます。
+
+- 共通：GRUB → kernel → initramfs `/init` → `switch_root` → BusyBox `init` → `inittab` → `rcS`
+- 差分が出やすい：`rcS` の中身（起動する常駐、ログの書き方、ネット設定の細部）、固定値（IP/UUID/ポート等）
+
+読み方のコツ：まずは「段階（どの層が壊れているか）」を確定し、次に “その版の固定値一覧” へ戻って値のズレを疑う、という順にすると迷いにくいです。
+
 ## 1. 起動の全体像（レイヤ分離）
 
 UmuOS は研究/観測用OSで、起動失敗を「どの層の問題か」で切り分けられることを最優先にしている。
@@ -182,6 +189,18 @@ tty
 ### 2.1 ブート全段の段階別観測表
 
 横長テーブルは画面幅によって横スクロールになりやすいので、ここでは **段階ごとに縦型**で並べる。
+
+### 2.2 重要な設計判断（表の読み方）
+
+起動を表で追うときのポイントは次の3つ。
+
+1) **境界（どこで責務が切り替わるか）を先に覚える**
+	- `switch_root` が境界（initramfs → 永続 rootfs）
+	- `rcS` が境界（最低限のOS成立 → 観測/ネット/ログの成立）
+2) **観測点は“層を確定する”ために置く**
+	- 例：`/logs/boot.log` に追記があるなら「rootfs の rcS が動いている」と言える
+3) **失敗時は、表の一段前に戻って“入力が揃っているか”を見る**
+	- 例：`root=UUID=...` が `cmdline` に無いなら initramfs の責務ではなく GRUB 側の責務
 
 #### 段階 0: ホスト（QEMU）
 
@@ -894,18 +913,6 @@ ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || true
 	- rcS 自体は最後まで走ったが、以降に **常駐がクラッシュループ**して負荷が上がっている、または **pid=1 が想定の BusyBox `init` ではない/落ちている**可能性があります。
 	- まず `cat /proc/1/comm` で pid=1 を確認し、`ps` で同じプロセスが短時間で増減していないか（respawn ループ）を確認します。
 
-### 2.2 重要な設計判断（表の読み方）
-
-起動を表で追うときのポイントは次の3つ。
-
-1) **境界（どこで責務が切り替わるか）を先に覚える**
-	- `switch_root` が境界（initramfs → 永続 rootfs）
-	- `rcS` が境界（最低限のOS成立 → 観測/ネット/ログの成立）
-2) **観測点は“層を確定する”ために置く**
-	- 例：`/logs/boot.log` に追記があるなら「rootfs の rcS が動いている」と言える
-3) **失敗時は、表の一段前に戻って“入力が揃っているか”を見る**
-	- 例：`root=UUID=...` が `cmdline` に無いなら initramfs の責務ではなく GRUB 側の責務
-
 ## 3. initramfs `/init` のメカニズム（UUIDでrootfsを確定）
 
 UmuOS-0.1.7-base-stable の initramfs `/init` は C 実装で、次の方針を持つ。
@@ -1070,4 +1077,72 @@ UmuOS-0.1.7-base-stable で固定している代表値。
 - DNS: `8.8.8.8`, `8.8.4.4`
 - TZ: `JST-9`
 - NTP: `time.google.com`
+
+### 7.1 rootfs UUID は何か（どこで作られ、どこで使われるか）
+
+このノートで言う `rootfs UUID` は、**ext4 ファイルシステムの UUID（filesystem UUID）**です。
+UmuOS の起動では、これが「起動条件の固定点」として強く効きます。
+
+#### どこで作られる？（生成/固定）
+
+- ext4 を作るとき（`mkfs.ext4`）に filesystem UUID が **自動生成**されます。
+- 「再現可能」にするなら、生成時に **UUID を指定して固定**します。
+
+代表例：
+
+```sh
+# ext4 作成時に filesystem UUID を固定する
+mkfs.ext4 -U d2c0b3c3-0b5e-4d24-8c91-09b3a4fb0c15 /dev/vda
+```
+
+既存の ext4 に後から設定もできますが、UUID 変更は “起動条件” を変える行為なので注意です。
+
+```sh
+# 既存 ext4 の filesystem UUID を変更する（再現性の観点では慎重に）
+tune2fs -U d2c0b3c3-0b5e-4d24-8c91-09b3a4fb0c15 /dev/vda
+```
+
+#### GRUB / cmdline / initramfs `/init` との関係（UmuOS での一本の鎖）
+
+UmuOS は「勝手に探す」のではなく、**GRUB が渡した UUID を唯一の入力として rootfs を確定する**設計です。
+
+1) **GRUB（段階 1）**
+	- `linux ... root=UUID=<固定UUID> ...` を kernel cmdline として渡す
+	- ここで UUID が間違うと、以降の層がいくら正しくても rootfs が確定できません
+
+2) **kernel（段階 2）**
+	- cmdline を `/proc/cmdline` として見える形にして、次段へ渡す
+	- 注意：ここでの `root=UUID=...` は「カーネルが勝手に mount する」用途ではなく、UmuOS では **initramfs が読むための固定入力**として使っています
+
+3) **initramfs `/init`（段階 3）**
+	- `/proc/cmdline` の `root=UUID=...` をパースする
+	- `/dev/*` のブロックデバイス候補を走査し、**ext4 superblock（offset 1024）から UUID を読んで一致判定**する
+	- 一致したデバイスを `/newroot` に mount し、`switch_root` で rootfs 側へ移る
+
+このため UUID は、**GRUB の設定・disk.img（ext4）・initramfs 実装の三者を結ぶ単一の整合ポイント**になります。
+
+#### PARTUUID との違い（混同しやすい）
+
+- `UUID=`（ここで扱っているもの）
+	- **ファイルシステム UUID**（ext4 superblock の UUID）
+- `PARTUUID=`
+	- **パーティション UUID**（GPT/MBR 由来）
+
+UmuOS の設計（`/init` が ext4 superblock を読む）では、`root=UUID=` は filesystem UUID を想定しています。
+
+#### どう確認する？（観測ポイント）
+
+- GRUB が意図した UUID を渡しているか
+	- `cat /proc/cmdline | sed -e 's/ /\n/g' | grep '^root='`
+
+- 実際の ext4 側の UUID は何か（rootfs 側で確認できる場合）
+	- `blkid`
+	- `lsblk -f`
+	- `tune2fs -l /dev/vda | grep -i 'Filesystem UUID'`（環境により `tune2fs` が無い場合あり）
+
+#### UUID 不一致の典型的な見え方
+
+- 段階 3 で `scan:` が出続けて `matched:` が一度も出ない
+	- 多くは「GRUB の `root=UUID=...` と disk.img の filesystem UUID がズレている」
+	- あるいは disk.img が想定と別物（別ファイル/作り直し/コピー違い）
 
