@@ -285,8 +285,18 @@ initrd /boot/initrd.img-6.18.1
 - `root=UUID=d2c0b3c3-0b5e-4d24-8c91-09b3a4fb0c15`
 	- UmuOS の設計上の最重要パラメータ。
 	- 意味：永続 rootfs（`disk.img` の ext4）を「UUID で特定する」。
-	- どこで使われるか：段階 3 の initramfs `/init` が `/proc/cmdline` を読んでこの UUID をパースし、`/dev/vda` 等の候補デバイスの ext4 superblock UUID と照合して rootfs を確定する。
-	- 壊れるとどう見えるか：initramfs `/init` が rootfs を見つけられずに止まる（「UUID 不一致」「root= が無い」系のログが出る）。
+	- どこで使われるか：段階 3 の initramfs `/init` が `/proc/cmdline` を読んでこの UUID をパースし、`/dev/vda` 等の候補ブロックデバイスと照合して rootfs を確定する。
+	- UUID はどこで検証される？（ext4 superblock）
+		- 照合に使う UUID は「ファイル名」でも「パーティション番号」でもなく、**ext4 の superblock に埋め込まれている UUID**。
+		- ext4 superblock はブロックデバイス先頭から **offset 1024 bytes** 付近にあり、UmuOS の `/init` は候補デバイスを開いてそこを読んで UUID を取り出す（= `/dev/disk/by-uuid` 等に依存しない）。
+		- ここが一致したデバイスだけを「rootfs」として `/newroot` に mount する。
+	- 間違えたときのログの見え方（典型）
+		- `root=UUID=...` が無い/パースできない：initramfs 側で「root= が無い」「UUID 形式が不正」系のログが出て、rootfs 確定に進めない。
+		- UUID が違う：候補デバイスをスキャンはするが一致が出ず、`scan: /dev/vda` の反復や「matched が出ない」状態で止まる/リトライする。
+		- 候補デバイスは見えるが ext4 ではない：superblock の magic 不一致などで「ext4 として読めない」方向のログになりやすい。
+	- どう確認する？（観測点）
+		- ゲスト起動後に確認できるなら：`cat /proc/cmdline` の UUID と `blkid /dev/vda`（または `dumpe2fs -h /dev/vda`）の UUID が一致するかを見る。
+		- 起動に失敗しているときは：initramfs `/init` のスキャンログが「どのデバイスを候補に見たか」「一致が出たか」を教えてくれる（matched が出れば rootfs 確定済み）。
 
 - `rw`
 	- ルートファイルシステムを read-write でマウントする意図。
@@ -314,9 +324,41 @@ initrd /boot/initrd.img-6.18.1
 ### 2.1.4 `initrd ...` 行（initramfs の指定）
 
 - `initrd /boot/initrd.img-6.18.1`
-	- ISO 内の initramfs を指定する。
-	- どこに効くか：次段（段階 2→3）で kernel が initramfs を展開し、`/init` を `pid=1` として起動する。
-	- 壊れるとどう見えるか：initramfs がロードされないと `/init` が起動できず、早期パニック（`No init found` 相当）に寄りやすい。
+	- ISO 内の **initramfs（初期ルートファイルシステム）**を指定する。
+	- まず前提：initramfs とは何か？
+		- kernel が起動してすぐ使える「最小のユーザーランド」を、1ファイル（アーカイブ）に固めたもの。
+		- 典型的には **cpio アーカイブ**で、中身は `/init`、最低限の `/bin` `/sbin` `/proc` `/sys` `/dev` など。
+		- 圧縮されていることも多い（gzip/xz/zstd 等）。圧縮されていても kernel 側で展開できる構成が一般的。
+		- 用語の注意：
+			- `initrd` は **GRUB のコマンド名**（歴史的な呼び方）で、ここで指定している実体は initramfs のことが多い。
+			- このノートでは、以降「実体」を指すときは基本的に initramfs と呼ぶ。
+	- この 1 行が“どこに効くか”（段階 2→3 の成立条件）
+		- GRUB の `initrd ...` は「initramfs のファイルをメモリへロードし、kernel に渡す」宣言。
+		- その後 kernel は、受け取った initramfs を **RAM 上に展開（あるいは展開可能な形で取り込む）**して、そこを一時的な root（`/`）として扱う。
+		- そして initramfs 内の **`/init` を `pid=1` として起動**する。
+			- ここで起動する `/init` が、永続 rootfs（UmuOS では `disk.img`）を見つけて `switch_root` する“橋渡し”を担当する。
+			- 補足：`pid=1` は OS 起動の中心点なので、ここが成立しないと後段（rootfs の BusyBox `init` や `rcS`）へ進めない。
+			- さらに補足：kernel cmdline の `init=...` を指定すると、`/init` 以外を `pid=1` にできる（デバッグ用の逃げ道）。
+	- UmuOS で「initrd が重要」な理由（このノートの主題と直結）
+		- UmuOS の起動は「initramfs の `/init` が `root=UUID=...` を読んで ext4(rootfs) を確定する」設計なので、
+			**initrd が無い＝rootfs へ到達する経路そのものが消える**。
+		- つまり `initrd ...` は「段階 3（initramfs `/init`）が存在する」ことの前提で、atable の“段差”そのもの。
+	- 壊れるとどう見えるか（典型パターン）
+		- initrd のパスが間違い/ファイルが無い：GRUB（段階 1）で initrd ロードに失敗し、kernel 起動以前で止まる/エラーになる。
+		- initrd が渡っていない・形式が壊れている：kernel が initramfs を展開できず、`/init` を起動できない。
+			- 結果として早期パニック（`No init found` / `Kernel panic - not syncing` 相当）に寄りやすい。
+		- initrd はロードできたが `/init` が期待通り動かない：段階 3 で止まる（`root=UUID=...` が読めない/`/dev` が出ない/uuid一致が見つからない等）。
+	- 切り分けの観測点（最短で効く順）
+		- GRUB 段階：`initrd /boot/initrd.img-6.18.1` のパスが ISO 内で本当に正しいか（単純だが最重要）。
+		- kernel 段階：シリアルに early log が出ているなら「kernel は動いている」。そこで `/init` 起動失敗のメッセージが出るかを見る。
+		- initramfs 段階：initramfs `/init` のログ（例：`cmdline parsed: root=UUID=...`）が出れば、initrd のロード〜`/init` 起動までは成功している。
+		- 可能ならホスト側での確認：ISO をマウントして `boot/initrd.img-6.18.1` の実体を見て、`file` 等で形式（cpio/圧縮方式）を当てると原因が早い。
+			- 例（ホストで ISO を見られる場合）：
+				- `file boot/initrd.img-6.18.1`（圧縮方式の推定）
+				- `lsinitramfs boot/initrd.img-6.18.1 | head`（入っているパス一覧。無ければ次の方法）
+				- `zcat boot/initrd.img-6.18.1 | cpio -t | head`（gzip の場合の一覧）
+				- `xzcat ... | cpio -t | head` / `zstdcat ... | cpio -t | head`（xz/zstd の場合）
+				- 最低限、`/init` が含まれていることが分かれば「段階 3 の入口はある」と言える。
 
 #### 段階 2: kernel
 
