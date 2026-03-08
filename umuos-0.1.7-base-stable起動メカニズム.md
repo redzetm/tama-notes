@@ -24,12 +24,12 @@ UmuOS は研究/観測用OSで、起動失敗を「どの層の問題か」で�
 - **永続 rootfs 層（disk.img）**: `/sbin/init`、`/etc/inittab`、`/etc/init.d/rcS`
 - **userspace 初期化層（rcS）**: mount/ログ/NW/NTP/telnetd/FTP
 
-## 1.1 用語と観測経路の定義（シリアル/コンソール/tty/telnet）
+### 1.1 用語と観測経路の定義（シリアル/コンソール/tty/telnet）
 
 「徹底解説」として重要なので、UmuOS の起動観測で混乱しやすい用語を先に定義します。
 ポイントは **“どの層が、どの経路に文字を出しているか”** を混同しないことです。
 
-### 1.1.1 console と serial の違い（超要約）
+#### 1.1.1 console と serial の違い（超要約）
 
 - **serial（シリアル）**：仮想的な“シリアルポート”経由の入出力。
 	- ゲスト側では典型的に `ttyS0`, `ttyS1` として見える。
@@ -42,7 +42,7 @@ UmuOS は研究/観測用OSで、起動失敗を「どの層の問題か」で�
 GRUB も kernel も「出力先（console/serial）」を設定できますが、
 **GRUB の設定**と**kernel の `console=...`**は別物なので、段階を跨いで混同しないのがコツです。
 
-### 1.1.2 `ttyS0` / `ttyS1` / `tty0` とは
+#### 1.1.2 `ttyS0` / `ttyS1` / `tty0` とは
 
 - `ttyS0`, `ttyS1`
 	- Linux が提供する“シリアル端末”デバイス。
@@ -53,7 +53,7 @@ GRUB も kernel も「出力先（console/serial）」を設定できますが�
 	- 画面側の“現在アクティブな仮想コンソール”を表す。
 	- `console=tty0` を入れると、kernel ログを画面側にも出せる（シリアルと併用も可）。
 
-### 1.1.3 `/dev/console` とは（なぜここに出すのか）
+#### 1.1.3 `/dev/console` とは（なぜここに出すのか）
 
 - `/dev/console` は「その時点で kernel が“コンソール”として選んでいる出力先」に繋がる特別なデバイス。
 	- どこに繋がるかは `console=...` の指定順などに依存する。
@@ -62,7 +62,7 @@ GRUB も kernel も「出力先（console/serial）」を設定できますが�
 		- **“rcS まで到達した”という段階判定ができる**
 		ため。
 
-### 1.1.4 telnet は「コンソール」ではない（ポートとログが分かれる理由）
+#### 1.1.4 telnet は「コンソール」ではない（ポートとログが分かれる理由）
 
 - telnet は **ネットワーク越しのリモートログイン**で、入出力は `ttyS0` ではなく「telnet のセッション（擬似端末）」に繋がる。
 	- そのため、`host_qemu.console_*.log` のような“シリアル/画面のログ採取”とは別系統になりやすい。
@@ -73,7 +73,7 @@ GRUB も kernel も「出力先（console/serial）」を設定できますが�
 		**ホストの任意ポート**へ転送される構成がよくある（どのポートかは起動オプション次第）。
 	- UmuOS の実際の待受ポートは、起動後に `netstat -tlnp`（環境により `ss -tlnp`）等で観測して確定するのが確実。
 
-### 1.1.5 観測経路の“地図”（どのログが何を拾うか）
+#### 1.1.5 観測経路の“地図”（どのログが何を拾うか）
 
 - ホストで採取する `host_qemu.console_*.log`
 	- 基本的に「ホストが接続している QEMU コンソール（多くはシリアル）」に流れた文字を保存する。
@@ -454,7 +454,7 @@ kernel は、この段階で大きく次の4つをやります。
 	- これが段階 2 のゴール。
 	- UmuOS の場合、`pid=1` の `/init` が rootfs を UUID で確定し `switch_root` へ進む設計なので、段階 2 は段階 3 の“入口を開ける係”。
 
-### 表の各項目の要点
+### 表の各項目の要点（段階 2）
 
 - 入力：`kernel config、cmdline`
 	- **kernel config**：kernel に何の機能・ドライバを入れてビルドしたか。
@@ -523,6 +523,56 @@ kernel は、この段階で大きく次の4つをやります。
 | 観測点（成功判定） | initramfs ログに `cmdline parsed: root=UUID=...` と `matched: dev=/dev/vdX` が出る |
 | 失敗時の切り分け | `root=UUID` 欠落/誤り、disk 未接続、ext4 でない、UUID 不一致。 |
 
+### 段階 3（initramfs `/init`）の徹底解説：何が起きているか
+
+段階 3 は「**永続 rootfs（disk.img）を見つけて mount できる状態を作る**」段階です。
+段階 2（kernel）が `/init` を `pid=1` として起動した直後から、この段階が始まります。
+
+この段階で `/init` がやっていることは、ざっくり次の4つです。
+
+1) **観測の土台を作る**（`/proc`/`/sys`/`/dev`/`/dev/pts` を mount）
+	- `/proc/cmdline` を読むには `/proc` が必要。
+	- `/dev/vda` 等のブロックデバイスを列挙するには `/dev` が必要。
+	- UmuOS の `/init` は「udev などでデバイス名を作ってもらう」方針ではないため、**ここで `/dev` を mount できないと後続が全部詰まる**。
+
+2) **起動引数から root UUID を取り出す**（`/proc/cmdline` → `root=UUID=...` をパース）
+	- ここで UUID を取れないと「何を探せば良いか」が決まらないので致命的。
+	- 成功すると `cmdline parsed: root=UUID=...` が出て、「入力が段階 1/2 から正しく届いている」ことの証明になります。
+
+3) **候補デバイスを走査して、ext4 UUID が一致するものを探す**（`/dev/vda` など）
+	- 起動直後は virtio-blk が遅れて出てくることがあるため、見つかるまでリトライします。
+	- 走査中は `scan: /dev/vda` のようなログが繰り返し出ます。
+	- ext4 かどうかの判定は、ブロックデバイスから **ext4 superblock（offset 1024）**を読んで `magic` と `uuid` を見ることで行います。
+
+4) **一致したデバイスを `/newroot` に mount する**（`mount(dev, /newroot, ext4, rw)`）
+	- ここが段階 3 のゴール。
+	- 成功すると `matched:` の後に `mount root ok (rw): ...` が出て、「永続 rootfs はもう掴めた」と判断できます。
+	- この時点ではまだルート（`/`）は initramfs のままです（次の段階 4 で切り替える）。
+
+### 表の各項目の要点（段階 3）
+
+- 入力：`/proc/cmdline` の `root=UUID=...`、`/dev/*` ブロックデバイス
+	- `root=UUID=...` は「探すべき rootfs の唯一の識別子」。
+	- `/dev/*` は「探す対象そのもの」。virtio-blk が出ないと対象が存在しません。
+
+- 観測点（成功判定）：`cmdline parsed:` と `matched:`
+	- `cmdline parsed:` が出た → `/proc` が mount できていて、cmdline の入力もOK。
+	- `matched:` が出た → 走査が成功し、rootfs デバイスが確定。
+	- `mount root ok (rw):` が出た → mount まで完了（段階 4 の前提が揃った）。
+
+### 典型的な失敗パターンと見え方（段階 3）
+
+- `root=UUID= not found` / `invalid UUID string`
+	- 原因は段階 1（GRUB の linux 行）で cmdline が崩れている可能性が高い。
+
+- `scan:` が出続けて `matched:` が一度も出ない
+	- UUID が違う、disk.img が別物、ext4 ではない、または「そもそも対象デバイスが出ていない」のどれか。
+	- `/dev/vda` 自体がログに出ない場合は、段階 2（virtio-blk）側の問題に寄ります。
+
+- `mount root failed`
+	- 一致はしたが mount に失敗。ext4 ドライバ未搭載、破損、読み取り専用要因などが候補。
+	- ただし UmuOS では、この段階のログがそのまま一次資料になります（まずログから errno を読む）。
+
 #### 段階 4: initramfs `/init`（switch_root）　＜最重要＞
 
 参考　実装検証済み（C言語）：[init.md](init.md)
@@ -536,6 +586,67 @@ kernel は、この段階で大きく次の4つをやります。
 | 観測点（成功判定） | initramfs ログが `switching root` で終わり、以降は rootfs 側へ |
 | 失敗時の切り分け | `switch_root` が無い（BusyBox applet未有効）／`/newroot/sbin/init` 不在を疑う。 |
 
+### 段階 4（switch_root）の徹底解説：何が起きているか
+
+段階 4 は「**今まで initramfs だった `/` を、永続 rootfs（`/newroot`）へ切り替える**」段階です。
+段階 3 が「rootfs を見つけて `/newroot` に mount する」だったのに対して、段階 4 は「**ルートそのものを入れ替える**」のが仕事です。
+
+UmuOS の `/init` は次の 1 行（実質）でこれを行います。
+
+- `exec /bin/switch_root /newroot /sbin/init`
+	- `exec` は「今の `/init` プロセス（pid=1）を、`switch_root` に置き換える」動作。
+	- 置き換えに成功すると `/init` は戻ってこない（＝成功時は以降のログが出ない）のが正常です。
+
+### `switch_root` は何をしているのか（最低限の理解）
+
+- `/newroot` を新しい `/` として扱うようにして、引数で指定した init（ここでは `/sbin/init`）を起動します。
+- 目的は「起動の主役を initramfs から disk.img へ移す」こと。
+- これが成功すると、次に見えるログやプロンプトは **rootfs 側（BusyBox `init` → `inittab` → `rcS`）**のものになります。
+
+### 表の各項目の要点（段階 4）
+
+- 入力：`/newroot` に mount 済み
+	- 段階 3 で mount が成功していないと、段階 4 は成立しません。
+	- 「`/newroot` はあるが中身が空/期待と違う」場合は、段階 3 のマウント対象を疑います。
+
+- 主要処理：`exec /bin/switch_root /newroot /sbin/init`
+	- `switch_root` は initramfs 側に存在する必要があります（BusyBox applet のことが多い）。
+	- `/sbin/init` は新しい root（`/newroot`）側に存在する必要があります。
+
+- 観測点（成功判定）：`switching root` で終わり、以降は rootfs 側へ
+	- `switching root` が出た直後に、BusyBox `init` の動き（`inittab` / `rcS`）へ移れば成功です。
+	- 逆に `execv switch_root failed` が出たら段階 4 で落ちています（段階 5 以降へは行っていない）。
+
+### 典型的な失敗パターンと見え方（段階 4）
+
+- `switch_root` が無い/実行できない
+	- 症状：`execv switch_root failed`（`ENOENT` や `EACCES` など）が出て止まる。
+	- 原因：initramfs に `/bin/switch_root` が無い、または実行権限が無い。
+
+- `/newroot/sbin/init` が無い
+	- 症状：`switch_root` は存在しても、引数の init が見つからず失敗して止まる。
+	- 原因：disk.img の中身が想定と違う（rootfs が別物、作成途中、パス違い）。
+
+- 段階 3 は通ったのに段階 5 の気配が無い
+	- `switching root` の後に何も出ない場合、console 経路の問題（`console=` と `getty` の整合）も候補。
+	- ただしまずは段階 4 の直後にエラーが出ていないか（`execv` 失敗ログ）を優先して確認します。
+
+### なぜ BusyBox `init` が必要か（段階 3/4 と段階 5/6 の役割分担）
+
+ここは混同しやすいですが、UmuOS の起動では **「init が2種類登場する」**だけで、役割が別です。
+
+- initramfs の `/init`（自作C実装、段階 3/4 の主体）
+	- 目的：永続 rootfs（disk.img）を見つけて `/newroot` に mount し、`switch_root` でバトンを渡す。
+	- つまり「起動の橋渡し」担当。
+	- `exec /bin/switch_root /newroot /sbin/init`（実装では `execv`）が成功した時点で、プロセスは置き換わり **自作 `/init` は戻らない**のが正常。
+
+- rootfs の BusyBox `init`（段階 5/6 の主体）
+	- 目的：`/` が永続 rootfs に切り替わった後の「OSの通常運用」を開始・維持する。
+	- 具体的には `/etc/inittab` を読み、`::sysinit:/etc/init.d/rcS` を実行して初期化（ログ/NW/telnetd/FTP 等）を進める。
+	- `getty` の respawn など「起動後も継続して面倒を見る」役割を持つ。
+
+結論として、`switch_root` は **「rootfs の BusyBox `init` が動き始めるための前処理」**であり、BusyBox `init` は **`switch_root` の後に初めて必要になる主役**です。
+
 #### 段階 5: rootfs BusyBox `init`
 
 | 項目 | 内容 |
@@ -547,6 +658,72 @@ kernel は、この段階で大きく次の4つをやります。
 | 観測点（成功判定） | ログインプロンプトが出る、または `rcS done` が見える |
 | 失敗時の切り分け | `inittab` の誤り、`rcS` 実行権限、rootfs が ro になっていないか。 |
 
+### 段階 5（BusyBox `init`）の徹底解説：何が起きているか
+
+段階 4 の `switch_root` が成功すると、次に起きるのは **rootfs（disk.img）側の `/sbin/init` が pid=1 として動き始める**ことです。
+
+ここで重要なのは、段階 5 の BusyBox `init` が「何か重い初期化を全部やる」わけではなく、次の2つを行う **“司令塔”**だという点です。
+
+1) **最初の初期化（sysinit）を1回だけ実行する**
+	- 典型は `/etc/inittab` の `::sysinit:/etc/init.d/rcS`
+	- ここで `rcS`（段階 6）へバトンが渡されます。
+
+2) **起動後も継続して “運用を維持する”**
+	- 代表例：`getty` を respawn し続けてログイン経路を提供する
+	- 代表例：子プロセスを回収（ゾンビ回収）してシステムを安定させる
+
+> 初心者向けの言い換え：段階 5 は「家の管理人（init）」で、段階 6 は「最初の引っ越し作業（rcS）」です。
+
+### 表の各項目の要点（段階 5）
+
+- 入力：`/sbin/init`（BusyBox）と `/etc/inittab`
+	- `/sbin/init` は多くの場合 BusyBox（`/bin/busybox`）への symlink です。
+	- `/etc/inittab` は「最初に何を実行するか（sysinit）」「どの端末で login を待つか（getty）」を定義します。
+
+- 主要処理：`rcS` 実行、`getty` を respawn
+	- `rcS` が成功して最後に `rcS done` を出しても、`init` 自体は終了しません。
+	- `init` が生きているからこそ、ログインが何度でも可能になり、落ちたプロセスも再起動できます。
+
+- 観測点（成功判定）：ログインプロンプト or `rcS done`
+	- `rcS done` が見えたら「段階 6 まで動いた」が確定します。
+	- ログインプロンプトが出たら「getty が動いている」が確定します。
+	- 片方しか出ない場合でも、どちらが欠けているかで切り分けが一気に絞れます。
+
+### まず確認するコマンド（段階 5）
+
+ログインできる状態（シェルが取れる状態）で、最短で段階 5 を確定する観測です。
+
+```sh
+# pid=1 が何者か（BusyBox init が動いているか）
+cat /proc/1/comm
+readlink -f /proc/1/exe 2>/dev/null || true
+ls -l /proc/1/exe 2>/dev/null || true
+
+# inittab の存在と内容（sysinit と getty の行が肝）
+ls -l /etc/inittab
+sed -n '1,120p' /etc/inittab
+
+# /sbin/init が BusyBox に向いているか（代表的な確認）
+ls -l /sbin/init
+```
+
+### 典型的な失敗パターンと見え方（段階 5）
+
+- `switch_root` は成功したのに、以降が無言（プロンプトも `rcS done` も無い）
+	- まず疑う順：
+		1) **console 経路の不一致**（`console=` が指す先と、`inittab` の getty 対象 tty がズレている）
+		2) `/etc/inittab` が無い/壊れている（BusyBox `init` が想定通り動けない）
+		3) `/sbin/init` が実行できない（ELF/権限/ファイル欠落など）
+	- 目標：段階 5 の問題か、見えていないだけ（表示経路の問題）かを分けること。
+
+- `rcS done` は出たがログインプロンプトが出ない
+	- `rcS`（段階 6）は動いたが、**getty の設定やデバイスノード**の問題が濃厚です。
+	- `/etc/inittab` の getty 行、`/dev/ttyS0` などの存在、devtmpfs/devpts の mount 状況を確認します。
+
+- ログインプロンプトは出たが `rcS` が走っていない
+	- `inittab` の `sysinit:` 行が無い/コメントアウト/パス違い、または `rcS` が即死している可能性。
+	- `rcS` の先頭で `echo` を `/dev/console` や `/logs/boot.log` に出す設計にしておくと、段階 6 の切り分けが一気に楽になります（UmuOS はその方針）。
+
 #### 段階 6: rootfs `rcS`
 
 | 項目 | 内容 |
@@ -557,6 +734,70 @@ kernel は、この段階で大きく次の4つをやります。
 | 出力（次段へ） | 観測可能状態（ログ・NW・リモート） |
 | 観測点（成功判定） | `/logs/boot.log` が追記される／NTP before/after が残る／telnet/FTP が起動 |
 | 失敗時の切り分け | `boot.log` が伸びない→ rcS まで来てない。NWだけ死ぬ→ host tap/bridge or `network.conf` を疑う。 |
+
+### 段階 6（`rcS`）の徹底解説：何が起きているか
+
+段階 6 は「**OSを“使える状態”にするための初期化スクリプト**」です。
+段階 5 の BusyBox `init` が `inittab` の `sysinit` として `rcS` を起動し、`rcS` が次をまとめて実行します。
+
+- mount 類（`/proc`, `/sys`, devtmpfs, devpts など）を揃える
+- ログの受け皿（`/logs/boot.log` など）を作り、以後の切り分け材料を残す
+- ネットワーク設定（static IP 等）を反映し、疎通できる土台を作る
+- 必要な常駐（telnetd/ftpd など）を起動する
+
+ここでのポイントは「`rcS` は **1回だけ**動く初期化であり、失敗したらその時点で“必要な物が揃わない”」という点です。
+
+### 表の各項目の要点（段階 6）
+
+- 入力：`/etc/umu/network.conf`、`/etc/profile`、`/umu_bin/*`
+	- rcS は “設定ファイル + 小さな補助コマンド群” を読み込んで初期化を組み立てます。
+	- どれか1つが欠けても、ネットワークだけ死ぬ/ログだけ死ぬなど「部分的に壊れる」ことがあります。
+
+- 観測点（成功判定）：`/logs/boot.log` / NTP / telnet/FTP
+	- `boot.log` が伸びる：rcS が実行された（段階 6 に到達した）証拠。
+	- NTP before/after がある：rcS が中盤まで進んだ証拠。
+	- telnet/FTP が起動：rcS の終盤まで進み、外から入れる状態になった証拠。
+
+### まず確認するコマンド（段階 6）
+
+`rcS` がどこまで進んだかを、なるべく「物証」で確認します。
+
+```sh
+# rcS の実行痕跡（ログが一次資料）
+ls -l /logs/boot.log
+tail -n 120 /logs/boot.log
+
+# mount が揃っているか（devpts が無いと getty が怪しくなる等）
+mount
+
+# ネットワークの実態（設定ファイルだけ見てもダメ。実際の状態を見る）
+ip link
+ip addr
+ip route
+
+# サービスが生きているか（存在する場合）
+ps w
+ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || true
+```
+
+### 典型的な失敗パターンと見え方（段階 6）
+
+- `/logs/boot.log` が存在しない/伸びない
+	- そもそも `rcS` が起動されていない（段階 5 の `inittab` / `sysinit` を疑う）か、rcS が冒頭で落ちています。
+	- `rcS` の実行権限（`chmod +x`）、shebang（`#!/bin/sh`）、`/bin/sh` の存在をまず確認します。
+
+- `boot.log` は伸びるがネットワークだけ死ぬ
+	- rcS は動いているので「段階 5/6 には到達」しています。
+	- 切り分けは host 側（TAP/bridge）と guest 側（`/etc/umu/network.conf`、`eth0` 名、`net.ifnames=0`）に分けます。
+	- まず guest では `ip link` でインタフェース名と状態を確認し、次に `ip addr`/`ip route` の実体を確認します。
+
+- `boot.log` は伸びるが telnet/FTP が起動しない
+	- rcS の後半で落ちているか、該当バイナリ/設定が欠けている可能性。
+	- `ps`/`ss` で “プロセスがいないのか、LISTEN してないのか” を分けるのが第一歩です。
+
+- `rcS done` は出るが、その後すぐ固まる/不安定
+	- rcS 自体は最後まで走ったが、以降に **常駐がクラッシュループ**して負荷が上がっている、または **pid=1 が想定の BusyBox `init` ではない/落ちている**可能性があります。
+	- まず `cat /proc/1/comm` で pid=1 を確認し、`ps` で同じプロセスが短時間で増減していないか（respawn ループ）を確認します。
 
 ### 2.2 重要な設計判断（表の読み方）
 
