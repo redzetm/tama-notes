@@ -32,6 +32,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [再現可能な自作OS UmuOS-0.1.4-base-stable（telnetd対応ベース安定版）]({{ '/umuos-0.1.4-base-stable.html' | relative_url }})
 - [再現可能な自作OS UmuOS-0.1.7-base-stable（ネットワーク/ログ/認証の観測用・固定版ベース）]({{ '/umuos-0.1.7-base-stable.html' | relative_url }})
 - [再現可能な自作OS UmuOS-0.1.xの起動メカニズム徹底解説]({{ '/umuos-0.1.7-base-stable起動メカニズム.html' | relative_url }})
+- [徹底解説！自作シェル ush（うーしゅ）0.0.6解説書]({{ '/ush-0.0.6徹底解説.html' | relative_url }})
 - [ソフトウェア開発者またはシステム基盤担当でも最低限必要なTCP/IP知識]({{ '/tcpip.html' | relative_url }})
 
 ※ 随時追加予定
