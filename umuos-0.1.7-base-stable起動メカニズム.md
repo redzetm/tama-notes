@@ -512,7 +512,7 @@ kernel は、この段階で大きく次の4つをやります。
 
 #### 段階 3: initramfs `/init`　＜最重要＞
 
-参考　実装検証済み（C）：[img/init.c](img/init.c)
+参考　実装検証済み（C）：[init.md](init.md)
 
 | 項目 | 内容 |
 |---|---|
@@ -525,7 +525,7 @@ kernel は、この段階で大きく次の4つをやります。
 
 #### 段階 4: initramfs `/init`（switch_root）　＜最重要＞
 
-参考　実装検証済み（C）：[img/init.c](img/init.c)
+参考　実装検証済み（C）：[init.md](init.md)
 
 | 項目 | 内容 |
 |---|---|
