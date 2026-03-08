@@ -492,7 +492,7 @@ initrd /boot/initrd.img-6.18.1
 		- 経路の確認：`ip route`（default route が `eth0` に向いているか）
 		- DNSの確認：`cat /etc/resolv.conf`
 	- 注意（切り分けのコツ）
-		- `NET_MODE=none`（そもそも NIC を提供しない）だと、当然 `eth0` 自体が現れない。
+		- `NET_MODE=none`（そもそも NIC を提供しない）だと、`eth0` 自体が現れません。
 			- この場合は cmdline ではなく「段階 0（QEMU のネット提供）」が原因。
 
 ### 2.1.4 `initrd ...` 行（initramfs の指定）
@@ -786,7 +786,7 @@ UmuOS の `/init` は次の 1 行（実質）でこれを行います。
 	- 代表例：`getty` を respawn し続けてログイン経路を提供する
 	- 代表例：子プロセスを回収（ゾンビ回収）してシステムを安定させる
 
-> 初心者向けの言い換え：段階 5 は「家の管理人（init）」で、段階 6 は「最初の引っ越し作業（rcS）」です。
+> たとえ：段階 5 は「家の管理人（init）」で、段階 6 は「最初の引っ越し作業（rcS）」です。
 
 ### 表の各項目の要点（段階 5）
 
@@ -1225,4 +1225,140 @@ ls -l /umu_bin 2>/dev/null || true
 	- `rcS` / `inittab` が呼んでいる名前を自作名へ変更する
 	のいずれかになります。
 - 置き換えは **1コマンドずつ**やるのが安全です（`mount` や `sh` のような基盤を早期に替えると、切り分けが難しくなります）。
+
+### 7.4 BusyBox に頼らず UmuOS を起動するための「自作すべきコマンド」一覧（ロードマップ）
+
+ここは「今後 BusyBox のコマンドに頼らず、UmuOS を起動（少なくとも rcS まで）させたい」場合の、
+**“置き換え対象のリスト”**です。
+
+重要：このノートの現行実装では、initramfs の `/init` は C 実装で多くを **syscall 直**にやっているため、
+initramfs で BusyBox が必須になる箇所は主に **`/bin/switch_root`**です（デバッグ用シェル等は別）。
+一方で rootfs 側は BusyBox `init`/applet に寄っているので、BusyBox を捨てるなら置き換え範囲は広がります。
+
+#### まず前提：置き換えのやり方（UmuOS流）
+
+- UmuOS は `PATH` の先頭が `/umu_bin` なので、**同名の自作コマンドを `/umu_bin` に置けば差し替えできます**。
+	- 例：`/umu_bin/mount` を置けば、`rcS` 内の `mount` は BusyBox より優先してそちらが呼ばれる。
+- 逆に、`/bin` や `/sbin` の symlink を直接張り替える方式は強力ですが、壊した時に復旧しづらいので後回しが安全です。
+
+以下の一覧は、段階（どこまで“起動”とみなすか）を分けて整理します。
+
+---
+
+#### フェーズA：initramfs → rootfs の境界（段階 3/4）
+
+このフェーズのゴールは「rootfs（disk.img）を掴んで、rootfs 側の `/sbin/init` を `pid=1` で起動する」ことです。
+
+**必須（BusyBox を捨てても最低限必要）**
+
+- `switch_root`（または同等機能）
+	- 呼び出し：initramfs `/init` から `exec /bin/switch_root /newroot /sbin/init`
+	- 最低限の仕様（UmuOS目線）
+		- `/newroot` を新しい `/` として成立させる（`mount --move` 相当の移し替えを含むことが多い）
+		- `chdir("/")` してから、新root側の `/sbin/init` を `execve()` する
+		- 失敗時は errno を含むエラーメッセージを出す（段階4の観測点になる）
+	- 実装メモ
+		- Linux的には `pivot_root(2)` を使う実装が多いですが、やり方は一つではありません。
+		- UmuOS は「観測性」が大事なので、成功直前に `switching root` を出すのが有益です。
+
+**準必須（“initramfsで詰まった時に人間が直す”を残すなら）**
+
+- `sh`（レスキューシェル）
+	- 用途：UUID不一致や `/dev` 不整備のとき、手で `/proc/cmdline` や `/dev` を見て切り分けしたい。
+	- 最低限：対話ループ、リダイレクト、簡単なパイプ（全部は不要でも「コマンド実行」ができること）
+
+**デバッグ用（便利だが必須ではない）**
+
+- `dmesg`（kernelリングバッファ確認）
+- `cat`/`echo`/`printf`（ログ出しと確認）
+- `ls`/`stat`（ファイル存在確認）
+- `hexdump`（superblock等の生デバッグ。無くても `/init` のログで代替は可能）
+
+---
+
+#### フェーズB：rootfs 側の `pid=1`（段階 5）を BusyBox から剥がす
+
+このフェーズのゴールは「`switch_root` 後、pid=1 が `rcS` を起動し、ログイン経路を維持する」ことです。
+
+**必須（最低限 “OSとして動く”）**
+
+- `init`（pid=1）
+	- 呼び出し：`switch_root` の第3引数（ここでは `/sbin/init`）
+	- 最低限の仕様（UmuOS目線）
+		- `sysinit` として `/etc/init.d/rcS` を **1回**実行する（失敗をログに出す）
+		- 子プロセスを `waitpid()` で回収し、ゾンビを溜めない（pid=1の責務）
+		- `getty` を必要な端末で起動し、落ちたら再起動（respawn）できる
+		- SIGTERM/SIGINT/SIGCHLD 等の基本シグナル処理
+	- 互換方針
+		- BusyBox `inittab` の **フル互換**を最初から狙う必要はありません。
+		- UmuOS の実利用に必要な行（`::sysinit:` と `ttyS0/ttyS1 getty`）だけ解釈する最小実装でも前に進めます。
+
+**準必須（ログイン経路を成立させる）**
+
+- `getty`
+	- 最低限：指定 tty を open して、`login` を exec できること（速度設定やtty初期化は段階的でOK）
+- `login`
+	- 最低限：ユーザ名/パスワードの確認（あるいは研究用途なら一時的にパスワード無し）と、ログイン後に `sh` を起動する
+- `sh`
+	- 最低限：対話、`rcS` 実行のためのシェル機能（`#!/bin/sh` が動くこと）
+
+**デバッグ用（起動後の切り分けに効く）**
+
+- `ps`（プロセス生存確認。`pid=1` が想定か確認）
+- `kill`（暴走プロセス停止）
+- `top`/`free`/`uptime`（性能/負荷観測。必須ではない）
+
+---
+
+#### フェーズC：`rcS`（段階 6）で BusyBox を剥がす（観測/ネットまで含めて“起動”とみなす場合）
+
+UmuOS の「起動完了」は、単にシェルが出るだけでなく、`/logs/boot.log` とネット/telnet が成立して初めて価値が出ます。
+その意味で “起動まで” を UmuOS 流に解釈するなら、このフェーズが本体です。
+
+**必須（rcS を最後まで走らせる）**
+
+- `mount` / `umount`
+	- 用途：`/proc`/`/sys`/devtmpfs/devpts を揃える（devptsが無いと telnet が成立しにくい）
+	- 最低限：`mount -t <type> <src> <dst>` の形が動けば当面OK（オプション全対応は不要）
+- `mkdir`（`/logs` `/run` `/var/run` 等の作成）
+- `chmod`（実行権限やSUID等。最低限 `+x` が効けばrcSの事故が減る）
+- `ln`（symlink運用をするなら）
+- `cat`/`echo`/`printf`
+	- 用途：`/logs/boot.log` 追記、`/dev/console` への到達目印
+- `date`
+	- 用途：起動時刻の記録、NTP後の確認
+
+**ネットワークを成立させる（UmuOSの観測機能の中核）**
+
+- `ip`（推奨）または `ifconfig`/`route`
+	- 最低限：`ip link set <if> up`、`ip addr add ... dev <if>`、`ip route replace default via ...` が動く
+- `ping`
+	- 最低限：疎通確認（NTPやDNSの切り分けに効く）
+
+**リモートログイン（telnet）を維持する**
+
+- `telnetd`（standalone方式）
+	- 最低限：LISTENし、接続ごとに `login`（または自作ログイン）を起動する
+	- 依存：devtmpfs + devpts + `ptmx` が揃っていること（1.1.6 / 6.5参照）
+
+**時刻同期（観測点）**
+
+- `ntp_sync`（UmuOSでは `/umu_bin/ntp_sync` の自作が既にある想定）
+	- BusyBox の `ntpd` を使うのか、自作でSNTPするのかは設計次第。
+	- この資料の観測点（before/after）を維持するなら「rcSから呼べて、ログが残る」ことが必須です。
+
+**FTP（必要なら）**
+
+- `ftpd_start`（UmuOSでは `/umu_bin/ftpd_start` の自作が既にある想定）
+	- 内部で `tcpsvd`/`ftpd` を使う設計なら、その置き換えもセットで考える。
+	- ただし「起動の全貌の再確認」という目的だけなら、FTPは優先度を下げても支障は出にくいです。
+
+---
+
+#### まとめ：最短で BusyBox 依存を外す順番（おすすめ）
+
+1) initramfs：`switch_root`（ここだけ先に自作すると、“initramfsは自作で完結”が達成しやすい）
+2) rootfs：`init`（pid=1）と `sh`（rcS実行とログインの土台）
+3) rcS：`mount` と `ip`（UmuOSの観測価値＝ログとネットの成立に直結）
+4) 最後に：`getty`/`login`/`telnetd` の強化（認証やPTY周りの完成度を上げる）
 
