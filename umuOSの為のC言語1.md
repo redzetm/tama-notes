@@ -396,7 +396,10 @@ int main(void)
     int b = 0;
 
     printf("a b をスペース区切りで入力してください: ");
-    scanf("%d %d", &a, &b);
+    if (scanf("%d %d", &a, &b) != 2) {
+        puts("入力に失敗しました");
+        return 1;
+    }
 
     printf("a + b = %d\n", a + b);
     printf("a - b = %d\n", a - b);
