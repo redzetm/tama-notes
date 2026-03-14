@@ -1357,6 +1357,724 @@ int main(void)
 - `switch` は「値が一致する分岐」に向き、`break` を忘れると次の case に流れる
 
 
+---
+
+## 第四章でやること：
+
+- `do ... while` / `while` / `for` の違いを、実行順序と条件評価の観点で整理する
+- ループの中で「値を制限する」考え方（範囲外ならやり直す）を身に付ける
+- `!`（論理否定）とド・モルガンの法則で、条件式の変形を読めるようにする
+- 合計と平均のような「集計」をループで書ける
+- `+=` などの複合代入と、`++` `--`（増分/減分）を安全に使える
+- `break` / `continue` を「早めに抜ける」「次の繰り返しへ飛ぶ」として読める
+- 多重ループ（2重ループ）で簡単な図形を描ける
+- Cソースを読むための要素（キーワード/演算子/識別子/区切り子/リテラル）と、書式（自由形式/隣接文字列連結/インデント）を整理する
+
+前提：この章は「繰り返し」を扱います。分岐と同じで、条件は 0/非0 で決まります。
+
+---
+
+## プログラムの流れの繰り返し
+
+繰り返し（ループ）は、同じ処理を何度も行うための仕組みです。
+代表的な形は次の3つです。
+
+- `do ... while`：本体を先に1回実行し、その後に条件を見る
+- `while`：条件を先に見て、真なら本体を実行する
+- `for`：初期化/条件/更新をまとめて書ける（一定回数の繰り返しに強い）
+
+### do文（do ... while）
+
+#### do文
+
+`do ... while` は「最低でも1回は実行する」ループです。
+
+```c
+/* file: do_while_basic.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 0;
+
+    do {
+        puts("この行は必ず1回は実行されます");
+    } while (x != 0);
+
+    return 0;
+}
+```
+
+読み方：
+
+- 先にブロック `{ ... }` を実行する
+- その後で `while (条件)` を評価する
+- 条件が真ならもう一度ブロックへ戻る
+
+#### 読み込む値を制限する（範囲外ならやり直す）
+
+「値を読み込む → 範囲を満たすまで繰り返す」は典型パターンです。
+
+この巻では `scanf` の細かい罠を増やさないため、入力は `fgets` で1行読み、`strtol` で整数に変換する形を使います。
+
+```c
+/* file: read_int_range.c */
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int read_int_in_range(int *out_value, int min_value, int max_value)
+{
+    char buf[64];
+
+    for (;;) {
+        if (fgets(buf, sizeof(buf), stdin) == NULL) {
+            return 0; /* 入力が終わった（EOFなど） */
+        }
+
+        errno = 0;
+        char *end = NULL;
+        long v = strtol(buf, &end, 10);
+
+        if (errno != 0) {
+            puts("数の変換に失敗しました");
+            continue;
+        }
+        if (end == buf) {
+            puts("数字が見つかりませんでした");
+            continue;
+        }
+        if (v < INT_MIN || v > INT_MAX) {
+            puts("値が大きすぎます");
+            continue;
+        }
+
+        int x = (int)v;
+        if (x < min_value || x > max_value) {
+            printf("範囲外です（%d〜%d）\n", min_value, max_value);
+            continue;
+        }
+
+        *out_value = x;
+        return 1;
+    }
+}
+
+int main(void)
+{
+    int age = 0;
+    puts("年齢（0〜120）を入力してください:");
+
+    if (!read_int_in_range(&age, 0, 120)) {
+        puts("入力が終了しました");
+        return 1;
+    }
+
+    printf("age=%d\n", age);
+    return 0;
+}
+```
+
+ポイント：
+
+- 「読み込みに失敗」や「範囲外」を見つけたら、`continue` で次の繰り返しに進む
+- 「正しい値が得られた」ときだけ `return 1` で抜ける
+
+`do ... while` で同じことを書くこともできますが、ここでは読みやすさ優先で `for (;;)` を使いました（`for (;;)` は無限ループの書き方です）。
+
+#### 論理否定演算子とド・モルガンの法則
+
+論理否定は `!` です。
+
+- `!x`：x が真なら偽、偽なら真
+
+条件を否定して書き直すとき、ド・モルガンの法則が出てきます。
+
+$$
+\lnot(A \land B) \equiv (\lnot A) \lor (\lnot B) \\
+\lnot(A \lor B) \equiv (\lnot A) \land (\lnot B)
+$$
+
+例として「1〜10 の範囲外」を2通りで書きます。
+
+```c
+/* file: de_morgan.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 11; /* ここを変えて試す */
+    printf("x=%d\n", x);
+
+    if (!(x >= 1 && x <= 10)) {
+        puts("範囲外です（否定で書いた）");
+    }
+
+    if (x < 1 || x > 10) {
+        puts("範囲外です（ド・モルガンで変形した）");
+    }
+
+    return 0;
+}
+```
+
+読みやすい方を選ぶのが基本です。
+
+#### 複数の整数値の合計と平均を求める
+
+集計は「足し込む変数」を用意するのが定石です。
+
+```c
+/* file: sum_and_avg.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int values[] = { 10, 20, 30, 40, 50 };
+    int count = (int)(sizeof(values) / sizeof(values[0]));
+
+    int sum = 0;
+    for (int i = 0; i < count; i++) {
+        sum += values[i];
+    }
+
+    double avg = (double)sum / count;
+    printf("sum=%d avg=%f\n", sum, avg);
+    return 0;
+}
+```
+
+ポイント：
+
+- `sum += values[i];` の `+=` は複合代入（後で説明）
+- 平均は小数になり得るので、`(double)sum / count` にして小数の割り算にする
+
+#### 複合代入演算子
+
+複合代入は「同じ変数に対して更新する」操作を短く書きます。
+
+- `x += 3` は `x = x + 3`
+- `x *= 2` は `x = x * 2`
+
+```c
+/* file: compound_assign.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 10;
+    x += 3;
+    x *= 2;
+    x -= 4;
+    printf("x=%d\n", x);
+    return 0;
+}
+```
+
+#### 後置増分演算子と後置減分演算子（`i++` と `i--`）
+
+`i++` は「i を 1 増やす」ですが、式の中で使うと意味が分かれます。
+
+- 後置：`i++` は「古い値を使ってから増やす」
+- 前置：`++i` は「増やしてから新しい値を使う」（後で例を出します）
+
+```c
+/* file: postfix_inc_dec.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int i = 5;
+
+    int a = i++; /* a には 5、i は 6 になる */
+    int b = i--; /* b には 6、i は 5 に戻る */
+
+    printf("a=%d b=%d i=%d\n", a, b, i);
+    return 0;
+}
+```
+
+このように、式の中で使うと読み違いが起きやすいので、最初は「単独の行で `i++;`」のように使うのが安全です。
+
+### while文
+
+#### while文
+
+`while` は「条件を先に評価し、真なら繰り返す」ループです。
+
+```c
+/* file: while_basic.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 3;
+
+    while (x > 0) {
+        printf("x=%d\n", x);
+        x = x - 1;
+    }
+
+    puts("done");
+    return 0;
+}
+```
+
+#### 減分演算子を用いた手短な表現（`--`）
+
+1ずつ減らすなら `x = x - 1;` の代わりに `x--;` を使えます。
+
+```c
+/* file: decrement_short.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 3;
+
+    while (x > 0) {
+        printf("x=%d\n", x);
+        x--; /* x = x - 1 */
+    }
+
+    return 0;
+}
+```
+
+さらに短い書き方として `while (x-- > 0) { ... }` もありますが、条件式に副作用が入り読みづらくなりやすいので、この巻では推奨しません。
+
+#### カウントアップ（`++`）
+
+カウントアップは `i++` がよく使われます。
+
+```c
+/* file: count_up.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int i = 0;
+    while (i < 5) {
+        printf("i=%d\n", i);
+        i++;
+    }
+    return 0;
+}
+```
+
+#### 文字定数と putchar関数
+
+`'A'` のようなものは **文字定数**（文字リテラル）です。
+`putchar` は 1文字だけ出力する関数です。
+
+```c
+/* file: putchar_basic.c */
+#include <stdio.h>
+
+int main(void)
+{
+    putchar('H');
+    putchar('i');
+    putchar('\n');
+    return 0;
+}
+```
+
+`'\n'` は改行文字です。
+
+#### do文とwhile文（条件をいつ見るか）
+
+- `while`：最初に条件を見るので、最初から偽なら1回も実行しない
+- `do ... while`：本体を先に実行するので、条件が偽でも1回は実行する
+
+```c
+/* file: do_vs_while.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 0;
+
+    puts("while:");
+    while (x != 0) {
+        puts("ここは実行されません");
+    }
+
+    puts("do ... while:");
+    do {
+        puts("ここは1回実行されます");
+    } while (x != 0);
+
+    return 0;
+}
+```
+
+#### 前置増分演算子と前置減分演算子（`++i` と `--i`）
+
+前置は「増やしてから使う」です。
+
+```c
+/* file: prefix_vs_postfix.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int i = 5;
+
+    int a = ++i; /* i は 6、a も 6 */
+    int b = i++; /* b は 6、i は 7 */
+
+    printf("a=%d b=%d i=%d\n", a, b, i);
+    return 0;
+}
+```
+
+単独の行で使うなら `++i;` と `i++;` は最終的に同じ結果になります。
+ただし式の中で使うと差が出るため、読みやすさのために混ぜないのが安全です。
+
+#### 整数値を逆順に表示
+
+整数 `n` の最下位桁は `n % 10`、桁を落とすのは `n / 10` でした。
+これを繰り返すと、数字を逆順に取り出せます。
+
+```c
+/* file: reverse_digits.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int n = 12340; /* ここを変えて試す（0以上を想定） */
+    printf("n=%d\n", n);
+
+    if (n == 0) {
+        putchar('0');
+        putchar('\n');
+        return 0;
+    }
+
+    while (n > 0) {
+        int digit = n % 10;
+        putchar('0' + digit);
+        n = n / 10;
+    }
+    putchar('\n');
+
+    return 0;
+}
+```
+
+注意：この例は「0以上の整数」だけを扱います。負の数対応や、末尾の 0 をどう扱うかは用途によって決め方が変わります。
+
+#### break文とcontinue文
+
+- `break`：ループをその場で抜ける
+- `continue`：ループ本体の残りを飛ばして、次の繰り返しへ進む
+
+```c
+/* file: break_continue.c */
+#include <stdio.h>
+
+int main(void)
+{
+    for (int i = 1; i <= 10; i++) {
+        if (i % 2 != 0) {
+            continue; /* 奇数は飛ばす */
+        }
+        printf("even=%d\n", i);
+        if (i == 6) {
+            break; /* 6 を表示したら終了 */
+        }
+    }
+    return 0;
+}
+```
+
+### for文
+
+#### for文
+
+`for` の形は次の3つを1行にまとめています。
+
+- 初期化（最初に1回）
+- 条件（繰り返すたびに評価）
+- 更新（本体の後で毎回実行）
+
+```c
+/* file: for_shape.c */
+#include <stdio.h>
+
+int main(void)
+{
+    for (int i = 0; i < 5; i++) {
+        printf("i=%d\n", i);
+    }
+    return 0;
+}
+```
+
+#### for文による一定回数の繰り返し
+
+一定回数の繰り返しは `for` が読みやすいことが多いです。
+
+```c
+/* file: repeat_n_times.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int n = 3; /* ここを変えて試す */
+    for (int i = 0; i < n; i++) {
+        puts("hello");
+    }
+    return 0;
+}
+```
+
+#### 偶数の列挙
+
+```c
+/* file: list_evens.c */
+#include <stdio.h>
+
+int main(void)
+{
+    for (int x = 2; x <= 20; x += 2) {
+        printf("%d\n", x);
+    }
+    return 0;
+}
+```
+
+`x += 2` は「2ずつ増やす」更新です。
+
+#### 約数の列挙
+
+`n` の約数は、`1` から `n` まで試して `n % d == 0` になる `d` です。
+
+```c
+/* file: divisors.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int n = 12; /* ここを変えて試す（1以上を想定） */
+    printf("n=%d\n", n);
+
+    for (int d = 1; d <= n; d++) {
+        if (n % d == 0) {
+            printf("divisor=%d\n", d);
+        }
+    }
+
+    return 0;
+}
+```
+
+#### 式文と空文
+
+`x = x + 1;` のように、式に `;` を付けたものは式文でした。
+そして `;` だけの文は **空文** です（何もしない文）。
+
+空文は、書く意図が明確なときだけ使います。
+
+```c
+/* file: empty_statement.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int x = 0;
+    for (int i = 0; i < 5; i++) {
+        x += i;
+    }
+    printf("x=%d\n", x);
+
+    for (int i = 0; i < 5; i++) {
+        ; /* 空文：本当に何もしない */
+    }
+
+    return 0;
+}
+```
+
+空文をうっかり書いてしまうと、「ループ本体が空」になってバグになります。
+
+#### 繰り返し文（ループ本体）
+
+ループの本体は「繰り返す処理」そのものです。
+本体が複数行になるなら、ブロック `{ ... }` にしておくと安全です。
+
+### 多重ループ
+
+#### 2重ループ
+
+ループの中にループを入れると、2重ループになります。
+
+```c
+/* file: nested_loops.c */
+#include <stdio.h>
+
+int main(void)
+{
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 4; x++) {
+            printf("(%d,%d) ", x, y);
+        }
+        putchar('\n');
+    }
+    return 0;
+}
+```
+
+外側が「行」、内側が「列」になることが多いです。
+
+#### 図形の描画
+
+2重ループで、簡単な長方形を描けます。
+
+```c
+/* file: draw_rect.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int height = 3;
+    int width = 5;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            putchar('*');
+        }
+        putchar('\n');
+    }
+
+    return 0;
+}
+```
+
+用途によっては、三角形なども同じ要領で描けます。
+
+```c
+/* file: draw_triangle.c */
+#include <stdio.h>
+
+int main(void)
+{
+    int height = 5;
+    for (int y = 1; y <= height; y++) {
+        for (int x = 0; x < y; x++) {
+            putchar('#');
+        }
+        putchar('\n');
+    }
+    return 0;
+}
+```
+
+#### 多重ループ（一般）
+
+2重以上のループは、回数が一気に増えます。
+たとえば「外側が 100 回、内側が 100 回」なら、合計 10000 回です。
+実行時間に直結するので、ソースを読むときはループの回数感覚を持つのが重要です。
+
+### プログラムの要素と書式
+
+ここは「Cのソースを読むための部品」と「見た目のルール」を整理します。
+
+#### キーワード
+
+キーワードはC言語として予約されている単語で、変数名には使えません。
+この巻で出会った代表例：
+
+- `int` `double` `char`
+- `if` `else` `switch` `case` `default`
+- `do` `while` `for` `break` `continue` `return`
+
+#### 演算子
+
+演算子は `+` `-` `*` `/` `=` `==` `&&` などの記号です。
+この巻で特に重要なのは、次の区別です。
+
+- `=`（代入）と `==`（比較）
+- `&`（アドレス）と `&&`（論理積）
+- `|`（ビット演算）と `||`（論理和）
+
+#### 識別子
+
+識別子は、変数名や関数名などの「名前」です。
+例：`main` `printf` `value` `sum` など。
+
+#### 区切り子
+
+区切り子は、構造を区切る記号です。
+
+- `;`（文の終わり）
+- `,`（引数や初期化子の区切り）
+- `()`（関数呼び出しや条件式）
+- `{}`（ブロック）
+- `[]`（配列の添字）
+
+#### 定数と文字列リテラル
+
+- 数の定数：`123` `3.14` のようなリテラル
+- 文字定数：`'A'` `'\n'`
+- 文字列リテラル：`"Hello"`
+
+文字（`'A'`）と文字列（`"A"`）は別物です。
+
+#### 自由形式
+
+Cは **自由形式** の言語です。
+空白や改行の入れ方は、ある程度自由です（ただしトークンがくっつくと意味が変わります）。
+
+例：次の2つは同じ意味です。
+
+```c
+int x = 1 + 2;
+```
+
+```c
+int x=1+2;
+```
+
+読みやすさのために、空白や改行で構造を見せるのが一般的です。
+
+#### 隣接した文字列リテラルの連結
+
+文字列リテラルは、隣り合うと連結されます。
+
+```c
+/* file: adjacent_string.c */
+#include <stdio.h>
+
+int main(void)
+{
+    puts("Hello, " "world!");
+    return 0;
+}
+```
+
+これは `"Hello, world!"` と同じ意味です。
+
+#### インデント
+
+インデント（字下げ）は、ブロック構造を読みやすくするための見た目です。
+意味そのものは変わらないことが多いですが、読み間違いを減らすために重要です。
+
+### まとめ
+
+- `do ... while` は「先に実行してから条件を見る」ので、最低でも1回は本体が実行される
+- `while` は「先に条件を見る」ので、最初から偽なら1回も実行されない
+- `for` は初期化/条件/更新をまとめて書け、一定回数の繰り返しに向く
+- 「値を制限する」は、範囲外なら繰り返してやり直す発想で書ける
+- `!` とド・モルガンの法則で、条件式の否定や変形を読める
+- `+=` などの複合代入や `++` `--` は便利だが、式の中で乱用すると読みづらい
+- `break` はループを抜け、`continue` は次の繰り返しへ進む
+- 多重ループは回数が増えるので、実行回数の感覚を持って読む
+- キーワード/演算子/識別子/区切り子/リテラルと、自由形式/隣接文字列連結/インデントを押さえる
+
+
 ## 付録
 
 この付録では、ソースコードを読むときに必ず出会う「ヘッダ（.h）」まわりを、できるだけ丁寧に整理します。
