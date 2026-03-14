@@ -1415,61 +1415,36 @@ int main(void)
 
 「値を読み込む → 範囲を満たすまで繰り返す」は典型パターンです。
 
-この巻では `scanf` の細かい罠を増やさないため、入力は `fgets` で1行読み、`strtol` で整数に変換する形を使います。
+この段階では「範囲外ならやり直す」を最優先にし、`do ... while` と `scanf("%d", &age)` の形だけで書きます。
+`&age` は第一章で出てきた `&` と同じで、「age の場所に書き込むための指定」です。
 
 ```c
-/* file: read_int_range.c */
-#include <errno.h>
-#include <limits.h>
+/* file: read_int_range_simple.c */
 #include <stdio.h>
-#include <stdlib.h>
-
-static int read_int_in_range(int *out_value, int min_value, int max_value)
-{
-    char buf[64];
-
-    for (;;) {
-        if (fgets(buf, sizeof(buf), stdin) == NULL) {
-            return 0; /* 入力が終わった（EOFなど） */
-        }
-
-        errno = 0;
-        char *end = NULL;
-        long v = strtol(buf, &end, 10);
-
-        if (errno != 0) {
-            puts("数の変換に失敗しました");
-            continue;
-        }
-        if (end == buf) {
-            puts("数字が見つかりませんでした");
-            continue;
-        }
-        if (v < INT_MIN || v > INT_MAX) {
-            puts("値が大きすぎます");
-            continue;
-        }
-
-        int x = (int)v;
-        if (x < min_value || x > max_value) {
-            printf("範囲外です（%d〜%d）\n", min_value, max_value);
-            continue;
-        }
-
-        *out_value = x;
-        return 1;
-    }
-}
 
 int main(void)
 {
-    int age = 0;
-    puts("年齢（0〜120）を入力してください:");
+    int age = -1;
 
-    if (!read_int_in_range(&age, 0, 120)) {
-        puts("入力が終了しました");
-        return 1;
-    }
+    do {
+        printf("年齢（0〜120）を入力してください: ");
+
+        if (scanf("%d", &age) != 1) {
+            puts("数字を入力してください");
+
+            /* 入力の残り（改行まで）を捨てる */
+            int ch = 0;
+            while ((ch = getchar()) != '\n' && ch != EOF) {
+            }
+
+            age = -1;
+            continue;
+        }
+
+        if (age < 0 || age > 120) {
+            puts("範囲外です");
+        }
+    } while (age < 0 || age > 120);
 
     printf("age=%d\n", age);
     return 0;
@@ -1478,10 +1453,11 @@ int main(void)
 
 ポイント：
 
-- 「読み込みに失敗」や「範囲外」を見つけたら、`continue` で次の繰り返しに進む
-- 「正しい値が得られた」ときだけ `return 1` で抜ける
+- 数字以外を入力されたら、その行を捨ててやり直す（`scanf` の戻り値が `1` でない）
+- 数字でも範囲外なら、メッセージを出してやり直す
+- 条件の判定（`age < 0 || age > 120`）をループ条件に置くと読みやすい
 
-`do ... while` で同じことを書くこともできますが、ここでは読みやすさ優先で `for (;;)` を使いました（`for (;;)` は無限ループの書き方です）。
+補足：入力を頑丈にする方法（`fgets` と数値変換の組み合わせなど）はありますが、この巻ではまず「ループで制限する発想」を固めます。
 
 #### 論理否定演算子とド・モルガンの法則
 
