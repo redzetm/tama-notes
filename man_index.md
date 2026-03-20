@@ -19,6 +19,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [ps(1) プロセス一覧・調査]({{ '/man_rocky9.7/ps.html' | relative_url }})（`ps -aux`/`ps -ef`、`-o`列カスタム、`--sort`、スレッド、ツリー表示）
 - [systemctl(1) systemd サービス操作・状態確認]({{ '/man_rocky9.7/systemctl.html' | relative_url }})（status/is-active、restart、enable、daemon-reload、ログ導線）
 - [journalctl(1) systemd journal ログ調査]({{ '/man_rocky9.7/journalctl.html' | relative_url }})（`-u/-b`、`-f`追跡、`--since`、`-p`重要度、`--list-boots`）
+- [firewall-cmd(1) firewalld 操作（ゾーン/サービス/ポート）]({{ '/man_rocky9.7/firewall-cmd.html' | relative_url }})（runtime/permanent、zone指定、add-service/add-port、reload、永続化）
 - [df(1) ファイルシステム容量確認]({{ '/man_rocky9.7/df.html' | relative_url }})（`-hT`の見方、iノード枯渇`-i`、疑似FS除外`-x`、`--output`で列固定、`--total`）
 - [du(1) ディレクトリ容量見積り]({{ '/man_rocky9.7/du.html' | relative_url }})（`-sh`合計、`--max-depth`で直下比較、`-x`で別FS回避、`--exclude`、見た目`--apparent-size`）
 - [head(1) 先頭抽出]({{ '/man_rocky9.7/head.html' | relative_url }})（`-n`/`-c`、複数ファイル時のヘッダ`-q`/`-v`、`-n -NUM`で末尾除外）
