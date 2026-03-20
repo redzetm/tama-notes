@@ -1,5 +1,5 @@
 ---
-title: "ss(8) socket統計コマンド実用ノート（Rocky Linux 9.7）"
+title: "ss(8) ソケット統計・接続確認コマンド実用ノート（Rocky Linux 9.7）"
 date: 2026-03-20
 ---
 
