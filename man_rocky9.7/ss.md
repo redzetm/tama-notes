@@ -502,3 +502,16 @@ ss -o state fin-wait-1 '( sport = :http or sport = :https )' dst 193.233.7/24
 # TCP 以外を全部
 ss -a -A 'all,!tcp'
 ```
+
+## 参考：Rocky Linux 9.7 での確認（エビデンス）
+
+`ss` は通常 iproute2 に含まれます。オプション差を疑ったら、まず自分の Rocky 環境で確認してください。
+
+```bash
+cat /etc/redhat-release
+rpm -q iproute
+
+ss -V
+ss -h | sed -n '1,120p'
+man ss | sed -n '1,200p'
+```
