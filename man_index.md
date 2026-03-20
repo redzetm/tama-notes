@@ -19,3 +19,4 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [tail(1) 末尾抽出・ログ追跡（実用ノート）]({{ '/man_rocky9.7/tail.html' | relative_url }})（`-n`/`-c`、`-f`と`-F`の違い、`--pid`で自動終了、ローテーション対策）
 - [du(1) ディレクトリ容量見積り（実用ノート）]({{ '/man_rocky9.7/du.html' | relative_url }})（`-sh`合計、`--max-depth`で直下比較、`-x`で別FS回避、`--exclude`、見た目`--apparent-size`）
 - [wc(1) 行数/単語数/バイト数カウント（実用ノート）]({{ '/man_rocky9.7/wc.html' | relative_url }})（`-l`件数、`-c`バイト/`-m`文字、`-L`最大行長、`grep | wc -l`）
+- [useradd(8) ユーザー作成（実用ノート）]({{ '/man_rocky9.7/useradd.html' | relative_url }})（`-m`でホーム作成、`-G`補助グループ、`-e`期限、`-D`デフォルト確認、`-p`の落とし穴）
