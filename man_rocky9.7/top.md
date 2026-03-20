@@ -1,7 +1,6 @@
 ---
 title: "top(1) プロセス監視・負荷調査コマンド実用ノート（Rocky Linux 9.7）"
 date: 2026-03-20
-
 ---
 
 # top(1) — プロセス監視（実用）
@@ -29,8 +28,18 @@ top -p 1234
 top -b -d 1 -n 5
 
 # バッチでソートキーを固定（例：%CPU で降順）
-top -b -n 1 -o +%CPU
+top -b -n 1 -o %CPU
 ```
+
+## SYNOPSIS（起動形式）
+
+`man top` の記載では、概ね次のような形です。
+
+```text
+top -hv|-bcEeHiOSs1 -d secs -n max -u|U user -p pids -o field -w [cols]
+```
+
+補足：伝統的な `-` や空白は省略できる（= `top -H` と `top H` のような表記が混在し得る）ため、運用では読み間違いに注意します。
 
 ## 画面の構造（どこを見ればいいか）
 
@@ -81,16 +90,13 @@ top -b -n 1 -o +%CPU
 - `-H`
   - スレッド単位で表示（原因がスレッドにある時に有効）
 - `-p PIDLIST`
-  - 指定 PID だけ監視（最大20個まで）
+  - 指定 PID だけ監視
   - `-p 1111 -p 2222` でも `-p 1111,2222` でもOK
   - 0 を指定すると top 自身を指す
 - `-u user` / `-U user`
   - ユーザーで絞る
-  - `-u` は effective user、`-U` は real/effective/saved/fs のいずれか
-  - `!user` で否定も可能
 - `-o fieldname`
   - ソート列を指定（特にバッチで重要）
-  - `+field` で高→低、`-field` で低→高
 - `-O`
   - `-o` に指定できる field 名一覧を出して終了
 - `-b`
@@ -126,7 +132,7 @@ top -p 1234
 top -b -d 1 -n 30 > top_30s.txt
 
 # 例：%MEM ソートを固定して1回だけ（スナップショット）
-top -b -n 1 -o +%MEM
+top -b -n 1 -o %MEM
 ```
 
 バッチは「その瞬間の画面を保存」できるのが価値です。
@@ -177,3 +183,15 @@ man 記載では、rcfile はおおむね次のどちらかに置かれます（
 ## 参考：終了の基本
 
 - `q` で終了（または `Ctrl-C`）
+
+## 参考：Rocky Linux 9.7 での確認（エビデンス）
+
+`top` は通常 procps-ng に含まれます。オプション差を疑ったら、まず自分の Rocky 環境で確認してください。
+
+```bash
+cat /etc/redhat-release
+rpm -q procps-ng
+
+top -h
+man top | sed -n '1,200p'
+```
