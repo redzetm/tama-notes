@@ -1,5 +1,5 @@
 ---
-title: "grep(1) 文字列検索コマンド実用ノート（Rocky Linux 9.7）"
+title: "grep(1) 行検索・ログ調査コマンド実用ノート（Rocky Linux 9.7）"
 date: 2026-03-20
 ---
 
