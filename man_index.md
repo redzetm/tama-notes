@@ -20,3 +20,6 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [du(1) ディレクトリ容量見積り（実用ノート）]({{ '/man_rocky9.7/du.html' | relative_url }})（`-sh`合計、`--max-depth`で直下比較、`-x`で別FS回避、`--exclude`、見た目`--apparent-size`）
 - [wc(1) 行数/単語数/バイト数カウント（実用ノート）]({{ '/man_rocky9.7/wc.html' | relative_url }})（`-l`件数、`-c`バイト/`-m`文字、`-L`最大行長、`grep | wc -l`）
 - [useradd(8) ユーザー作成（実用ノート）]({{ '/man_rocky9.7/useradd.html' | relative_url }})（`-m`でホーム作成、`-G`補助グループ、`-e`期限、`-D`デフォルト確認、`-p`の落とし穴）
+- [passwd(1) パスワード設定・ロック（実用ノート）]({{ '/man_rocky9.7/passwd.html' | relative_url }})（`-l`ロック/`-u`解除、`-e`次回変更強制、`-S`状態、`--stdin`注意）
+- [usermod(8) ユーザー属性変更（実用ノート）]({{ '/man_rocky9.7/usermod.html' | relative_url }})（`-G`補助グループ置換注意、`-d -m`でホーム移動、`-L/-U`、`-l`ログイン名変更）
+- [userdel(8) ユーザー削除（実用ノート）]({{ '/man_rocky9.7/userdel.html' | relative_url }})（`-r`でホーム削除、ログイン中は不可、ホーム外ファイルは残る）
