@@ -3,7 +3,7 @@ title: "systemctl(1) systemd サービス操作・状態確認実用ノート（
 date: 2026-03-21
 ---
 
-# systemctl(1) — systemd の操作/確認（実用）
+# systemctl(1) — systemd の操作/確認
 
 `systemctl` は systemd のユニット（service/socket/timer/mount/target…）を **確認**し、**起動/停止/再起動**し、**自動起動設定（enable）**を管理するコマンドです。
 

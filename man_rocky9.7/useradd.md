@@ -3,7 +3,7 @@ title: "useradd(8) ユーザー作成コマンド実用ノート（Rocky Linux 9
 date: 2026-03-21
 ---
 
-# useradd(8) — ユーザー作成（実用）
+# useradd(8) — ユーザー作成
 
 `useradd` は新規ユーザーを作成する管理者向けコマンドです（通常 root 権限が必要）。
 

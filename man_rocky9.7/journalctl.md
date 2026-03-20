@@ -3,7 +3,7 @@ title: "journalctl(1) systemd journal ログ調査実用ノート（Rocky Linux 
 date: 2026-03-21
 ---
 
-# journalctl(1) — systemd journal の検索/追跡（実用）
+# journalctl(1) — systemd journal の検索/追跡
 
 `journalctl` は systemd-journald が収集したログ（journal）を検索・追跡するコマンドです。
 

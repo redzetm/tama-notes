@@ -3,7 +3,7 @@ title: "userdel(8) ユーザー削除コマンド実用ノート（Rocky Linux 9
 date: 2026-03-21
 ---
 
-# userdel(8) — ユーザー削除（実用）
+# userdel(8) — ユーザー削除
 
 `userdel` はユーザーアカウントを削除する管理者向けコマンドです。
 削除は `/etc/passwd` `/etc/shadow` `/etc/group` のエントリを対象に行われます。

@@ -3,7 +3,7 @@ title: "passwd(1) パスワード設定・ロック実用ノート（Rocky Linux
 date: 2026-03-21
 ---
 
-# passwd(1) — パスワード変更/ロック（実用）
+# passwd(1) — パスワード変更/ロック
 
 `passwd` はユーザー（やアカウント）のパスワードを変更するコマンドです。
 Rocky Linux 9.7 では PAM（Linux-PAM）や libuser 経由で動作します。
