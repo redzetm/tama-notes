@@ -116,6 +116,8 @@ grep -G '[0-9]\+' file
 
 - `-i`, `--ignore-case`
   - 大文字小文字を無視
+- `-y`
+  - `-i` の古い別名（obsolete）
 - `--no-ignore-case`
   - `-i` を打ち消す（シェルスクリプト等で便利）
 - `-v`, `--invert-match`
@@ -129,12 +131,16 @@ grep -G '[0-9]\+' file
 
 ## 出力の制御（運用でよく使う）
 
+- `-b`, `--byte-offset`
+  - 一致行の先頭バイトオフセットを出す（巨大ログの切り分けに使うことがある）
 - `-n`, `--line-number`
   - 行番号を付ける（調査の基本）
 - `-H`, `--with-filename`
   - ファイル名を必ず付ける
 - `-h`, `--no-filename`
   - ファイル名を付けない（1ファイルだけ見たいとき）
+- `--label=LABEL`
+  - 標準入力（`-`）を読んだときの「ファイル名表示」を LABEL にする
 - `-o`, `--only-matching`
   - 行全体ではなく「一致した部分だけ」出す（1行に複数回一致すると複数行出る）
 - `-c`, `--count`
@@ -152,6 +158,12 @@ grep -G '[0-9]\+' file
   - 読めないファイル等のエラー表示を抑止
 - `--color[=WHEN]`
   - `auto/always/never`（運用では `--color=auto` が便利）
+- `--line-buffered`
+  - 行ごとに flush（パイプで“詰まる”時に使う）
+- `-T`, `--initial-tab`
+  - ファイル名表示などの後ろにタブを入れて桁を揃える（必要なら）
+- `-u`, `--unix-byte-offsets`
+  - バイトオフセットの互換動作（古い環境や互換性目的）
 
 ### 前後行（コンテキスト）
 
@@ -161,6 +173,10 @@ grep -G '[0-9]\+' file
   - 一致した前 NUM 行
 - `-C NUM`, `--context=NUM`
   - 前後 NUM 行（`-NUM` も同義）
+- `--group-separator=SEP`
+  - 一致ブロック間の区切り文字を指定
+- `--no-group-separator`
+  - 区切り文字を空にする
 
 注意：`-o` とコンテキストは併用できず、警告が出ます。
 
@@ -205,6 +221,8 @@ grep -nH -r --exclude-dir='.git' --exclude-dir='node_modules' 'TODO' .
   - バイナリでもテキストとして処理（ただし端末にゴミが出る危険あり）
 - `-I`
   - バイナリは無視（`--binary-files=without-match`）
+- `-U`, `--binary`
+  - 行末の CR を取り除かない（MS-DOS/Windows 由来の改行が混ざる時の挙動に関係）
 
 文字コードが怪しいファイル群を雑に探すときは、`-I` や `-a` の使い分けが現実的です。
 
@@ -301,4 +319,16 @@ grep -rl --color=auto 'server_name' /etc/nginx
 ```bash
 # 複数ファイルで、正規表現（パターンが - で始まる可能性があるので --）
 grep -n -- 'f.*\.c$' *g*.h /dev/null
+```
+
+## 参考：Rocky Linux 9.7 での確認（エビデンス）
+
+版数やビルドオプションで挙動が変わる可能性があるので、必要なら次で確認してください。
+
+```bash
+cat /etc/redhat-release
+rpm -q grep
+grep --version | head
+grep --help | sed -n '1,80p'
+man grep | sed -n '1,120p'
 ```
