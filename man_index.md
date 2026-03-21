@@ -19,6 +19,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [ps(1) プロセス一覧・調査]({{ '/man_rocky9.7/ps.html' | relative_url }})（`ps -aux`/`ps -ef`、`-o`列カスタム、`--sort`、スレッド、ツリー表示）
 - [systemctl(1) systemd サービス操作・状態確認]({{ '/man_rocky9.7/systemctl.html' | relative_url }})（status/is-active、restart、enable、daemon-reload、ログ導線）
 - [journalctl(1) systemd journal ログ調査]({{ '/man_rocky9.7/journalctl.html' | relative_url }})（`-u/-b`、`-f`追跡、`--since`、`-p`重要度、`--list-boots`）
+- [less(1) ページャ（ログ閲覧/検索）]({{ '/man_rocky9.7/less.html' | relative_url }})（検索`/`、末尾`G`、追跡`F`、色`-R`、折返し`-S`）
 - [firewall-cmd(1) firewalld 操作（ゾーン/サービス/ポート）]({{ '/man_rocky9.7/firewall-cmd.html' | relative_url }})（runtime/permanent、zone指定、add-service/add-port、reload、永続化）
 - [nmcli(1) NetworkManager 操作（状態/接続/デバイス）]({{ '/man_rocky9.7/nmcli.html' | relative_url }})（device/connection、up/down、reload、スクリプト向け`-t/-f/-g`）
 - [nmap(1) ネットワーク調査（疎通/開放ポート/サービス推定）]({{ '/man_rocky9.7/nmap.html' | relative_url }})（`-sn`生存確認、`-p/--top-ports`、`-sV`、保存`-oA`、open/filteredの見方）
