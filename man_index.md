@@ -37,6 +37,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 ### セクション 8（管理者コマンド）
 
 - [ss(8) ソケット統計・接続確認]({{ '/man_rocky9.7/ss.html' | relative_url }})（LISTEN確認、接続状況、TCP stateフィルタ、タイマー、`-i`内部情報、SELinux context）
+- [ip(8) ネットワーク操作（addr/link/route/neigh/netns）]({{ '/man_rocky9.7/ip.html' | relative_url }})（`-br/-j`、`addr/link/route/neigh`、`netns`、`monitor`、`-batch`）
 - [useradd(8) ユーザー作成]({{ '/man_rocky9.7/useradd.html' | relative_url }})（`-m`でホーム作成、`-G`補助グループ、`-e`期限、`-D`デフォルト確認、`-p`の落とし穴）
 - [usermod(8) ユーザー属性変更]({{ '/man_rocky9.7/usermod.html' | relative_url }})（`-G`補助グループ置換注意、`-d -m`でホーム移動、`-L/-U`、`-l`ログイン名変更）
 - [userdel(8) ユーザー削除]({{ '/man_rocky9.7/userdel.html' | relative_url }})（`-r`でホーム削除、ログイン中は不可、ホーム外ファイルは残る）
