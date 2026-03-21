@@ -35,6 +35,9 @@ nmcli connection down "My wired connection"
 # 接続ファイルを再読込（手編集した/配布した時の反映）
 nmcli connection reload
 
+# リモートで怖い変更は checkpoint で保険（タイムアウトで自動ロールバック）
+nmcli device checkpoint --timeout 60 eth0 -- nmcli connection up "My wired connection" ifname eth0
+
 # 疎通状態（NetworkManager 観点）
 nmcli networking connectivity
 nmcli networking connectivity check
@@ -102,6 +105,25 @@ nmcli connection down "My wired connection"
 - `nmcli connection down` は「その時点の active connection を落とす」操作です
   - device が完全に使えなくなる/自動復旧しない、などの挙動が絡むことがあるので、リモート作業では慎重に
 
+### リモート作業の安全策：checkpoint（自動ロールバック保険）
+
+リモート（SSH 等）でネットワーク設定を触る時は、
+切断＝復旧が面倒/物理コンソールが必要、になりがちです。
+
+`nmcli device checkpoint` は、変更前の状態をチェックポイントとして保存し、
+**確認されなければ timeout で自動的に元へ戻す**（ロールバックする）仕組みを提供します。
+
+```bash
+# eth0 に対して、60秒のチェックポイントを取ってからコマンドを実行する
+# コマンド終了後に確認プロンプトが出るので、keep するか戻すかを判断できる
+nmcli device checkpoint --timeout 60 eth0 -- \
+  nmcli connection up "My wired connection" ifname eth0
+```
+
+- まずは `--timeout` を短め（例：30〜120秒）にして試すのが安全です
+- 複数 IF が絡むなら `eth0` の代わりに対象 IF を並べます（例：`eth0 ens192`）
+- うまくいっても油断せず、別端末から再ログインできるかを確認してから keep します
+
 ### 変更（永続）: connection modify
 
 接続プロファイルに対する変更は `nmcli connection modify` で行います。
@@ -109,6 +131,53 @@ nmcli connection down "My wired connection"
 ```bash
 # 例：自動接続を切る（接続名を指定して設定変更）
 nmcli connection modify "My wired connection" connection.autoconnect no
+```
+
+#### 固定IP/DNS/ゲートウェイへ切替（最小例）
+
+「DHCP から固定IPへ」「DNS を明示したい」といった変更は、
+対象 connection に対して `ipv4.*` を設定します。
+
+まず、対象 connection 名を特定します（active の一覧を見るのが速いです）。
+
+```bash
+nmcli connection show --active
+```
+
+次に、例として次のように設定します（値は環境に合わせて差し替え）。
+
+```bash
+# 例：固定IP（192.168.1.23/24）、GW（192.168.1.1）、DNS（8.8.8.8/1.1.1.1）
+nmcli connection modify "My wired connection" \
+  ipv4.method manual \
+  ipv4.addresses "192.168.1.23/24" \
+  ipv4.gateway "192.168.1.1" \
+  ipv4.dns "8.8.8.8 1.1.1.1"
+
+# 反映（接続の張り直し）
+nmcli connection down "My wired connection"
+nmcli connection up "My wired connection" ifname eth0
+```
+
+リモート作業で怖い場合は、上の「反映」部分を checkpoint で包むのが安全です。
+
+```bash
+nmcli device checkpoint --timeout 60 eth0 -- \
+  nmcli connection up "My wired connection" ifname eth0
+```
+
+変更後の確認は、まず `device show` で IP と経路が期待通りかを見ます。
+
+```bash
+nmcli device show eth0
+```
+
+DHCP に戻す（最小例）は次です。
+
+```bash
+nmcli connection modify "My wired connection" ipv4.method auto
+nmcli connection down "My wired connection"
+nmcli connection up "My wired connection" ifname eth0
 ```
 
 - `--temporary` を使うと「永続プロファイルではなく一時的に」変更できます
