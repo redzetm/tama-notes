@@ -1,6 +1,6 @@
 ---
 title: "運用コマンド man風ノート インデックス（Rocky Linux 9.7）"
-date: 2026-03-21
+date: 2026-03-22
 ---
 
 # 運用コマンド man風ノート（Rocky Linux 9.7）
@@ -22,6 +22,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [less(1) ページャ（ログ閲覧/検索）]({{ '/man_rocky9.7/less.html' | relative_url }})（検索`/`、末尾`G`、追跡`F`、色`-R`、折返し`-S`）
 - [find(1) ファイル探索]({{ '/man_rocky9.7/find.html' | relative_url }})（`-name/-type`、更新`-mtime/-mmin`、サイズ`-size`、除外`-prune`、安全`-print0`）
 - [ls(1) ディレクトリ一覧]({{ '/man_rocky9.7/ls.html' | relative_url }})（`-l/-h`、隠し`-a/-A`、時刻`-t`、サイズ`-S`、SELinux`-Z`、dir自身`-d`）
+- [id(1) ユーザー/グループID確認]({{ '/man_rocky9.7/id.html' | relative_url }})（実UID/実効UID、所属グループ、`-un/-Gn`、SELinux`-Z`）
 - [firewall-cmd(1) firewalld 操作（ゾーン/サービス/ポート）]({{ '/man_rocky9.7/firewall-cmd.html' | relative_url }})（runtime/permanent、zone指定、add-service/add-port、reload、永続化）
 - [nmcli(1) NetworkManager 操作（状態/接続/デバイス）]({{ '/man_rocky9.7/nmcli.html' | relative_url }})（device/connection、up/down、reload、スクリプト向け`-t/-f/-g`）
 - [nmap(1) ネットワーク調査（疎通/開放ポート/サービス推定）]({{ '/man_rocky9.7/nmap.html' | relative_url }})（`-sn`生存確認、`-p/--top-ports`、`-sV`、保存`-oA`、open/filteredの見方）
