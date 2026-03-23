@@ -32,6 +32,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [id(1) ユーザー/グループID確認]({{ '/man_rocky9.7/id.html' | relative_url }})（実UID/実効UID、所属グループ、`-un/-Gn`、SELinux`-Z`）
 - [firewall-cmd(1) firewalld 操作（ゾーン/サービス/ポート）]({{ '/man_rocky9.7/firewall-cmd.html' | relative_url }})（runtime/permanent、zone指定、add-service/add-port、reload、永続化）
 - [nmcli(1) NetworkManager 操作（状態/接続/デバイス）]({{ '/man_rocky9.7/nmcli.html' | relative_url }})（device/connection、up/down、reload、スクリプト向け`-t/-f/-g`）
+- [dig(1) DNS 問い合わせ（nslookup代替）]({{ '/man_rocky9.7/dig.html' | relative_url }})（`+short`、`@server`、`-x`逆引き、`+trace`、終了コード）
 - [nmap(1) ネットワーク調査（疎通/開放ポート/サービス推定）]({{ '/man_rocky9.7/nmap.html' | relative_url }})（`-sn`生存確認、`-p/--top-ports`、`-sV`、保存`-oA`、open/filteredの見方）
 - [df(1) ファイルシステム容量確認]({{ '/man_rocky9.7/df.html' | relative_url }})（`-hT`の見方、iノード枯渇`-i`、疑似FS除外`-x`、`--output`で列固定、`--total`）
 - [du(1) ディレクトリ容量見積り]({{ '/man_rocky9.7/du.html' | relative_url }})（`-sh`合計、`--max-depth`で直下比較、`-x`で別FS回避、`--exclude`、見た目`--apparent-size`）
@@ -47,6 +48,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 
 - [ss(8) ソケット統計・接続確認]({{ '/man_rocky9.7/ss.html' | relative_url }})（LISTEN確認、接続状況、TCP stateフィルタ、タイマー、`-i`内部情報、SELinux context）
 - [ip(8) ネットワーク操作（addr/link/route/neigh/netns）]({{ '/man_rocky9.7/ip.html' | relative_url }})（`-br/-j`、`addr/link/route/neigh`、`netns`、`monitor`、`-batch`）
+- [mtr(8) 経路+遅延/損失をまとめて診断（traceroute+ping）]({{ '/man_rocky9.7/mtr.html' | relative_url }})（report`-r`、DNS無効`-n`、TCP/UDP切替、列指定`-o`、注意点）
 - [useradd(8) ユーザー作成]({{ '/man_rocky9.7/useradd.html' | relative_url }})（`-m`でホーム作成、`-G`補助グループ、`-e`期限、`-D`デフォルト確認、`-p`の落とし穴）
 - [usermod(8) ユーザー属性変更]({{ '/man_rocky9.7/usermod.html' | relative_url }})（`-G`補助グループ置換注意、`-d -m`でホーム移動、`-L/-U`、`-l`ログイン名変更）
 - [userdel(8) ユーザー削除]({{ '/man_rocky9.7/userdel.html' | relative_url }})（`-r`でホーム削除、ログイン中は不可、ホーム外ファイルは残る）
