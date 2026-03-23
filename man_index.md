@@ -33,6 +33,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [wc(1) 行数/単語数/バイト数カウント]({{ '/man_rocky9.7/wc.html' | relative_url }})（`-l`件数、`-c`バイト/`-m`文字、`-L`最大行長、`grep | wc -l`）
 - [passwd(1) パスワード設定・ロック]({{ '/man_rocky9.7/passwd.html' | relative_url }})（`-l`ロック/`-u`解除、`-e`次回変更強制、`-S`状態、`--stdin`注意）
 - [chmod(1) パーミッション変更]({{ '/man_rocky9.7/chmod.html' | relative_url }})（8進数`644/755`、記号形式`u+x`、再帰`-R`注意、`a+X`、setgid/sticky）
+- [test(1) 条件判定（ファイル/文字列/数値比較）]({{ '/man_rocky9.7/test.html' | relative_url }})（`[`/`test`、終了コード、空文字・クォート、`&&/||`推奨、`[[`との違い）
 
 ### セクション 8（管理者コマンド）
 
