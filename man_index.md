@@ -27,6 +27,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 - [journalctl(1) systemd journal ログ調査]({{ '/man_rocky9.7/journalctl.html' | relative_url }})（`-u/-b`、`-f`追跡、`--since`、`-p`重要度、`--list-boots`）
 - [less(1) ページャ（ログ閲覧/検索）]({{ '/man_rocky9.7/less.html' | relative_url }})（検索`/`、末尾`G`、追跡`F`、色`-R`、折返し`-S`）
 - [find(1) ファイル探索]({{ '/man_rocky9.7/find.html' | relative_url }})（`-name/-type`、更新`-mtime/-mmin`、サイズ`-size`、除外`-prune`、安全`-print0`）
+- [xargs(1) 標準入力から引数を組み立てて実行]({{ '/man_rocky9.7/xargs.html' | relative_url }})（安全`-0`、テンプレ`-I`、並列`-P`、確認`-t/-p`、終了コード）
 - [ls(1) ディレクトリ一覧]({{ '/man_rocky9.7/ls.html' | relative_url }})（`-l/-h`、隠し`-a/-A`、時刻`-t`、サイズ`-S`、SELinux`-Z`、dir自身`-d`）
 - [id(1) ユーザー/グループID確認]({{ '/man_rocky9.7/id.html' | relative_url }})（実UID/実効UID、所属グループ、`-un/-Gn`、SELinux`-Z`）
 - [firewall-cmd(1) firewalld 操作（ゾーン/サービス/ポート）]({{ '/man_rocky9.7/firewall-cmd.html' | relative_url }})（runtime/permanent、zone指定、add-service/add-port、reload、永続化）
