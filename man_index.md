@@ -15,6 +15,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 ### セクション 1（ユーザーコマンド）
 
 - [grep(1) 行検索・ログ調査]({{ '/man_rocky9.7/grep.html' | relative_url }})（BRE/ERE/固定文字列、再帰、include/exclude、バイナリ扱い、終了コード）
+- [sed(1) ストリーム編集（置換/抽出/削除）]({{ '/man_rocky9.7/sed.html' | relative_url }})（`-n`と`p/d/s`、範囲指定、`-i`注意、終了コード）
 - [curl(1) HTTP/HTTPS 通信・API叩き・ファイル取得]({{ '/man_rocky9.7/curl.html' | relative_url }})（`-fsSL`定番、ステータス取得`-w`、ヘッダ`-I/-D`、デバッグ`-v`、タイムアウト/リトライ、TLS切り分け）
 - [wget(1) 非対話ダウンロード（取得/再開/再帰/ミラー）]({{ '/man_rocky9.7/wget.html' | relative_url }})（保存`-O/-P`、再開`-c`、ログ`-o/-a`、背景`-b`、リトライ/timeout、再帰`-r/-l/-k/-p`）
 - [top(1) プロセス監視・負荷調査]({{ '/man_rocky9.7/top.html' | relative_url }})（%CPU/%MEM、スレッド表示、PID監視、バッチ出力、よく使うキー）
