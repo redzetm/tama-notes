@@ -48,6 +48,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 
 - [ss(8) ソケット統計・接続確認]({{ '/man_rocky9.7/ss.html' | relative_url }})（LISTEN確認、接続状況、TCP stateフィルタ、タイマー、`-i`内部情報、SELinux context）
 - [ip(8) ネットワーク操作（addr/link/route/neigh/netns）]({{ '/man_rocky9.7/ip.html' | relative_url }})（`-br/-j`、`addr/link/route/neigh`、`netns`、`monitor`、`-batch`）
+- [ping(8) ICMP疎通確認（タイムアウト/回数/MTUの初動切り分け）]({{ '/man_rocky9.7/ping.html' | relative_url }})（`-c`回数、`-W/-w`timeout、`-M/-s`MTU、終了コード）
 - [mtr(8) 経路+遅延/損失をまとめて診断（traceroute+ping）]({{ '/man_rocky9.7/mtr.html' | relative_url }})（report`-r`、DNS無効`-n`、TCP/UDP切替、列指定`-o`、注意点）
 - [tcpdump(8) パケットキャプチャ（疎通/遅延/再送/DNS切り分け）]({{ '/man_rocky9.7/tcpdump.html' | relative_url }})（IF指定`-i`、DNS無効`-n/-nn`、保存`-w`、読取`-r`、BPF式）
 - [useradd(8) ユーザー作成]({{ '/man_rocky9.7/useradd.html' | relative_url }})（`-m`でホーム作成、`-G`補助グループ、`-e`期限、`-D`デフォルト確認、`-p`の落とし穴）
