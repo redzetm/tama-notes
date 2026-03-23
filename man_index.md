@@ -16,6 +16,7 @@ Rocky Linux 9.7 の運用で頻出なコマンドについて、`man` をベー�
 
 - [grep(1) 行検索・ログ調査]({{ '/man_rocky9.7/grep.html' | relative_url }})（BRE/ERE/固定文字列、再帰、include/exclude、バイナリ扱い、終了コード）
 - [sed(1) ストリーム編集（置換/抽出/削除）]({{ '/man_rocky9.7/sed.html' | relative_url }})（`-n`と`p/d/s`、範囲指定、`-i`注意、終了コード）
+- [gawk(1) AWK（パターン走査・テキスト処理）]({{ '/man_rocky9.7/gawk.html' | relative_url }})（列/条件/集計、`-F/-v/-f`、`BEGIN/END`、頻度集計レシピ）
 - [sort(1) 行ソート（キー指定/数値/重複排除）]({{ '/man_rocky9.7/sort.html' | relative_url }})（locale注意`LC_ALL=C`、`-k/-t`キー指定、`-n/-h/-V`、`-u/-s`）
 - [uniq(1) 重複行の整理（カウント/抽出/除外）]({{ '/man_rocky9.7/uniq.html' | relative_url }})（隣接重複だけ、`sort | uniq`定番、`-c/-d/-D/-u`、skip/ignore-case）
 - [curl(1) HTTP/HTTPS 通信・API叩き・ファイル取得]({{ '/man_rocky9.7/curl.html' | relative_url }})（`-fsSL`定番、ステータス取得`-w`、ヘッダ`-I/-D`、デバッグ`-v`、タイムアウト/リトライ、TLS切り分け）
