@@ -31,6 +31,13 @@ Linux 上で C 言語を書くときに使う API について、`man` の整理
 	- 分類：標準ライブラリ関数（`<stdio.h>`）
 - [puts(3) 文字列を標準出力へ簡単に出力する]({{ '/man_lib-syscall/puts.html' | relative_url }})
 	- 分類：標準ライブラリ関数（`<stdio.h>`）
+- [scanf(3) 標準入力から書式に従って読み取る]({{ '/man_lib-syscall/scanf.html' | relative_url }})
+	- 分類：標準ライブラリ関数（`<stdio.h>`）
+
+### 演算子・言語機能
+
+- [sizeof 演算子 型やオブジェクトの大きさを調べる]({{ '/man_lib-syscall/sizeof.html' | relative_url }})
+	- 分類：演算子
 
 最初に増やしやすい候補：
 
