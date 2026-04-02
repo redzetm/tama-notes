@@ -27,6 +27,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 
 ## 研究メモ
 - [運用コマンド man風ノート インデックス（Rocky Linux 9.7）]({{ '/man_index.html' | relative_url }})
+- [C言語ライブラリ／システムコール man風ノート インデックス]({{ '/lib-syscall_index.html' | relative_url }})
 - [開発現場でのSELinuxの位置づけとdisable]({{ '/selinux.html' | relative_url }})
 - [Let's EncryptでSSLで暗号化する（Certbot + Apache）]({{ '/setup-lets-encrypt.html' | relative_url }})
 - [今どきは必須のSSL/TLSの実装とカーネルSSL（KTLS）通信の基本]({{ '/ssl_tls.html' | relative_url }})
