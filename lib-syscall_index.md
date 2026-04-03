@@ -33,6 +33,10 @@ Linux 上で C 言語を書くときに使う API について、`man` の整理
 	- 分類：標準ライブラリ関数（`<stdio.h>`）
 - [scanf(3) 標準入力から書式に従って読み取る]({{ '/man_lib-syscall/scanf.html' | relative_url }})
 	- 分類：標準ライブラリ関数（`<stdio.h>`）
+- [fgets(3) 1行を安全寄りに読み取る]({{ '/man_lib-syscall/fgets.html' | relative_url }})
+	- 分類：標準ライブラリ関数（`<stdio.h>`）
+- [sscanf(3) 文字列を入力元として書式解析する]({{ '/man_lib-syscall/sscanf.html' | relative_url }})
+	- 分類：標準ライブラリ関数（`<stdio.h>`）
 
 ### 演算子・言語機能
 
