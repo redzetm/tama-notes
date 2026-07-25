@@ -876,6 +876,42 @@ reparent
 まずは、Linuxのプロセスは親子関係を持ち、プロセスツリーを作る、と理解するとよいです。
 そして、シェルからコマンドを実行するときには、fork()、exec()、wait() が中心になる、と考えるとかなり見通しが良くなります。
 
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(void) {
+    pid_t pid;
+    int status;
+
+    /* fork() で子プロセスを作ります。 */
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* ここは子プロセスです。 */
+        /* execlp() で ls コマンドに置き換えます。 */
+        execlp("ls", "ls", "-l", NULL);
+
+        /* exec に失敗した場合だけ、ここに来ます。 */
+        perror("execlp");
+        exit(1);
+    }
+
+    /* ここは親プロセスです。 */
+    /* 子プロセスが終わるのを待ちます。 */
+    wait(&status);
+
+    printf("child process finished\n");
+
+    return 0;
+}
 
 
 
