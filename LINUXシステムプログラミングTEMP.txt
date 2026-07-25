@@ -221,5 +221,77 @@ inodeには、ファイルの種類、サイズ、所有者、更新時刻、デ
 私たちは普段ファイル名でファイルを扱っていますが、Linuxの内部では inodeを通してファイルを管理している、ということになります。
 UmuOSの視点では、通常ファイルは、バイト列として扱えるデータとして考え、その周辺に fd、ファイル位置、inode などの管理情報があると見ると
 イメージしやすいでしょう！
+一応イメージとして、
+
+Linuxで stat したときに見える情報が、かなり inode メタデータのイメージに近いです。
+
+inode番号
+ファイル種別
+パーミッション
+所有者UID
+グループGID
+ファイルサイズ
+リンク数
+最終アクセス時刻
+最終更新時刻
+メタデータ変更時刻
+データブロックの位置情報
+使用ブロック数
+
+構造体のイメージです。
+
+struct inode_image {
+    unsigned long inode_number;   // inode番号
+    unsigned int mode;            // ファイル種別 + パーミッション
+    unsigned int uid;             // 所有者
+    unsigned int gid;             // グループ
+    unsigned long size;           // ファイルサイズ
+    unsigned int link_count;      // ハードリンク数
+
+    long atime;                   // 最終アクセス時刻
+    long mtime;                   // ファイル内容の最終更新時刻
+    long ctime;                   // inodeメタデータの最終変更時刻
+
+    unsigned long blocks;         // 使用ブロック数
+    unsigned long block_ptrs[];   // データブロックへの参照
+};
+
+重要なのは、inodeはファイル名を持たないことです。
+ファイル名はディレクトリ側が持っていて、ディレクトリが、ファイル名 -> inode番号 という対応を管理しています。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
