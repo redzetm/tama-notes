@@ -1772,6 +1772,83 @@ Ushのようなシェルを作る場合、このパイプはかなり重要で�
 そのうえで exec() して、コマンドを実行します。
 
 つまり、パイプは fd の操作と強く結びついています。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(void) {
+    int fd[2];
+    pid_t pid1;
+    pid_t pid2;
+
+    /* パイプを作ります。 */
+    if (pipe(fd) < 0) {
+        perror("pipe");
+        exit(1);
+    }
+
+    /* 1つ目の子プロセスを作ります。 */
+    pid1 = fork();
+
+    if (pid1 < 0) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid1 == 0) {
+        /* ls の標準出力をパイプの書き込み口へつなぎます。 */
+        if (dup2(fd[1], STDOUT_FILENO) < 0) {
+            perror("dup2");
+            exit(1);
+        }
+
+        close(fd[0]);
+        close(fd[1]);
+
+        execlp("ls", "ls", NULL);
+
+        /* exec に失敗した場合だけ、ここに来ます。 */
+        perror("execlp ls");
+        exit(1);
+    }
+
+    /* 2つ目の子プロセスを作ります。 */
+    pid2 = fork();
+
+    if (pid2 < 0) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid2 == 0) {
+        /* grep の標準入力をパイプの読み取り口へつなぎます。 */
+        if (dup2(fd[0], STDIN_FILENO) < 0) {
+            perror("dup2");
+            exit(1);
+        }
+
+        close(fd[0]);
+        close(fd[1]);
+
+        execlp("grep", "grep", "txt", NULL);
+
+        /* exec に失敗した場合だけ、ここに来ます。 */
+        perror("execlp grep");
+        exit(1);
+    }
+
+    /* 親プロセスでは、パイプの両端を閉じます。 */
+    close(fd[0]);
+    close(fd[1]);
+
+    /* 2つの子プロセスの終了を待ちます。 */
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
+
+    return 0;
+}
 
 次に、名前付きパイプ、FIFOです。
 
