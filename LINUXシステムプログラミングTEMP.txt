@@ -2416,8 +2416,128 @@ shm_open() で共有メモリオブジェクトを作り、ftruncate() でサイ
     空いたら共有データを書き換える
 
 つまり、セマフォは交通整理のような役割を持ちます。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 
-次に、futexです。
+int main(void) {
+    const char *sem_name = "/tama_semaphore";
+    sem_t *sem;
+    int *shared_count;
+    pid_t pid;
+
+    /* 共有メモリを作ります。 */
+    shared_count = mmap(NULL, sizeof(int),
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS,
+                        -1, 0);
+
+    if (shared_count == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+    }
+
+    *shared_count = 0;
+
+    /* 前回のセマフォが残っていた場合に消します。 */
+    sem_unlink(sem_name);
+
+    /* セマフォを作ります。初期値は1です。 */
+    sem = sem_open(sem_name, O_CREAT, 0666, 1);
+
+    if (sem == SEM_FAILED) {
+        perror("sem_open");
+        munmap(shared_count, sizeof(int));
+        exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        sem_close(sem);
+        sem_unlink(sem_name);
+        munmap(shared_count, sizeof(int));
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* 子プロセスも同じ共有メモリを更新します。 */
+        for (int i = 0; i < 5; i++) {
+            sem_wait(sem);
+
+            *shared_count = *shared_count + 1;
+            printf("child count: %d\n", *shared_count);
+
+            sem_post(sem);
+
+            usleep(100000);
+        }
+
+        sem_close(sem);
+        munmap(shared_count, sizeof(int));
+        exit(0);
+    }
+
+    /* 親プロセスも同じ共有メモリを更新します。 */
+    for (int i = 0; i < 5; i++) {
+        sem_wait(sem);
+
+        *shared_count = *shared_count + 1;
+        printf("parent count: %d\n", *shared_count);
+
+        sem_post(sem);
+
+        usleep(100000);
+    }
+
+    wait(NULL);
+
+    printf("final count: %d\n", *shared_count);
+
+    sem_close(sem);
+    sem_unlink(sem_name);
+    munmap(shared_count, sizeof(int));
+
+    return 0;
+}
+
+mmap()
+    親子で共有できるメモリを作る
+
+sem_open()
+    セマフォを作る
+    初期値1なので、同時に入れるプロセスは1つだけ
+
+fork()
+    親プロセスと子プロセスに分かれる
+
+sem_wait()
+    セマフォを取る
+    他のプロセスが使っていたら待つ
+
+共有データを更新する
+    shared_count を増やす
+
+sem_post()
+    セマフォを戻す
+    他のプロセスが使えるようになる
+
+この例では、親プロセスと子プロセスが、同じ shared_count という共有メモリ上の値を更新しています。
+もし2つのプロセスが同時に shared_count を読み書きすると、更新がぶつかって正しい値にならない可能性があります。
+
+そこで、共有データを触る前に sem_wait() でセマフォを取得し、更新が終わったら sem_post() でセマフォを解放しています。
+セマフォの初期値を1にしているため、同時に共有データを触れるプロセスは1つだけになります。
+
+つまり、セマフォはデータを送る仕組みではなく、共有資源を使ってよい順番を制御する仕組みです。
+
+
+次に、futex（フューテックス）です。
 
 futex は Fast Userspace Mutex の略です。
 名前の通り、ユーザー空間で高速にロック処理を行い、必要なときだけカーネルに助けてもらう仕組みです。
