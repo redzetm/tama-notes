@@ -1986,6 +1986,160 @@ Unixドメインソケットは、サーバープロセスとクライアント�
 
 /tmp/app.sock 自体に通信データが保存されるわけではありません。
 ソケットの実体や通信バッファはカーネル側で管理されます。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+
+int main(void) {
+    const char *socket_path = "/tmp/tama_socket.sock";
+    int server_fd;
+    int client_fd;
+    int conn_fd;
+    pid_t pid;
+    struct sockaddr_un addr;
+    char buffer[128];
+    ssize_t n;
+
+    /* サーバー用ソケットを作ります。 */
+    server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    if (server_fd < 0) {
+        perror("socket");
+        exit(1);
+    }
+
+    /* 前回のソケットファイルが残っていた場合に消します。 */
+    unlink(socket_path);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    /* /tmp/tama_socket.sock という名前に結びつけます。 */
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(server_fd);
+        exit(1);
+    }
+
+    /* 接続待ち状態にします。 */
+    if (listen(server_fd, 1) < 0) {
+        perror("listen");
+        close(server_fd);
+        unlink(socket_path);
+        exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        close(server_fd);
+        unlink(socket_path);
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* ここから子プロセス、つまりクライアント側です。 */
+        client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+        if (client_fd < 0) {
+            perror("socket client");
+            exit(1);
+        }
+
+        /* サーバーの Unixドメインソケットへ接続します。 */
+        if (connect(client_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            perror("connect");
+            close(client_fd);
+            exit(1);
+        }
+
+        write(client_fd, "status", 6);
+
+        n = read(client_fd, buffer, sizeof(buffer) - 1);
+
+        if (n < 0) {
+            perror("read client");
+            close(client_fd);
+            exit(1);
+        }
+
+        buffer[n] = '\0';
+
+        printf("client received: %s\n", buffer);
+
+        close(client_fd);
+        exit(0);
+    }
+
+    /* ここから親プロセス、つまりサーバー側です。 */
+    conn_fd = accept(server_fd, NULL, NULL);
+
+    if (conn_fd < 0) {
+        perror("accept");
+        close(server_fd);
+        unlink(socket_path);
+        exit(1);
+    }
+
+    n = read(conn_fd, buffer, sizeof(buffer) - 1);
+
+    if (n < 0) {
+        perror("read server");
+        close(conn_fd);
+        close(server_fd);
+        unlink(socket_path);
+        exit(1);
+    }
+
+    buffer[n] = '\0';
+
+    printf("server received: %s\n", buffer);
+
+    write(conn_fd, "OK", 2);
+
+    close(conn_fd);
+    close(server_fd);
+
+    wait(NULL);
+
+    /* 使い終わったソケットファイルを削除します。 */
+    unlink(socket_path);
+
+    return 0;
+}
+
+親プロセス、サーバー側
+    socket() で Unixドメインソケットを作る
+    bind() で /tmp/tama_socket.sock というパス名に結びつける
+    listen() で接続待ちにする
+    accept() でクライアント接続を受け付ける
+    read() で "status" を受け取る
+    write() で "OK" を返す
+
+子プロセス、クライアント側
+    socket() で Unixドメインソケットを作る
+    connect() で /tmp/tama_socket.sock に接続する
+    write() で "status" を送る
+    read() で "OK" を受け取る
+
+この例では、親プロセスをサーバー、子プロセスをクライアントとして動かしています。
+サーバー側は socket() で Unixドメインソケットを作り、bind() で /tmp/tama_socket.sock というパス名に結びつけます。
+その後 listen() で接続待ちになり、accept() でクライアントからの接続を受け取ります。
+
+クライアント側は socket() でソケットを作り、connect() で /tmp/tama_socket.sock に接続します。
+このとき、IPアドレスやポート番号は使っていません。
+同じマシン内のパス名を使って、サーバープロセスへ接続しています。
+
+/tmp/tama_socket.sock は通信データを保存する通常ファイルではありません。
+接続先を表す名前としてファイルシステム上に見えているだけで、実際の通信状態やバッファはカーネル側で管理されています。
+
 
 次に、メッセージキューです。
 
