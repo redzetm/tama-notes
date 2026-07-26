@@ -39,6 +39,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語３（初級）　マクロ・入出力・文字列 編]({{ '/umuOSの為のC言語3.html' | relative_url }})
 - [UmuOSの為のC言語４（初級）　ポインタ・文字列とポインタ 編]({{ '/umuOSの為のC言語4.html' | relative_url }})
 - [UmuOSの為のC言語５（初級）　構造体・ファイル処理編]({{ '/umuOSの為のC言語5.html' | relative_url }})
+- [UmuOSの為のC言語１（中級）　1章　概要および主要概念]({{ '/umuOSの為のC言語（中級）1.html' | relative_url }})
 - [TCP/IP通信解析の為のC言語]({{ '/tcpip_c_analysis.html' | relative_url }})
 - [UmuOSの為のC言語　Linuxシステムコール、低レベルライブラリ関数１（ファイルI/O）]({{ '/system_call_lib1.html' | relative_url }})
 - [徹底解説！自作シェル ush（うーしゅ）0.0.6解説書]({{ '/ush-0.0.6徹底解説.html' | relative_url }})
