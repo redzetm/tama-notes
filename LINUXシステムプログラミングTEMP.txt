@@ -2843,19 +2843,192 @@ OSやライブラリを作る側から見ると、ヘッダファイルは「こ
 重要なのは、ヘッダファイルは実装そのものではなく、使い方をコンパイラに知らせるための情報である、という点です。
 そして、Linuxシステムプログラミングでは、glibcやPOSIX、Linux固有機能のヘッダを使い分けながら、カーネルの機能へアクセスしていくことになります。
 
+１章の４の８　エラー処理
 
+Linuxのシステムプログラミングでは、エラーチェックとエラー処理がとても重要です。
+というより、システムプログラミングでは、関数は失敗するものとして扱うくらいの感覚が必要になります。
 
+たとえば、open() はファイルを開く関数ですが、必ず成功するとは限りません。
 
+ファイルが存在しない
+権限がない
+ディレクトリを開こうとしている
+開けるファイル数の上限に達している
 
+このような理由で失敗することがあります。
 
+Linuxやglibcの多くの関数では、エラーが起きたかどうかを戻り値で知らせます。
+代表的には、失敗したときに -1 を返します。
 
+たとえば、open()、read()、write()、close() などでは、失敗時に -1 が返ることが多いです。
 
+ただし、戻り値の -1 は、何かが失敗したということを表すだけです。
+なぜ失敗したのか、という詳しい理由は errno という変数に入ります。
 
+errno を使うには、次のヘッダファイルを読み込みます。
 
+#include <errno.h>
 
+errno は、エラーの原因を表す整数値です。
+たとえば、次のような値があります。
 
+ENOENT
+    No such file or directory
+    そのようなファイルやディレクトリはありません
 
+EACCES
+    Permission denied
+    権限がありません
 
+EBADF
+    Bad file descriptor
+    不正なファイルディスクリプタです
+
+EEXIST
+    File exists
+    ファイルがすでに存在します
+
+EINVAL
+    Invalid argument
+    無効な引数です
+
+ENOMEM
+    Cannot allocate memory
+    メモリを確保できません
+
+EINTR
+    Interrupted system call
+    システムコールがシグナルで割り込まれました
+
+EIO
+    Input/output error
+    入出力エラーです
+
+EPIPE
+    Broken pipe
+    パイプが切断されました
+
+EPERM
+    Operation not permitted
+    許可されていない操作です
+
+つまり、戻り値で失敗したことを確認し、errno で失敗した理由を見る、という流れになります。
+
+たとえば、存在しないファイルを open() しようとする例です。
+
+例）
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
+int main(void) {
+    int fd;
+
+    fd = open("not_found.txt", O_RDONLY);
+
+    if (fd < 0) {
+        perror("open");
+        exit(1);
+    }
+
+    close(fd);
+
+    return 0;
+}
+perror() は、現在の errno の値を見て、人間が読めるエラーメッセージを標準エラー出力へ表示します。
+open: No such file or directory
+perror() は、次のように宣言されています。
+
+#include <stdio.h>
+
+void perror(const char *str);
+
+str に文字列を渡すと、その文字列、コロン、errno に対応するエラーメッセージを表示します。
+そのため、どの処理で失敗したのかを表示するために、関数名や処理名を渡すと便利です。
+
+例）
+
+if (close(fd) < 0) {
+    perror("close");
+}
+
+errno の値を使うと、エラーの種類ごとに処理を分けることもできます。
+
+例）
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
+int main(void) {
+    int fd;
+
+    fd = open("memo.txt", O_RDONLY);
+
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "memo.txt does not exist\n");
+        } else if (errno == EACCES) {
+            fprintf(stderr, "permission denied\n");
+        } else {
+            perror("open");
+        }
+
+        exit(1);
+    }
+
+    close(fd);
+
+    return 0;
+}
+
+ENOENT
+    ファイルやディレクトリが存在しない
+
+EACCES
+    権限がない
+
+それ以外
+    perror() で通常のエラーメッセージを表示する
+
+errno の値を信用してよいのは、関数がエラーを返した直後です。関数が成功した場合でも、errno が変更されることがあります。
+そのため、errno だけを見て、エラーが起きたかどうかを判断してはいけません。
+
+関数をまたいで errno を使いたい場合は、すぐに別の変数へ退避しておく必要があります。
+
+例）
+
+if (fsync(fd) < 0) {
+    int err = errno;
+
+    fprintf(stderr, "fsync failed\n");
+
+    if (err == EIO) {
+        fprintf(stderr, "I/O error\n");
+        exit(1);
+    }
+}
+
+エラー処理で重要なのは、次の流れです。
+
+1. 関数の戻り値を確認する
+2. 失敗していた場合だけ errno を見る
+3. 表示するなら perror() や strerror() を使う
+4. 別の関数を呼ぶ前に errno を保存する必要がある場合もある
+5. 一部の関数では、呼び出し前に errno = 0 としてから確認する
+
+UmuOSの視点では、エラー処理はシステムコール設計にも直結します。
+たとえば、open()、read()、write()、fork() のようなAPIを作るなら、成功時に何を返すのか、失敗時に何を返すのか、エラー理由をどこへ保存するのかを決める必要があります。
+
+Linuxでは、多くの場合、失敗時に -1 を返し、詳しい原因を errno に入れる、という流れになっています。
+この仕組みによって、プログラム側は、単に失敗したかどうかだけでなく、なぜ失敗したのかを判断できるようになります。
+
+まずは、システムプログラミングでは、関数を呼んだら戻り値を必ず確認する、と覚えるとよいです。
 
 
 
