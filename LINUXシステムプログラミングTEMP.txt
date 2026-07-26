@@ -1878,6 +1878,87 @@ echo "hello" > tama_pipe
 
 すると、端末Bから書き込んだ hello が、端末Aの cat に届きます。
 名前付きパイプは、親子関係のないプロセス同士でも、同じパス名を知っていれば通信できる点が特徴です。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+int main(void) {
+    const char *fifo_path = "tama_pipe";
+    pid_t pid;
+    int fd;
+    char buffer[128];
+    ssize_t n;
+
+    /* 名前付きパイプを作ります。 */
+    if (mkfifo(fifo_path, 0666) < 0) {
+        perror("mkfifo");
+        exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* 子プロセスは、名前付きパイプから読みます。 */
+        fd = open(fifo_path, O_RDONLY);
+
+        if (fd < 0) {
+            perror("open read");
+            exit(1);
+        }
+
+        n = read(fd, buffer, sizeof(buffer) - 1);
+
+        if (n < 0) {
+            perror("read");
+            close(fd);
+            exit(1);
+        }
+
+        buffer[n] = '\0';
+
+        printf("child received: %s\n", buffer);
+
+        close(fd);
+        exit(0);
+    }
+
+    /* 親プロセスは、名前付きパイプへ書きます。 */
+    fd = open(fifo_path, O_WRONLY);
+
+    if (fd < 0) {
+        perror("open write");
+        exit(1);
+    }
+
+    write(fd, "hello from parent\n", 18);
+
+    close(fd);
+
+    wait(NULL);
+
+    /* 使い終わった名前付きパイプを削除します。 */
+    unlink(fifo_path);
+
+    return 0;
+}
+
+この例では、mkfifo() によって tama_pipe という名前付きパイプを作っています。
+子プロセスは tama_pipe を読み取り用に open() し、親プロセスは tama_pipe を書き込み用に open() します。
+親が write() した文字列は、ファイルに保存されるのではなく、カーネル内のパイプを通って子プロセスの read() に届きます。
+
+名前付きパイプはファイルシステム上に名前として見えますが、通常ファイルのようにデータを保存する場所ではありません。
+同じパス名を知っているプロセス同士が、そこを通信口として使える仕組みです。
+
+
 
 次に、Unixドメインソケットです。
 
