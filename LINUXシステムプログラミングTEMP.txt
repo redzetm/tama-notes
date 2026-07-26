@@ -2160,6 +2160,108 @@ int main(void) {
 Linuxには、古くからある System V メッセージキューと、POSIX メッセージキューがあります。
 どちらもIPCの仕組みですが、APIや管理方法が違います。
 最初は、メッセージキューはプロセス間でメッセージをためて受け渡す仕組み、くらいに理解しておけばよいです。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <mqueue.h>
+#include <sys/wait.h>
+
+int main(void) {
+    const char *queue_name = "/tama_queue";
+    struct mq_attr attr;
+    mqd_t mq;
+    pid_t pid;
+    char buffer[128];
+    ssize_t n;
+    unsigned int priority;
+
+    attr.mq_flags = 0;
+    attr.mq_maxmsg = 10;
+    attr.mq_msgsize = sizeof(buffer);
+    attr.mq_curmsgs = 0;
+
+    /* 前回のメッセージキューが残っていた場合に消します。 */
+    mq_unlink(queue_name);
+
+    /* メッセージキューを作ります。 */
+    mq = mq_open(queue_name, O_CREAT | O_RDWR, 0666, &attr);
+
+    if (mq < 0) {
+        perror("mq_open");
+        exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        mq_close(mq);
+        mq_unlink(queue_name);
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* 子プロセスは、メッセージを受け取ります。 */
+        n = mq_receive(mq, buffer, sizeof(buffer), &priority);
+
+        if (n < 0) {
+            perror("mq_receive");
+            mq_close(mq);
+            exit(1);
+        }
+
+        buffer[n] = '\0';
+
+        printf("child received: %s\n", buffer);
+        printf("priority: %u\n", priority);
+
+        mq_close(mq);
+        exit(0);
+    }
+
+    /* 親プロセスは、メッセージを送ります。 */
+    if (mq_send(mq, "hello message queue", strlen("hello message queue"), 1) < 0) {
+        perror("mq_send");
+        mq_close(mq);
+        mq_unlink(queue_name);
+        exit(1);
+    }
+
+    wait(NULL);
+
+    mq_close(mq);
+
+    /* 使い終わったメッセージキューを削除します。 */
+    mq_unlink(queue_name);
+
+    return 0;
+}
+
+mq_open()
+    /tama_queue という名前のメッセージキューを作る
+
+fork()
+    親プロセスと子プロセスに分かれる
+
+親プロセス
+    mq_send() でメッセージを送る
+
+子プロセス
+    mq_receive() でメッセージを受け取る
+
+mq_unlink()
+    最後にメッセージキューを削除する
+
+この例では、POSIX メッセージキューを使って、親プロセスから子プロセスへメッセージを送っています。
+mq_open() で /tama_queue という名前のメッセージキューを作り、親プロセスは mq_send() で文字列を送ります。
+子プロセスは mq_receive() で、そのメッセージを1つの単位として受け取ります。
+
+パイプではデータはバイト列として流れますが、メッセージキューでは、送ったメッセージが1つのまとまりとして扱われます。
+そのため、hello message queue という文字列は、単なるバイトの流れというより、1つのメッセージとしてキューに入ります。
+
 
 次に、共有メモリです。
 
