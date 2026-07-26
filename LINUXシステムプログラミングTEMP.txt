@@ -2282,6 +2282,119 @@ mq_open() で /tama_queue という名前のメッセージキューを作り、
 共有メモリは、データコピーを減らせるため高速です。
 しかし、同じメモリを複数のプロセスが同時に読み書きするため、競合が起きやすいです。
 そのため、共有メモリを使う場合は、セマフォやミューテックスなどの同期の仕組みと一緒に使うことが多いです。
+例）
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+int main(void) {
+    const char *shm_name = "/tama_shared_memory";
+    const size_t shm_size = 4096;
+    int fd;
+    pid_t pid;
+    char *shared_memory;
+
+    /* 前回の共有メモリが残っていた場合に消します。 */
+    shm_unlink(shm_name);
+
+    /* 共有メモリを作ります。 */
+    fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
+
+    if (fd < 0) {
+        perror("shm_open");
+        exit(1);
+    }
+
+    /* 共有メモリのサイズを決めます。 */
+    if (ftruncate(fd, shm_size) < 0) {
+        perror("ftruncate");
+        close(fd);
+        shm_unlink(shm_name);
+        exit(1);
+    }
+
+    /* 共有メモリを自分のメモリ空間に対応付けます。 */
+    shared_memory = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    if (shared_memory == MAP_FAILED) {
+        perror("mmap");
+        close(fd);
+        shm_unlink(shm_name);
+        exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        munmap(shared_memory, shm_size);
+        close(fd);
+        shm_unlink(shm_name);
+        exit(1);
+    }
+
+    if (pid == 0) {
+        /* 子プロセスは、共有メモリから読みます。 */
+        sleep(1);
+
+        printf("child read: %s\n", shared_memory);
+
+        munmap(shared_memory, shm_size);
+        close(fd);
+        exit(0);
+    }
+
+    /* 親プロセスは、共有メモリへ書きます。 */
+    strcpy(shared_memory, "hello shared memory");
+
+    wait(NULL);
+
+    munmap(shared_memory, shm_size);
+    close(fd);
+
+    /* 使い終わった共有メモリを削除します。 */
+    shm_unlink(shm_name);
+
+    return 0;
+}
+
+shm_open()
+    /tama_shared_memory という名前の共有メモリを作る
+
+ftruncate()
+    共有メモリのサイズを決める
+
+mmap()
+    共有メモリをプロセスのメモリ空間へ対応付ける
+
+fork()
+    親プロセスと子プロセスに分かれる
+
+親プロセス
+    共有メモリへ文字列を書き込む
+
+子プロセス
+    同じ共有メモリから文字列を読む
+
+shm_unlink()
+    最後に共有メモリを削除する
+
+この例では、POSIX共有メモリを使って、親プロセスと子プロセスが同じメモリ領域を見るようにしています。
+shm_open() で共有メモリオブジェクトを作り、ftruncate() でサイズを決めます。
+その後、mmap() を使って、その共有メモリをプロセスのアドレス空間に対応付けます。
+
+親プロセスが shared_memory に文字列を書き込むと、子プロセスからも同じ内容が見えます。
+これは、親と子が別々のメモリ空間を持っていても、一部の領域だけをカーネルによって共有しているためです。
+
+パイプやメッセージキューでは、データを送る、受け取る、という形になります。
+一方、共有メモリでは、同じメモリ領域を複数のプロセスから直接見る、という形になります。
+そのため高速ですが、同時に読み書きすると競合が起きるため、実際にはセマフォやミューテックスなどの同期が必要になります。
+
 
 次に、セマフォです。
 
