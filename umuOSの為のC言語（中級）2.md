@@ -3472,7 +3472,846 @@ UmuOSの視点では、`lseek()` はファイルポジション管理そのも�
 fdごとの現在位置、ファイルサイズ、ホール、シーク不能なfdをどう表すかは、ファイルI/O設計の重要な部品になります。
 Ushでも、通常ファイルとパイプを同じfdとして扱いつつ、「シークできるかどうか」は対象ごとに分かれる、という理解が大事です。
 
-### ２章の９　openat() と現代的なパス指定
+### ２章の９　ファイルポジション指定I/O: pread() と pwrite()
+
+`read()` と `write()` は、fdが持っている現在のファイルポジションを使って読み書きします。
+通常ファイルでは、読み書きが成功すると、そのぶんファイルポジションも進みます。
+
+一方で、特定の位置から読み書きしたいけれど、fdの現在位置は動かしたくない、という場面があります。
+このために用意されているのが `pread()` と `pwrite()` です。
+
+```text
+read() / write()
+    fdの現在のファイルポジションを使う
+    成功するとファイルポジションが進む
+
+pread() / pwrite()
+    呼び出し時に指定したoffsetを使う
+    fdの現在のファイルポジションは動かさない
+```
+
+#### ２章の９の１　pread()
+
+`pread()` は、指定したファイル位置から読み取る関数です。
+
+宣言は次のようになります。
+
+```c
+#define _XOPEN_SOURCE 500
+#include <unistd.h>
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+```
+
+ここで出てくる `ssize_t pread(...)` も、実行コードではなくプロトタイプ宣言です。
+`pread()` は、`fd` が指すファイルの `offset` 位置から、最大 `count` バイトを `buf` へ読み取ります。
+
+```text
+fd
+    読み取り対象のファイルディスクリプタ
+
+buf
+    読み取ったデータを入れるバッファ
+
+count
+    最大で何バイト読むか
+
+offset
+    読み取りを開始するファイル位置
+```
+
+戻り値は `read()` と同じ考え方です。
+
+```text
+正の値
+    実際に読み取ったバイト数
+
+0
+    EOF
+
+-1
+    エラー
+    errno に理由が入る
+```
+
+#### ２章の９の２　pwrite()
+
+`pwrite()` は、指定したファイル位置へ書き込む関数です。
+
+宣言は次のようになります。
+
+```c
+#define _XOPEN_SOURCE 500
+#include <unistd.h>
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+```
+
+`pwrite()` は、`fd` が指すファイルの `offset` 位置へ、`buf` から最大 `count` バイトを書き込みます。
+
+```text
+fd
+    書き込み対象のファイルディスクリプタ
+
+buf
+    書き込みたいデータが入っているバッファ
+
+count
+    最大で何バイト書くか
+
+offset
+    書き込みを開始するファイル位置
+```
+
+戻り値は `write()` と同じ考え方です。
+成功時は実際に書き込んだバイト数、失敗時は `-1` です。
+`pwrite()` でも部分書き込みは起こり得るため、重要なデータでは戻り値を確認する必要があります。
+
+#### ２章の９の３　lseek() + read/write との違い
+
+`pread()` は、考え方としては `lseek()` で位置を移動してから `read()` する処理に近いです。
+`pwrite()` も、`lseek()` で位置を移動してから `write()` する処理に近いです。
+
+しかし、完全に同じではありません。
+
+```text
+lseek() + read()
+    fdのファイルポジションを変更する
+    その後read()する
+
+pread()
+    指定したoffsetから読む
+    fdのファイルポジションは変更しない
+```
+
+この違いは、マルチスレッドや共有fdでとても重要になります。
+複数のスレッドが同じfdを共有している場合、次のような競合が起こり得ます。
+
+```text
+スレッドA
+    lseek(fd, 100, SEEK_SET)
+
+スレッドB
+    lseek(fd, 200, SEEK_SET)
+
+スレッドA
+    read(fd, buf, len)
+    本当は100から読みたかったのに、200から読んでしまうかもしれない
+```
+
+`pread()` なら、位置指定と読み取りが1回の操作として扱われるため、この競合を避けやすくなります。
+
+```c
+#define _XOPEN_SOURCE 500
+
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void) {
+    char buf[16];
+    int fd;
+    ssize_t n;
+
+    fd = open("memo.txt", O_RDONLY | O_CLOEXEC);
+
+    if (fd < 0) {
+        perror("open");
+        exit(1);
+    }
+
+    n = pread(fd, buf, sizeof(buf), 32);
+
+    if (n < 0) {
+        perror("pread");
+        close(fd);
+        exit(1);
+    }
+
+    if (n > 0 && write(STDOUT_FILENO, buf, (size_t)n) < 0) {
+        perror("write");
+        close(fd);
+        exit(1);
+    }
+
+    if (close(fd) < 0) {
+        perror("close");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+この例では、ファイルの32バイト目から最大16バイトを読み取ります。
+読み取り後も、fdの現在のファイルポジションは変更されません。
+
+#### ２章の９の４　pread() / pwrite() の注意点
+
+`pread()` と `pwrite()` は、シーク可能なファイルで使うものです。
+パイプ、FIFO、ソケットのようにファイルポジションを持たない対象では使えません。
+
+また、`read()` / `write()` と `pread()` / `pwrite()` を同じfdで混ぜると、設計が分かりにくくなることがあります。
+`pread()` / `pwrite()` はファイルポジションを動かしませんが、`read()` / `write()` は動かします。
+どちらの規則でファイルを扱っているのかが曖昧になると、意図しない場所を読んだり書いたりする原因になります。
+
+```text
+混在に注意
+    read() / write() は現在位置を使う
+    pread() / pwrite() はoffsetを使う
+    同じfdで混ぜるなら、設計意図を明確にする
+```
+
+`pread()` の `errno` は、だいたい `read()` と `lseek()` の失敗理由を合わせたものと考えられます。
+`pwrite()` の `errno` は、`write()` と `lseek()` の失敗理由を合わせたものと考えられます。
+
+```text
+pread()
+    read() 系のエラー
+    lseek() 系のエラー
+
+pwrite()
+    write() 系のエラー
+    lseek() 系のエラー
+```
+
+UmuOSの視点では、`pread()` / `pwrite()` は「fdの現在位置」と「明示的に指定した位置」を分ける設計です。
+通常の `read()` / `write()` だけでも最初のOSは作れますが、マルチスレッドやデータベース的なアクセスを考えると、位置指定I/Oの考え方は重要になります。
+
+### ２章の１０　ファイルトランケート
+
+ファイルサイズを指定した長さへ変更する操作を、トランケートと呼びます。
+英語では truncate です。
+
+Linuxでは、パス名で指定する `truncate()` と、fdで指定する `ftruncate()` があります。
+
+```c
+#include <sys/types.h>
+#include <unistd.h>
+
+int truncate(const char *path, off_t length);
+int ftruncate(int fd, off_t length);
+```
+
+ここで出てくる宣言もプロトタイプ宣言です。
+どちらも成功すると `0`、失敗すると `-1` を返し、`errno` に理由を設定します。
+
+```text
+truncate(path, length)
+    パス名で指定したファイルのサイズを変更する
+
+ftruncate(fd, length)
+    fdで指定したファイルのサイズを変更する
+```
+
+`ftruncate()` を使う場合、fdは通常、書き込み可能な状態で開いておく必要があります。
+`truncate()` を使う場合も、対象ファイルへ書き込みできる権限が必要です。
+
+#### ２章の１０の１　ファイルを小さくする
+
+`truncate()` や `ftruncate()` は、ファイルを小さくする用途でよく使われます。
+指定した `length` より後ろにあったデータは捨てられ、以後読み取れなくなります。
+
+```text
+元のファイル
+    100バイト
+
+truncate(path, 40)
+    ファイルサイズは40バイトになる
+    40バイト目より後ろのデータは失われる
+```
+
+例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void) {
+    if (truncate("pirate.txt", 45) < 0) {
+        perror("truncate");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+このコードを実行すると、`pirate.txt` のサイズは45バイトになります。
+それより後ろにあったデータは削除されます。
+
+#### ２章の１０の２　ファイルを大きくする
+
+名前はトランケートですが、指定した長さが現在のファイルサイズより大きい場合は、ファイルを大きくすることもできます。
+拡張された部分は、読み取ると0として見えます。
+
+```text
+元のファイル
+    100バイト
+
+ftruncate(fd, 1000)
+    ファイルサイズは1000バイトになる
+    100バイト目から999バイト目までは0として読める
+```
+
+この拡張部分は、ファイルシステムによってはホールとして扱われ、物理ブロックがすぐには割り当てられないことがあります。
+つまり、`lseek()` でファイルサイズを超えた位置へ移動してから書いた場合と同じく、sparse fileに関係します。
+
+#### ２章の１０の３　ファイルポジションは動かない
+
+`truncate()` と `ftruncate()` は、ファイルサイズを変更します。
+しかし、fdの現在のファイルポジションは変更しません。
+
+```text
+ftruncate(fd, length)
+    ファイルサイズを変更する
+    fdの現在位置は変更しない
+```
+
+そのため、現在位置がファイル末尾より後ろにある状態も起こり得ます。
+その後に `write()` すると、ホールを作る形で書き込まれることがあります。
+
+#### ２章の１０の４　ftruncate() の例
+
+すでに開いているfdに対して使うなら、`ftruncate()` が自然です。
+
+```c
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void) {
+    int fd;
+
+    fd = open("memo.txt", O_WRONLY | O_CLOEXEC);
+
+    if (fd < 0) {
+        perror("open");
+        exit(1);
+    }
+
+    if (ftruncate(fd, 0) < 0) {
+        perror("ftruncate");
+        close(fd);
+        exit(1);
+    }
+
+    if (close(fd) < 0) {
+        perror("close");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+この例では、`memo.txt` のサイズを0にしています。
+`O_TRUNC` を付けて `open()` するのと似ていますが、`ftruncate()` は開いた後の任意のタイミングでサイズを変更できる点が違います。
+
+UmuOSの視点では、トランケートはファイルサイズとブロック割り当てを変更する操作です。
+単に inode のサイズを書き換えるだけではなく、縮小時には不要になったブロックを解放し、拡張時にはホールとして扱うか、実際に0で埋めるかを設計する必要があります。
+
+### ２章の１１　I/Oの多重化
+
+ここまでの `read()` や `write()` は、基本的に1つのfdへ対して処理を行うものでした。
+しかし実用的なプログラムでは、複数のfdを同時に扱いたい場面がよくあります。
+
+```text
+複数fdを扱う例
+
+標準入力
+    キーボードからの入力
+
+パイプ
+    別プロセスとの通信
+
+ソケット
+    ネットワーク接続
+
+端末
+    ユーザーとの対話
+```
+
+問題は、1つのfdでブロックしてしまうと、他のfdを処理できなくなることです。
+たとえば、ネットワークソケットからの入力待ちで止まっている間に、標準入力へユーザーが文字を打っても、プログラムはそれに反応できません。
+
+この問題を解くために使うのが、I/Oの多重化です。
+複数のfdをまとめて監視し、どれかが読み書き可能になったら起きて処理します。
+
+```text
+I/O多重化の基本
+
+1. 複数のfdを監視対象にする
+2. どれかがI/O可能になるまで待つ
+3. I/O可能になったfdを調べる
+4. そのfdに対してread()やwrite()を行う
+5. また監視へ戻る
+```
+
+ノンブロッキングI/Oだけでもブロックは避けられます。
+しかし、データが来ていないfdへ何度も `read()` して `EAGAIN` を受け取り続ける設計は、CPUを無駄に使います。
+I/O多重化を使うと、カーネルに「どれかが使えるようになるまで寝かせて」と頼めます。
+
+Linuxでは、代表的に次の仕組みがあります。
+
+```text
+select()
+    古くからある、移植性の高い多重I/O
+
+poll()
+    fd集合を配列で渡せる多重I/O
+
+epoll()
+    Linux固有の高性能な多重I/O
+
+io_uring
+    さらに新しい非同期I/O基盤
+```
+
+この章では、まず古典的で理解しやすい `select()` と `poll()` を見ます。
+現代Linuxで多数のfdを本格的に扱うなら、`epoll()` や `io_uring` も候補になりますが、それらはさらに高度な話として分けて考えるのがよいです。
+
+#### ２章の１１の１　select()
+
+`select()` は、複数のfdの状態を調べ、どれかがI/O可能になるまで待つための関数です。
+
+宣言は次のようになります。
+
+```c
+#include <sys/select.h>
+
+int select(int nfds,
+           fd_set *readfds,
+           fd_set *writefds,
+           fd_set *exceptfds,
+           struct timeval *timeout);
+```
+
+`fd_set` を操作するためのマクロも使います。
+
+```c
+FD_ZERO(fd_set *set);
+FD_SET(int fd, fd_set *set);
+FD_CLR(int fd, fd_set *set);
+FD_ISSET(int fd, fd_set *set);
+```
+
+意味は次の通りです。
+
+```text
+readfds
+    読み取り可能になったかを調べるfd集合
+
+writefds
+    書き込み可能になったかを調べるfd集合
+
+exceptfds
+    例外状態を調べるfd集合
+    主にソケットの帯域外データなど
+
+timeout
+    最大でどれだけ待つか
+    NULLなら無期限に待つ
+
+nfds
+    監視するfdの最大値 + 1
+```
+
+`select()` の少し面倒な点は、`nfds` に「監視対象の最大fd番号 + 1」を渡すことです。
+たとえば、fd 7 と fd 9 を監視するなら、`nfds` は `10` です。
+
+また、`select()` は戻ると `fd_set` の中身を書き換えます。
+I/O可能になったfdだけが集合に残ります。
+そのため、ループで使う場合は、毎回 `FD_ZERO()` と `FD_SET()` で集合を作り直すのが基本です。
+
+#### ２章の１１の２　select() の例
+
+次は、標準入力からの入力を最大5秒待つ例です。
+fdは1つだけなので本当の意味での多重化ではありませんが、`select()` の使い方を確認するには十分です。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <unistd.h>
+
+#define TIMEOUT_SEC 5
+#define BUF_LEN 1024
+
+int main(void) {
+    char buf[BUF_LEN + 1];
+    fd_set readfds;
+    struct timeval timeout;
+    int ret;
+    ssize_t n;
+
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    timeout.tv_sec = TIMEOUT_SEC;
+    timeout.tv_usec = 0;
+
+    ret = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
+
+    if (ret < 0) {
+        if (errno == EINTR) {
+            fprintf(stderr, "select was interrupted\n");
+            return 1;
+        }
+
+        perror("select");
+        return 1;
+    }
+
+    if (ret == 0) {
+        printf("timeout\n");
+        return 0;
+    }
+
+    if (FD_ISSET(STDIN_FILENO, &readfds)) {
+        n = read(STDIN_FILENO, buf, BUF_LEN);
+
+        if (n < 0) {
+            perror("read");
+            return 1;
+        }
+
+        buf[n] = '\0';
+        printf("read: %s", buf);
+    }
+
+    return 0;
+}
+```
+
+`select()` が正の値を返したら、少なくとも1つのfdがI/O可能です。
+この例では `FD_ISSET(STDIN_FILENO, &readfds)` で、標準入力が読み取り可能として返されたかを確認しています。
+
+注意点として、`select()` が「読める」と返しても、その後の `read()` が絶対に永久にブロックしないと雑に考えすぎない方がよいです。
+実用コードでは、対象や設計によってノンブロッキングI/Oと組み合わせることがあります。
+
+#### ２章の１１の３　select() の timeout と制限
+
+`select()` の `timeout` には `struct timeval` を渡します。
+
+```c
+struct timeval {
+    long tv_sec;
+    long tv_usec;
+};
+```
+
+```text
+tv_sec
+    秒
+
+tv_usec
+    マイクロ秒
+```
+
+`timeout` に `NULL` を渡すと、どれかのfdがI/O可能になるまで無期限に待ちます。
+`tv_sec` と `tv_usec` を両方0にすると、待たずに状態だけ確認して戻ります。
+
+古いコードでは、fdを何も渡さず、`select(0, NULL, NULL, NULL, &timeout)` として短時間スリープに使う例があります。
+これは歴史的にはよく使われましたが、現代Linuxでは `nanosleep()`、`clock_nanosleep()` など、時間用のAPIを使う方が意図が明確です。
+
+`select()` には `FD_SETSIZE` の制限もあります。
+Linux/glibcでは典型的に1024です。
+大きなfd番号や大量のfdを扱うプログラムでは、`select()` は不向きです。
+
+```text
+select() の弱点
+    FD_SETSIZE の制限
+    最大fd + 1 を自分で計算する必要がある
+    fd_set を毎回作り直す必要がある
+```
+
+#### ２章の１１の４　select() の戻り値と errno
+
+`select()` の戻り値は次の通りです。
+
+```text
+正の値
+    I/O可能になったfdの数
+
+0
+    timeout
+
+-1
+    エラー
+    errno に理由が入る
+```
+
+代表的な `errno` は次の通りです。
+
+```text
+EBADF
+    fd集合の中に無効なfdがある
+
+EINTR
+    シグナルで割り込まれた
+
+EINVAL
+    nfdsが負数、またはtimeoutが不正
+
+ENOMEM
+    内部処理に必要なメモリが不足した
+```
+
+`EINTR` は実用上よく意識します。
+シグナルを受けたら終了したいのか、もう一度待ち直したいのかを、プログラムの設計として決める必要があります。
+
+#### ２章の１１の５　pselect()
+
+`pselect()` は、`select()` に似ていますが、主にシグナルとの競合を避けるために使えるAPIです。
+
+```c
+#include <signal.h>
+#include <sys/select.h>
+
+int pselect(int nfds,
+            fd_set *readfds,
+            fd_set *writefds,
+            fd_set *exceptfds,
+            const struct timespec *timeout,
+            const sigset_t *sigmask);
+```
+
+`select()` との主な違いは次の通りです。
+
+```text
+timeout
+    select() は timeval
+    pselect() は timespec
+
+timeoutの変更
+    select() は実装によって変更されることがある
+    pselect() は変更しない
+
+sigmask
+    pselect() は待っている間のシグナルマスクを指定できる
+```
+
+`pselect()` の重要な目的は、シグナルハンドラとI/O待ちの間に起こる競合を避けることです。
+この話はシグナルの章とつながります。
+最初は、`pselect()` は「select() にシグナルマスク制御を足したもの」と理解すればよいです。
+
+古いLinuxでは `pselect()` がglibc側のラッパで実装されていた時期がありますが、現在のLinuxではカーネル側にも実装があります。
+古い資料の注意点は、歴史的背景として読めば十分です。
+
+#### ２章の１１の６　poll()
+
+`poll()` は、`select()` と同じく複数fdを待つためのAPIです。
+`select()` が `fd_set` を使うのに対し、`poll()` は `struct pollfd` の配列を使います。
+
+宣言は次のようになります。
+
+```c
+#include <poll.h>
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+```
+
+`struct pollfd` は次のような形です。
+
+```c
+struct pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+```
+
+```text
+fd
+    監視したいファイルディスクリプタ
+
+events
+    アプリケーションが監視したいイベント
+
+revents
+    実際に発生したイベント
+    poll() から戻ったあとにカーネルが設定する
+```
+
+よく使うイベントは次の通りです。
+
+```text
+POLLIN
+    読み取り可能
+
+POLLOUT
+    書き込み可能
+
+POLLPRI
+    優先データや緊急データがある
+
+POLLERR
+    エラーが発生した
+
+POLLHUP
+    ハングアップした
+
+POLLNVAL
+    fdが無効
+```
+
+`POLLERR`、`POLLHUP`、`POLLNVAL` は、通常 `events` に指定して待つものではなく、`revents` に結果として返る状態です。
+
+`timeout` はミリ秒単位です。
+
+```text
+timeout < 0
+    無期限に待つ
+
+timeout == 0
+    待たずに状態だけ確認する
+
+timeout > 0
+    指定ミリ秒まで待つ
+```
+
+#### ２章の１１の７　poll() の例
+
+次は、標準入力が読み取り可能か、標準出力が書き込み可能かを同時に調べる例です。
+
+```c
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#define TIMEOUT_MS 5000
+
+int main(void) {
+    struct pollfd fds[2];
+    int ret;
+
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+
+    fds[1].fd = STDOUT_FILENO;
+    fds[1].events = POLLOUT;
+    fds[1].revents = 0;
+
+    ret = poll(fds, 2, TIMEOUT_MS);
+
+    if (ret < 0) {
+        perror("poll");
+        exit(1);
+    }
+
+    if (ret == 0) {
+        printf("timeout\n");
+        return 0;
+    }
+
+    if (fds[0].revents & POLLIN) {
+        printf("stdin is readable\n");
+    }
+
+    if (fds[1].revents & POLLOUT) {
+        printf("stdout is writable\n");
+    }
+
+    if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        printf("stdin has an error-like event: 0x%x\n", fds[0].revents);
+    }
+
+    return 0;
+}
+```
+
+多くの環境では、標準出力はすぐ書き込み可能なので、`stdout is writable` が表示されやすいです。
+標準入力をファイルからリダイレクトした場合は、標準入力も読み取り可能として返ることがあります。
+
+#### ２章の１１の８　poll() の戻り値と errno
+
+`poll()` の戻り値は次の通りです。
+
+```text
+正の値
+    revents に何らかのイベントが入ったfdの数
+
+0
+    timeout
+
+-1
+    エラー
+    errno に理由が入る
+```
+
+代表的な `errno` は次の通りです。
+
+```text
+EFAULT
+    fdsが不正なアドレスを指している
+
+EINTR
+    シグナルで割り込まれた
+
+EINVAL
+    nfdsが大きすぎるなど、指定が不正
+
+ENOMEM
+    内部処理に必要なメモリが不足した
+```
+
+古い資料では `EBADF` が `poll()` 自体の `errno` として説明されることがあります。
+現在のLinuxでは、無効なfdは通常、`poll()` の `-1` ではなく、その要素の `revents` に `POLLNVAL` として返ります。
+ここは `select()` との違いとして重要です。
+
+#### ２章の１１の９　ppoll()
+
+`ppoll()` は、`poll()` に `pselect()` と同じ方向の改良を加えたLinux系のAPIです。
+タイムアウトに `struct timespec` を使い、待っている間のシグナルマスクを指定できます。
+
+```c
+#define _GNU_SOURCE
+#include <signal.h>
+#include <poll.h>
+
+int ppoll(struct pollfd *fds,
+          nfds_t nfds,
+          const struct timespec *timeout,
+          const sigset_t *sigmask);
+```
+
+通常の移植性重視なら `poll()`、シグナルとの競合をきちんと扱いたいLinuxコードなら `ppoll()` も候補になります。
+
+#### ２章の１１の１０　select() と poll() の比較
+
+`select()` と `poll()` は、どちらも複数fdのI/O可能状態を待つためのAPIです。
+基本的な目的は同じですが、使い勝手と制限が違います。
+
+```text
+select()
+    古くからあり移植性が高い
+    fd_setを使う
+    FD_SETSIZEの制限がある
+    最大fd + 1を渡す必要がある
+    戻るとfd_setが変更される
+
+poll()
+    pollfd配列を使う
+    fd番号が大きくても扱いやすい
+    eventsとreventsが分かれている
+    select()より扱いやすい場面が多い
+```
+
+ただし、現代Linuxで大量のfdを効率よく扱うなら、`select()` や `poll()` より `epoll()` を検討することが多いです。
+それでも、`select()` と `poll()` は古いコードを読むうえで頻出しますし、I/O多重化の基本概念を学ぶにはとてもよい題材です。
+
+UmuOSやUshの視点では、I/O多重化は将来的にかなり重要です。
+対話シェル、ジョブ制御、パイプ、疑似端末、複数プロセスとの通信を扱うとき、1つのfdで止まって全体が固まる設計は避けたいからです。
+最初はブロッキングI/Oで十分でも、Ushを本格的な対話シェルへ育てるなら、`poll()` や `epoll()` 的な待ち合わせ機構が必要になります。
+
+### ２章の１２　openat() と現代的なパス指定
 
 現代のLinuxでは、`open()` だけでなく `openat()` もよく出てきます。
 `openat()` は、ディレクトリfdを基準にして相対パスを開くための関数です。
@@ -3545,7 +4384,7 @@ int main(void) {
 UmuOSの視点では、最初から openat() まで実装する必要はないかもしれません。
 しかし、将来的に安全なパス解決や、ディレクトリfdを基準にしたファイル操作を設計するなら、openat() 系の考え方はかなり参考になります。
 
-### ２章の１０　ここまでの整理
+### ２章の１３　ここまでの整理
 
 ここまでをまとめると、次のようになります。
 
@@ -3604,6 +4443,17 @@ lseek()
 
 sparse file
     ファイルサイズを超えて書くことでホールができることがある
+
+pread() / pwrite()
+    offsetを指定して読み書きする
+    fdの現在のファイルポジションを動かさない
+
+truncate() / ftruncate()
+    ファイルサイズを指定した長さへ変更する
+
+select() / poll()
+    複数fdのI/O可能状態をまとめて待つ
+    対話シェルやネットワーク処理で重要
 
 O_CLOEXEC
     現代的なコードではfd漏れ防止のためによく使う
