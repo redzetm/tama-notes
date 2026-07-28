@@ -2032,6 +2032,860 @@ UmuOSで分けて考える層
 
 この層の違いを理解しておくと、「printfしたのにファイルへ出ない」「fwriteしたのに電源断で消えた」「fsyncしたのにstdioバッファの分が残っていた」といった混乱を避けやすくなります。
 
+### ３章の１３　エラーとEOF
+
+標準I/Oの関数の中には、戻り値だけでは「エラーが起きた」のか「EOFに達した」のか分かりにくいものがあります。
+代表例は `fread()`、`fgets()`、`fgetc()` です。
+
+```text
+fgetc()
+    EOFを返す
+    それが本当のEOFなのか、エラーなのかは戻り値だけでは分からない
+
+fgets()
+    NULLを返す
+    それがEOFなのか、エラーなのかは戻り値だけでは分からない
+
+fread()
+    要素数が足りない
+    それがEOFなのか、エラーなのかは戻り値だけでは分からない
+```
+
+このため、標準I/Oではストリームの状態を確認する関数が用意されています。
+エラー状態を見るには `ferror()`、EOF状態を見るには `feof()` を使います。
+
+#### ３章の１３の１　エラー状態を調べる: ferror()
+
+`ferror()` は、ストリームにエラー状態がセットされているかを調べます。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int ferror(FILE *stream);
+```
+
+戻り値は次の通りです。
+
+```text
+エラー状態がある
+    非0
+
+エラー状態がない
+    0
+```
+
+エラー状態は、`fgetc()`、`fgets()`、`fread()`、`fwrite()` など、他の標準I/O関数が失敗したときにストリームへ記録します。
+`ferror()` 自体が新しくI/Oするわけではありません。
+すでにストリームに記録されている状態を見るだけです。
+
+#### ３章の１３の２　EOF状態を調べる: feof()
+
+`feof()` は、ストリームにEOF状態がセットされているかを調べます。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int feof(FILE *stream);
+```
+
+戻り値は次の通りです。
+
+```text
+EOF状態がある
+    非0
+
+EOF状態がない
+    0
+```
+
+ここで大事なのは、`feof()` は「次に読むとEOFになるか」を予言する関数ではない、ということです。
+実際に読み取りを行い、その結果としてファイル終端に到達したときにEOF状態がセットされます。
+
+```text
+誤解しやすい考え方
+    読む前に feof() でEOFか確認する
+
+正しい考え方
+    まず読む
+    読めなかったら feof() / ferror() で理由を見る
+```
+
+このため、次のような書き方は避けます。
+
+```c
+while (!feof(stream)) {
+    /* 読む */
+}
+```
+
+この書き方は、最後の読み取り処理を誤って扱いやすいです。
+標準I/Oでは、「読み取り関数の戻り値でループし、失敗したら理由を確認する」という形にします。
+
+#### ３章の１３の３　状態をクリアする: clearerr()
+
+`clearerr()` は、ストリームのエラー状態とEOF状態をクリアします。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+void clearerr(FILE *stream);
+```
+
+`clearerr()` に戻り値はありません。
+また、状態をクリアすると、あとから「どんな状態だったか」を復元することはできません。
+そのため、`ferror()` や `feof()` で必要な確認を済ませた後に使います。
+
+```text
+clearerr(stream)
+    エラー状態をクリアする
+    EOF状態もクリアする
+    戻り値はない
+```
+
+例です。
+
+```c
+#include <stdio.h>
+
+void print_stream_state(FILE *stream) {
+    if (ferror(stream)) {
+        printf("error state is set\n");
+    }
+
+    if (feof(stream)) {
+        printf("EOF state is set\n");
+    }
+
+    clearerr(stream);
+}
+```
+
+#### ３章の１３の４　読み取りでの典型パターン
+
+`fgetc()` の典型的な読み取りパターンは次のようになります。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    FILE *stream;
+    int c;
+
+    stream = fopen("memo.txt", "r");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    while ((c = fgetc(stream)) != EOF) {
+        putchar(c);
+    }
+
+    if (ferror(stream)) {
+        perror("fgetc");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+このコードでは、`feof()` をループ条件に使っていません。
+まず `fgetc()` で読み、`EOF` が返ったらループを抜け、最後に `ferror()` でエラーだったかを確認しています。
+
+`fread()` でも考え方は同じです。
+
+```c
+size_t nr;
+
+nr = fread(buf, 1, sizeof(buf), stream);
+
+if (nr < sizeof(buf)) {
+    if (ferror(stream)) {
+        perror("fread");
+    } else if (feof(stream)) {
+        printf("EOF\n");
+    }
+}
+```
+
+Ushで設定ファイルや履歴ファイルを読むときにも、この考え方は役に立ちます。
+「読めなかった」という事実だけで終わらせず、EOFなのか、権限エラーやI/Oエラーなのかを分けて扱うと、ユーザーに出すエラーメッセージも正確になります。
+
+### ３章の１４　ストリームとファイルディスクリプタ
+
+標準I/Oの `FILE *` は、内部的には多くの場合ファイルディスクリプタに対応しています。
+この対応するfdを取り出したい場合は、POSIXの `fileno()` を使います。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fileno(FILE *stream);
+```
+
+戻り値は次の通りです。
+
+```text
+成功
+    対応するファイルディスクリプタ
+
+失敗
+    -1
+    errno に理由が入る
+```
+
+`fileno()` が必要になるのは、標準I/Oだけでは足りない操作をしたい場合です。
+たとえば、`fsync()`、`fcntl()`、`poll()` など、fdを要求するAPIと組み合わせたいときです。
+
+```text
+FILE * が必要な関数
+    fgets()
+    fprintf()
+    fread()
+    fwrite()
+
+fd が必要な関数
+    read()
+    write()
+    fsync()
+    fcntl()
+    poll()
+```
+
+ただし、標準I/Oと低レベルI/Oを同じ対象に混ぜるのは注意が必要です。
+標準I/Oはユーザー空間に内部バッファを持っているため、fdの現在位置やデータの見え方が直感とずれることがあります。
+
+```text
+混在で起きやすい混乱
+    stdioが先読みしている
+    stdioの書き込みがまだfflush()されていない
+    fdの位置とstdio内部バッファの位置がずれる
+```
+
+低レベルI/Oをどうしても混ぜる場合は、少なくとも出力ストリームでは事前に `fflush()` します。
+入力ストリームの場合は、標準I/Oがどれだけ先読みしているかが絡むため、設計として混ぜない方が安全です。
+
+```c
+int fd;
+
+if (fflush(stream) == EOF) {
+    perror("fflush");
+    return;
+}
+
+fd = fileno(stream);
+
+if (fd < 0) {
+    perror("fileno");
+    return;
+}
+
+if (fsync(fd) != 0) {
+    perror("fsync");
+}
+```
+
+UmuOSの設計視点では、`FILE *` とfdの境界は大事です。
+fdはカーネルが提供する抽象であり、`FILE *` はユーザー空間Cライブラリが提供する抽象です。
+
+```text
+fd
+    カーネルが管理する
+    open file descriptionにつながる
+    read/write/lseek/fsyncなどで使う
+
+FILE *
+    Cライブラリが管理する
+    内部バッファを持つ
+    fgets/fprintf/fread/fwriteなどで使う
+```
+
+Ushのリダイレクトやパイプはfd中心で考える方が自然です。
+一方、設定ファイルや履歴ファイルを行単位で読む処理は `FILE *` が便利です。
+この2つを同じ対象で安易に混ぜない、というのが基本方針です。
+
+### ３章の１５　バッファリングの制御
+
+標準I/Oのバッファリングには、大きく3種類あります。
+
+```text
+バッファリングなし
+    ユーザー空間でほぼ溜めずにカーネルへ渡す
+
+ラインバッファリング
+    改行文字が出るタイミングなどでフラッシュする
+
+フルバッファリング
+    バッファが一杯になるまで溜めてからまとめて渡す
+```
+
+古い資料では「ブロックバッファリング」と呼ぶこともあります。
+標準I/Oの用語では、`_IOFBF` の full buffering、つまりフルバッファリングと呼ばれます。
+
+典型的なLinux/glibcの挙動は次のようになります。
+
+```text
+標準入力
+    端末ならラインバッファリングに近い挙動で扱われることが多い
+
+標準出力
+    端末ならラインバッファリング
+    ファイルやパイプならフルバッファリング
+
+標準エラー出力
+    通常はバッファリングなし
+```
+
+このため、端末へ `printf("hello\n")` するとすぐ表示されるのに、ファイルへリダイレクトするとまとめて出る、という違いが起きます。
+
+```text
+端末
+    ./a.out
+    改行で表示されやすい
+
+ファイルへリダイレクト
+    ./a.out > log.txt
+    バッファに溜まってから書かれやすい
+```
+
+#### ３章の１５の１　setvbuf()
+
+バッファリングの種類やバッファサイズを変更するには `setvbuf()` を使います。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+```
+
+`mode` には次の値を指定します。
+
+```text
+_IONBF
+    バッファリングなし
+
+_IOLBF
+    ラインバッファリング
+
+_IOFBF
+    フルバッファリング
+```
+
+`buf` に自分で用意したバッファを渡すと、標準I/Oはその領域をバッファとして使います。
+`buf` に `NULL` を渡すと、Cライブラリ側がバッファを用意します。
+
+```text
+buf != NULL
+    ユーザーが用意したバッファを使う
+
+buf == NULL
+    Cライブラリがバッファを確保する
+```
+
+`setvbuf()` は、ストリームを開いた後、他のI/O操作をする前に呼びます。
+すでに読み書きした後でバッファリング方式を変えようとすると、移植性のある正しい使い方ではなくなります。
+
+```text
+正しい順番
+    fopen()
+    setvbuf()
+    fgets()/fputs()/fread()/fwrite()
+    fclose()
+```
+
+例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    FILE *stream;
+
+    stream = fopen("log.txt", "w");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    if (setvbuf(stream, NULL, _IOFBF, BUFSIZ) != 0) {
+        fprintf(stderr, "setvbuf failed\n");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fputs("hello\n", stream) == EOF) {
+        perror("fputs");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+ここでは `buf` に `NULL` を渡しているため、Cライブラリにバッファ管理を任せています。
+通常はこの形で十分です。
+
+#### ３章の１５の２　自前バッファの寿命
+
+`setvbuf()` に自分で用意したバッファを渡す場合、そのバッファはストリームを閉じるまで有効でなければなりません。
+ここはよくある落とし穴です。
+
+たとえば、次のようなコードは危険です。
+
+```c
+#include <stdio.h>
+
+static void setup_stdout(void) {
+    char buf[BUFSIZ];
+
+    setvbuf(stdout, buf, _IOFBF, sizeof(buf));
+}
+
+int main(void) {
+    setup_stdout();
+    printf("hello\n");
+    return 0;
+}
+```
+
+`buf` は `setup_stdout()` のローカル変数です。
+関数から戻ると、この配列の寿命は終わります。
+しかし、`stdout` はその後もこのバッファを使おうとする可能性があります。
+
+```text
+危険な流れ
+    ローカル変数bufをsetvbuf()へ渡す
+    関数から戻る
+    bufの寿命が終わる
+    stdioが無効な領域をバッファとして使う可能性がある
+```
+
+安全寄りにするなら、`static` な領域を使うか、ストリームを閉じるまで寿命が続く領域を使います。
+
+```c
+#include <stdio.h>
+
+static char stdout_buf[BUFSIZ];
+
+int main(void) {
+    if (setvbuf(stdout, stdout_buf, _IOFBF, sizeof(stdout_buf)) != 0) {
+        return 1;
+    }
+
+    printf("hello\n");
+    fflush(stdout);
+
+    return 0;
+}
+```
+
+ただし、一般的には `setvbuf()` 自体を使う機会は多くありません。
+ほとんどの場合、標準I/Oのデフォルトバッファリングは十分に良い選択です。
+
+#### ３章の１５の３　BUFSIZについて
+
+`BUFSIZ` は `<stdio.h>` で定義される定数です。
+標準I/Oのバッファサイズとしてよく使われます。
+
+```c
+#include <stdio.h>
+
+char buf[BUFSIZ];
+```
+
+ただし、`BUFSIZ` は「どの用途でも必ず最適」という意味ではありません。
+実装が選んだ標準的なサイズであり、普通のファイルI/Oでは十分なことが多い、くらいに考えるとよいです。
+
+大量データのI/O性能を本気で詰める場合は、ファイルシステム、デバイス、ページサイズ、アクセスパターン、CPUキャッシュなども関係します。
+最終的には実測が必要です。
+
+UmuOSを作る視点では、`setvbuf()` は「ユーザー空間Cライブラリがバッファ戦略を持つ」という具体例です。
+カーネルのpage cacheとは別に、ユーザー空間にもI/Oをまとめる層がある、ということを意識しておくとよいです。
+
+### ３章の１６　スレッドセーフ
+
+スレッドは、1つのプロセス内で実行される複数の処理の流れです。
+同じアドレス空間を共有するため、同じ変数、同じヒープ、同じ `FILE *` に複数のスレッドから触れることができます。
+
+この共有は便利ですが、同時に競合の原因にもなります。
+2つのスレッドが同じストリームへ同時に書き込むと、出力の順序やまとまりが問題になります。
+
+POSIX環境の標準I/O関数は、多くの場合スレッドセーフです。
+glibcでも、ストリームごとにロックを持ち、1つの標準I/O関数呼び出しの内部でデータ構造が壊れないようにしています。
+
+```text
+標準I/Oのスレッド安全性
+    FILEごとにロックを持つ
+    fputs() 1回などの内部状態は保護される
+    ただし複数回の関数呼び出し全体までは自動で1まとまりにならない
+```
+
+たとえば、`fputs("A\n", stream)` 1回の内部状態は守られても、次のような複数行の出力全体が他スレッドの出力と混ざらない保証はありません。
+
+```text
+thread 1
+    fputs("begin\n", stream)
+    fputs("data\n", stream)
+    fputs("end\n", stream)
+
+thread 2
+    fputs("other\n", stream)
+```
+
+「begin、data、endをひとまとまりとして出したい」なら、より広い範囲を自分でロックする必要があります。
+
+#### ３章の１６の１　ストリームの手動ロック
+
+標準I/Oには、ストリームを手動でロックする関数があります。
+
+```c
+#include <stdio.h>
+
+void flockfile(FILE *stream);
+int ftrylockfile(FILE *stream);
+void funlockfile(FILE *stream);
+```
+
+`flockfile()` は、ストリームのロックを取得します。
+すでに他のスレッドがロックしている場合は、解放されるまで待ちます。
+
+`funlockfile()` は、ロックを解放します。
+同じスレッドで複数回 `flockfile()` した場合は、同じ回数だけ `funlockfile()` する必要があります。
+
+`ftrylockfile()` は、ブロックしない版です。
+ロックできれば `0`、できなければ非0を返します。
+
+```text
+flockfile()
+    ロックできるまで待つ
+
+ftrylockfile()
+    ロックできなければ待たずに戻る
+
+funlockfile()
+    ロックを解放する
+```
+
+例です。
+
+```c
+flockfile(stream);
+
+fputs("begin\n", stream);
+fputs("data\n", stream);
+fputs("end\n", stream);
+
+funlockfile(stream);
+```
+
+この範囲では、他のスレッドが同じストリームを使う標準I/O関数を呼ぼうとしても、通常はロックが解放されるまで待つことになります。
+複数の `fputs()` を1つのまとまりとして扱いやすくなります。
+
+実用コードでは、途中で `return` したりエラー処理へ飛んだりしても `funlockfile()` を忘れないように設計します。
+CではRAIIがないため、`goto out_unlock;` のような後始末経路を作ることがあります。
+
+```c
+flockfile(stream);
+
+if (fputs("begin\n", stream) == EOF) {
+    goto out_unlock;
+}
+
+if (fputs("data\n", stream) == EOF) {
+    goto out_unlock;
+}
+
+if (fputs("end\n", stream) == EOF) {
+    goto out_unlock;
+}
+
+out_unlock:
+funlockfile(stream);
+```
+
+#### ３章の１６の２　ロックしないストリーム操作
+
+標準I/Oには、内部ロックを省略する `_unlocked` 系の関数があります。
+これらは通常の関数より軽い場合がありますが、ロックを自分で管理する責任が出ます。
+
+代表例です。
+
+```c
+#include <stdio.h>
+
+int getc_unlocked(FILE *stream);
+int putc_unlocked(int c, FILE *stream);
+int getchar_unlocked(void);
+int putchar_unlocked(int c);
+```
+
+glibcでは、さらに多くの `_unlocked` 系関数も提供されています。
+
+```c
+#define _GNU_SOURCE
+#include <stdio.h>
+
+char *fgets_unlocked(char *str, int size, FILE *stream);
+size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *stream);
+int fputs_unlocked(const char *str, FILE *stream);
+size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+int fflush_unlocked(FILE *stream);
+int feof_unlocked(FILE *stream);
+int ferror_unlocked(FILE *stream);
+void clearerr_unlocked(FILE *stream);
+```
+
+古い資料では、これらをまとめてLinux固有と説明していることがあります。
+現在はPOSIXで定義されているものと、glibc/GNU拡張のものが混在しています。
+移植性が必要なコードでは、使う関数がどの規格や実装に属するかを確認する必要があります。
+
+`_unlocked` 系を使う典型的な形は、手動でロックしてから、その範囲内でロックなし関数を使う形です。
+
+```c
+flockfile(stream);
+
+for (;;) {
+    int c;
+
+    c = getc_unlocked(stream);
+
+    if (c == EOF) {
+        break;
+    }
+
+    putchar_unlocked(c);
+}
+
+funlockfile(stream);
+```
+
+ただし、現代の通常のアプリケーションでは、まず普通の `fgetc()`、`fputs()`、`fread()` などを使えば十分です。
+`_unlocked` 系は、性能上の理由が明確で、かつスレッド安全性を自分で説明できる場合にだけ使う、と考える方が安全です。
+
+UmuOSの視点では、この話はCライブラリ内部のロック設計につながります。
+将来 `FILE` 相当を作るなら、単にバッファを持つだけでなく、マルチスレッド環境でストリームをどう保護するかも設計課題になります。
+
+### ３章の１７　標準I/Oライブラリに対する批判
+
+標準I/Oは非常に広く使われています。
+`printf()`、`fgets()`、`fread()`、`fwrite()` は、Cプログラムを書く上で避けて通れないほど基本的な関数です。
+
+しかし、標準I/Oにも批判があります。
+代表的な論点は次のようなものです。
+
+```text
+標準I/Oへの批判
+    エラーとEOFの扱いが分かりにくい
+    バッファリングが見えにくい
+    fdとの混在が危険
+    二重コピーが発生する
+    古い関数には危険なものがある
+```
+
+特に有名なのが、古いCライブラリにあった `gets()` です。
+`gets()` は入力先バッファのサイズを指定できないため、バッファオーバーフローを避けられません。
+この関数はC11で標準から削除されました。
+現代のコードでは使ってはいけません。
+
+```text
+使わない
+    gets()
+
+代わりに検討する
+    fgets()
+    getline()
+```
+
+ただし、`fgets()` も万能ではありません。
+固定長バッファを渡すため、長い行をどう扱うかはプログラム側で決める必要があります。
+任意長の行を扱いたい場合は、POSIXの `getline()` が便利です。
+
+#### ３章の１７の１　二重コピーの問題
+
+標準I/Oは、ユーザー空間にバッファを持ちます。
+これはシステムコール回数を減らす効果がありますが、一方でコピー回数が増える場合があります。
+
+読み取りでは、概念的には次のような流れになります。
+
+```text
+1. カーネル
+    ファイルからpage cacheへ読む
+
+2. read()相当
+    カーネル空間からstdio内部バッファへコピーする
+
+3. fgetc()/fread()など
+    stdio内部バッファからアプリケーションの変数やバッファへ渡す
+```
+
+書き込みでは逆方向です。
+
+```text
+1. アプリケーション
+    自分のバッファにデータを持つ
+
+2. fwrite()/fputs()など
+    stdio内部バッファへコピーする
+
+3. write()相当
+    stdio内部バッファからカーネルへコピーする
+```
+
+このように、標準I/Oは便利さと引き換えに、コピーが1段増えることがあります。
+普通の設定ファイル、ログ、テキスト処理では問題にならないことが多いです。
+しかし、大量データを高速に処理する場合や、ネットワーク・ストレージの性能を詰める場合は、無視できないことがあります。
+
+#### ３章の１７の２　scatter-gather I/Oとwritev()
+
+標準I/Oの二重コピーを避ける考え方の1つに、scatter-gather I/Oがあります。
+複数のバッファを1回のI/Oでまとめて扱う方法です。
+
+Linux/POSIXでは、書き込み側に `writev()` があります。
+
+```c
+#include <sys/uio.h>
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+```
+
+`writev()` を使うと、複数のメモリ領域をまとめてfdへ書き込めます。
+
+```text
+通常のwrite()
+    1つの連続したバッファを書く
+
+writev()
+    複数のバッファをまとめて書く
+```
+
+たとえば、ヘッダ、本文、改行を別々のバッファに持ったまま、まとめて書けます。
+
+```text
+iov[0]
+    header
+
+iov[1]
+    body
+
+iov[2]
+    newline
+```
+
+このような仕組みは、次章以降で低レベルI/Oをさらに深く見るときに重要になります。
+UshやUmuOSでログ出力、パケット生成、ファイル形式の出力を考える場合にも、複数のバッファをどうまとめるかは設計テーマになります。
+
+#### ３章の１７の３　標準I/Oをどう使うべきか
+
+批判があるからといって、標準I/Oを避けるべき、という話ではありません。
+標準I/Oは、今でも非常に有用です。
+
+```text
+標準I/Oが向くもの
+    設定ファイル
+    ログ
+    テキスト処理
+    学習用プログラム
+    単純なバイナリファイル処理
+
+低レベルI/Oを検討するもの
+    シェルのリダイレクトやパイプ
+    ソケット
+    ノンブロッキングI/O
+    poll()/epoll() と組み合わせる処理
+    大量データの性能が重要な処理
+```
+
+大事なのは、どちらが偉いかではありません。
+`FILE *` とfdの層の違い、バッファリングの位置、エラー確認の方法、永続化の境界を理解して使い分けることです。
+
+### ３章の１８　３章のまとめ
+
+この章では、I/Oのバッファリングを整理しました。
+2章の低レベルI/Oでは、fd、`open()`、`read()`、`write()`、`close()`、`lseek()` を見ました。
+3章では、その上に乗る標準I/O、つまり `FILE *` とストリームの世界を見ました。
+
+重要な整理は次の通りです。
+
+```text
+低レベルI/O
+    カーネルに近い
+    fdを使う
+    read()/write()/lseek()/fsync() など
+
+標準I/O
+    Cライブラリが提供する
+    FILE *を使う
+    fopen()/fgets()/fread()/fprintf()/fclose() など
+    ユーザー空間バッファを持つ
+```
+
+標準I/Oは便利ですが、見えないバッファを持つため、次の点に注意が必要です。
+
+```text
+注意点
+    fgetc()などはEOFとエラーを戻り値だけで区別しにくい
+    ferror()/feof()/clearerr()で状態を見る
+    fwrite()の戻り値はバイト数ではなく要素数
+    fflush()はディスク永続化ではない
+    fsync()する前にfflush()が必要な場面がある
+    FILE *とfdの混在は慎重に行う
+    構造体のバイナリ保存は移植性に注意する
+```
+
+UmuOSの視点では、この章はユーザー空間Cライブラリの設計そのものです。
+`FILE` 相当の構造体、内部バッファ、flush、EOF状態、エラー状態、fdとの対応、ロック、バッファリング制御をどう作るかは、OS上で動くC環境を育てるときの大きなテーマになります。
+
+Ushの視点では、シェル本体のパイプやリダイレクトはfd中心、設定ファイルや履歴ファイルの読み書きは標準I/O中心、という使い分けが現実的です。
+
+```text
+Ushでの使い分け
+
+fd中心
+    pipe
+    dup2
+    fork/exec前後のリダイレクト
+    poll/epollを使う処理
+
+stdio中心
+    設定ファイルの読み込み
+    履歴ファイルの読み書き
+    人間向けログの出力
+```
+
+これで、3章のI/Oバッファリングは一区切りです。
+次に進むときは、低レベルI/Oと標準I/Oの違いを頭に置いたまま、より複雑なI/O、ベクトルI/O、非同期I/O、メモリマップI/Oなどへつなげていくと理解しやすくなります。
+
+
+
+
+
+
 
 
 
