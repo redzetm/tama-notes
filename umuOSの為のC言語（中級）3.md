@@ -1172,6 +1172,898 @@ UmuOSの視点では、これはかなり重要です。
 ファイルシステム上のinode、ディレクトリエントリ、実行ファイルヘッダ、ネットワークパケットなどは、すべてバイナリ形式を持ちます。
 それらをCの構造体そのままに頼るのか、明示的なエンコード/デコードを行うのかは、OS設計上の大事な判断になります。
 
+### ３章の８　ストリームの書き込み
+
+標準I/Oには、読み取り関数と同じように、書き込み用の関数も用意されています。
+ここでは、よく使う次の3種類を見ます。
+
+```text
+文字単位
+    fputc()
+
+文字列単位
+    fputs()
+
+バイナリデータ
+    fwrite()
+```
+
+ストリームへ書き込むには、書き込み可能なモードで開いておく必要があります。
+たとえば `"w"`、`"a"`、`"r+"`、`"w+"`、`"a+"` などです。
+`"r"` のような読み取り専用ストリームには、基本的に書き込めません。
+
+```text
+書き込み可能
+    "w"
+    "a"
+    "r+"
+    "w+"
+    "a+"
+
+読み取り専用
+    "r"
+```
+
+標準I/Oの書き込みでは、データがすぐにカーネルへ渡されるとは限りません。
+多くの場合、まずCライブラリ内部のユーザー空間バッファへ書き込まれ、必要なタイミングでまとめて `write()` 相当の処理が行われます。
+
+```text
+プログラム
+    fputc()
+    fputs()
+    fwrite()
+
+標準I/O内部バッファ
+    ユーザー空間にある
+
+カーネル
+    write() によって渡される
+
+ストレージ
+    fsync() などで永続化を強める
+```
+
+このため、書き込み関数が成功したように見えても、最終的なエラーが `fflush()` や `fclose()` のタイミングで見えることがあります。
+重要な出力では、最後の `fclose()` の戻り値も確認します。
+
+#### ３章の８の１　文字単位の書き込み: fputc()
+
+`fgetc()` と反対に、ストリームへ1文字を書き込む関数が `fputc()` です。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fputc(int c, FILE *stream);
+```
+
+`fputc()` は、`c` を `unsigned char` として扱える値に変換し、`stream` へ書き込みます。
+成功すると書き込んだ文字を `int` として返します。
+失敗すると `EOF` を返し、`errno` に理由が入ります。
+
+```text
+成功
+    書き込んだ文字を返す
+
+失敗
+    EOF を返す
+    errno に理由が入る
+```
+
+簡単な例です。
+
+```c
+if (fputc('p', stream) == EOF) {
+    perror("fputc");
+}
+```
+
+この例では、文字 `p` を `stream` へ書き込みます。
+`stream` は、あらかじめ書き込み可能なモードで開かれている必要があります。
+
+実行可能な形にすると、次のようになります。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    FILE *stream;
+
+    stream = fopen("memo.txt", "a");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    if (fputc('p', stream) == EOF) {
+        perror("fputc");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fputc('\n', stream) == EOF) {
+        perror("fputc");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+1文字ずつ `fputc()` を呼んでも、標準I/Oが内部でバッファリングするため、必ずしも毎回システムコールが発生するわけではありません。
+ただし、関数呼び出しの回数は増えるので、大量のデータを扱う場合は `fwrite()` なども検討します。
+
+#### ３章の８の２　文字列の書き込み: fputs()
+
+ヌル終端文字列をストリームへ書き込むには `fputs()` を使います。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fputs(const char *str, FILE *stream);
+```
+
+`fputs()` は、`str` が指すヌル終端文字列を `stream` へ書き込みます。
+文字列終端の `\0` 自体は書き込みません。
+
+```text
+"hello\n" を fputs() する
+    h e l l o \n を書く
+    最後の \0 は書かない
+```
+
+戻り値は次の通りです。
+
+```text
+成功
+    非負の値
+
+失敗
+    EOF
+    errno に理由が入る
+```
+
+例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    FILE *stream;
+
+    stream = fopen("journal.txt", "a");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    if (fputs("today: stdio write test\n", stream) == EOF) {
+        perror("fputs");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+`fputs()` は `printf()` 系と違い、書式指定を解釈しません。
+`%d` や `%s` のような変換指定を使いたい場合は、`fprintf()` を使います。
+
+```text
+fputs()
+    文字列をそのまま書く
+
+fprintf()
+    書式付きで書く
+```
+
+ログや固定メッセージを書くなら `fputs()` は単純で便利です。
+数値や変数を埋め込みたいなら `fprintf()` の方が自然です。
+
+#### ３章の８の３　バイナリデータの書き込み: fwrite()
+
+文字列ではなく、バイト列や構造体のようなデータをまとめて書き込むには `fwrite()` を使います。
+
+現代の宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+```
+
+古い資料では第1引数が `void *buf` のように書かれていることがありますが、書き込み元データは変更されないため、現在の宣言では `const void *` です。
+
+`fwrite()` は、`ptr` が指すメモリから、`size` バイトの要素を `nmemb` 個、`stream` へ書き込みます。
+
+```text
+ptr
+    書き込み元バッファ
+
+size
+    1要素のサイズ
+
+nmemb
+    書き込みたい要素数
+
+stream
+    書き込み先ストリーム
+```
+
+戻り値は、書き込んだバイト数ではありません。
+書き込めた要素数です。
+
+```text
+fwrite(buf, 64, 1, stream)
+    64バイトの要素を1個書く
+    成功なら1を返す
+
+fwrite(buf, 1, 64, stream)
+    1バイトの要素を64個書く
+    64バイト書ければ64を返す
+```
+
+戻り値が `nmemb` より小さい場合は、途中までしか書けていないということです。
+その場合は `ferror()` でエラー状態を確認します。
+
+例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    unsigned char data[4] = {0x55, 0xaa, 0x00, 0xff};
+    FILE *stream;
+    size_t nw;
+
+    stream = fopen("data.bin", "wb");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    nw = fwrite(data, 1, sizeof(data), stream);
+
+    if (nw != sizeof(data)) {
+        if (ferror(stream)) {
+            perror("fwrite");
+        } else {
+            fprintf(stderr, "short write\n");
+        }
+
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+ここでは `size` を `1`、`nmemb` を `sizeof(data)` にしています。
+この書き方だと、戻り値を「書けたバイト数」として扱いやすくなります。
+一方、構造体1個を書きたい場合は、`sizeof(struct record)` を `size` にして、`nmemb` を `1` にする書き方もあります。
+
+```text
+バイト列として扱う
+    fwrite(buf, 1, len, stream)
+
+構造体1個として扱う
+    fwrite(&record, sizeof(record), 1, stream)
+```
+
+ただし、前節で見た通り、構造体をそのままファイルに保存する方法は、移植性の面で注意が必要です。
+
+### ３章の９　サンプルコード: ユーザー空間のバッファリング
+
+ここまでに出てきた標準I/O関数を組み合わせて、小さなサンプルを見てみます。
+このプログラムは、構造体を1個ファイルへ書き込み、その後同じファイルから読み戻して表示します。
+
+ただし、このサンプルは「標準I/Oで読み書きする流れ」を見るためのものです。
+構造体をそのまま永続化する設計を推奨する例ではありません。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct note_record {
+    char title[64];
+    unsigned int page;
+    unsigned int flags;
+};
+
+static void die(const char *message) {
+    perror(message);
+    exit(1);
+}
+
+int main(void) {
+    const char *path = "note-record.bin";
+    struct note_record input;
+    struct note_record output;
+    FILE *stream;
+
+    memset(&input, 0, sizeof(input));
+    snprintf(input.title, sizeof(input.title), "stdio buffering");
+    input.page = 76;
+    input.flags = 1;
+
+    stream = fopen(path, "wb");
+
+    if (stream == NULL) {
+        die("fopen");
+    }
+
+    if (fwrite(&input, sizeof(input), 1, stream) != 1) {
+        if (ferror(stream)) {
+            perror("fwrite");
+        } else {
+            fprintf(stderr, "short write\n");
+        }
+
+        fclose(stream);
+        return 1;
+    }
+
+    if (fclose(stream) == EOF) {
+        die("fclose");
+    }
+
+    stream = fopen(path, "rb");
+
+    if (stream == NULL) {
+        die("fopen");
+    }
+
+    if (fread(&output, sizeof(output), 1, stream) != 1) {
+        if (ferror(stream)) {
+            perror("fread");
+        } else {
+            fprintf(stderr, "short read or EOF\n");
+        }
+
+        fclose(stream);
+        return 1;
+    }
+
+    if (fclose(stream) == EOF) {
+        die("fclose");
+    }
+
+    printf("title=\"%s\" page=%u flags=%u\n",
+           output.title, output.page, output.flags);
+
+    return 0;
+}
+```
+
+実行すると、次のような出力になります。
+
+```text
+title="stdio buffering" page=76 flags=1
+```
+
+このプログラムでは、`fopen()`、`fwrite()`、`fclose()`、`fread()` を使っています。
+書き込み時は `"wb"`、読み取り時は `"rb"` を使っています。
+Linuxでは `b` は実質的に無視されますが、バイナリファイルであることを明示でき、他環境への移植性も少し良くなります。
+
+重要なのは、ファイルに書かれる形式です。
+この例では、`struct note_record` のメモリ表現がそのままファイルへ出ます。
+つまり、次の情報に依存します。
+
+```text
+依存するもの
+    unsigned int のサイズ
+    構造体のパディング
+    エンディアン
+    ABI
+    コンパイラ設定
+```
+
+同じプログラム、同じCPU、同じABIで一時ファイルとして扱う程度なら問題になりにくいです。
+しかし、長期保存するファイル形式、別のOSやCPUで読むファイル形式、ネットワークで交換する形式としては危険です。
+
+より堅い設計では、固定幅整数型を使い、バイトオーダを決め、1フィールドずつエンコードします。
+
+```text
+学習用サンプル
+    structをそのままfwrite()/fread()
+
+実用的なファイル形式
+    フィールドごとに明示的にエンコード/デコード
+```
+
+UmuOSでファイルシステムや実行ファイル形式を設計する場合も同じです。
+カーネル内部の構造体をそのままディスクへ保存すると、将来の変更や別環境との互換性が難しくなります。
+ディスク上の形式と、メモリ上の構造体は、分けて考えるのが基本です。
+
+### ３章の１０　ストリームのシーク
+
+標準I/Oでも、ファイル内の現在位置を移動できます。
+低レベルI/Oでは `lseek()` を使いましたが、標準I/Oでは `fseek()` を使います。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fseek(FILE *stream, long offset, int whence);
+```
+
+`fseek()` は、`stream` のストリームポジションを移動します。
+ここでいうストリームポジションは、低レベルI/Oのファイルポジションに対応するものですが、標準I/Oの内部バッファも関係します。
+
+`whence` には、次の値を指定します。
+
+```text
+SEEK_SET
+    ファイル先頭から offset バイトの位置へ移動する
+
+SEEK_CUR
+    現在位置から offset バイト移動する
+
+SEEK_END
+    ファイル末尾から offset バイトの位置へ移動する
+```
+
+戻り値は次の通りです。
+
+```text
+成功
+    0
+
+失敗
+    -1
+    errno に理由が入る
+```
+
+`fseek()` が成功すると、ストリームのEOF状態はリセットされます。
+また、`ungetc()` で押し戻した文字がある場合、その効果は失われます。
+
+```text
+fseek() 成功時の影響
+    ストリーム位置が移動する
+    EOF状態がリセットされる
+    ungetc() で戻した文字は無効になる
+```
+
+例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    FILE *stream;
+    int c;
+
+    stream = fopen("memo.txt", "r");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    if (fseek(stream, 0, SEEK_SET) != 0) {
+        perror("fseek");
+        fclose(stream);
+        exit(1);
+    }
+
+    c = fgetc(stream);
+
+    if (c == EOF) {
+        if (ferror(stream)) {
+            perror("fgetc");
+        } else {
+            printf("EOF\n");
+        }
+    } else {
+        printf("first char: %c\n", (char)c);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+#### ３章の１０の１　fsetpos()
+
+標準I/Oには、`fsetpos()` もあります。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fsetpos(FILE *stream, const fpos_t *pos);
+```
+
+`fsetpos()` は、`fpos_t` で表現された位置へストリームポジションを移動します。
+位置を取得する側には、後で出てくる `fgetpos()` を使います。
+
+```text
+fgetpos()
+    現在位置を fpos_t として保存する
+
+fsetpos()
+    保存した fpos_t の位置へ戻す
+```
+
+`fpos_t` は、単なる整数とは限りません。
+これは、Unix以外の環境や、マルチバイト文字の状態などを含めて位置を表す必要がある場合を考慮した型です。
+
+Linux上の通常のバイナリファイルやテキストファイルを扱うだけなら、`fseek()` と `ftell()` で足りる場面が多いです。
+ただし、標準Cとしてより移植性を意識するなら、`fgetpos()` / `fsetpos()` の組み合わせも知っておく価値があります。
+
+#### ３章の１０の２　rewind()
+
+ストリーム位置を先頭へ戻すだけなら、`rewind()` が使えます。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+void rewind(FILE *stream);
+```
+
+`rewind(stream)` は、概念的には次の処理に近いです。
+
+```c
+fseek(stream, 0, SEEK_SET);
+```
+
+ただし、`rewind()` はストリームのエラー状態もクリアします。
+また、戻り値がありません。
+そのため、エラーを直接戻り値で確認できません。
+
+```text
+rewind()
+    ストリーム位置を先頭へ戻す
+    EOF状態とエラー状態をクリアする
+    戻り値がない
+```
+
+エラーを確認したい場合は、`fseek(stream, 0, SEEK_SET)` を使う方が分かりやすいです。
+古い資料では、`errno` を0にしてから `rewind()` し、呼び出し後の `errno` を見る例があります。
+しかし、現代の実用コードでは、エラー処理が必要なら戻り値のある `fseek()` を選ぶ方が読みやすいです。
+
+```c
+if (fseek(stream, 0, SEEK_SET) != 0) {
+    perror("fseek");
+}
+```
+
+### ３章の１１　ストリームポジション
+
+低レベルI/Oの `lseek()` は、新しいファイルポジションを戻り値として返します。
+一方、`fseek()` は成功時に `0` を返すだけで、現在位置は返しません。
+
+標準I/Oで現在位置を知るには `ftell()` を使います。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+long ftell(FILE *stream);
+```
+
+戻り値は次の通りです。
+
+```text
+成功
+    現在のストリーム位置
+
+失敗
+    -1L
+    errno に理由が入る
+```
+
+例です。
+
+```c
+long pos;
+
+pos = ftell(stream);
+
+if (pos == -1L) {
+    perror("ftell");
+} else {
+    printf("position=%ld\n", pos);
+}
+```
+
+ただし、`long` でファイル位置を表すインタフェースは、巨大なファイルを扱う場合に気になることがあります。
+現代Linuxで大きなファイルをPOSIX的に扱うなら、`fseeko()` と `ftello()` も覚えておくとよいです。
+
+```c
+#include <stdio.h>
+
+int fseeko(FILE *stream, off_t offset, int whence);
+off_t ftello(FILE *stream);
+```
+
+`off_t` は、低レベルI/Oの `lseek()` でも出てきたファイルオフセット用の型です。
+Linuxでファイル位置を本格的に扱うなら、`long` よりも `off_t` の方が自然な場面があります。
+
+#### ３章の１１の１　fgetpos()
+
+`fsetpos()` と対になる関数が `fgetpos()` です。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fgetpos(FILE *stream, fpos_t *pos);
+```
+
+`fgetpos()` は、現在のストリーム位置を `pos` へ保存します。
+成功すると `0`、失敗すると `-1` を返し、`errno` に理由が入ります。
+
+```c
+fpos_t pos;
+
+if (fgetpos(stream, &pos) != 0) {
+    perror("fgetpos");
+}
+
+/* ここで何か読み書きする */
+
+if (fsetpos(stream, &pos) != 0) {
+    perror("fsetpos");
+}
+```
+
+貼り付け元の古い資料では `<stdioh.h>` のような表記ゆれが見えることがありますが、正しくは `<stdio.h>` です。
+このような小さなヘッダ名の誤植は、実際にコンパイルするとすぐ分かります。
+
+### ３章の１２　ストリームのフラッシュ
+
+標準I/Oは、ユーザー空間にバッファを持ちます。
+そのため、`fputs()` や `fwrite()` を呼んでも、データがすぐにカーネルへ渡されるとは限りません。
+
+このユーザー空間バッファを明示的にフラッシュする関数が `fflush()` です。
+
+宣言は次のようになります。
+
+```c
+#include <stdio.h>
+
+int fflush(FILE *stream);
+```
+
+`fflush(stream)` は、その出力ストリームに残っている未書き込みデータを、Cライブラリのバッファからカーネルへ渡します。
+
+戻り値は次の通りです。
+
+```text
+成功
+    0
+
+失敗
+    EOF
+    errno に理由が入る
+```
+
+`stream` に `NULL` を渡すと、プロセス内で開かれているすべての出力ストリームをフラッシュします。
+
+```c
+if (fflush(stream) == EOF) {
+    perror("fflush");
+}
+
+if (fflush(NULL) == EOF) {
+    perror("fflush");
+}
+```
+
+ここで非常に重要なのは、`fflush()` は「ディスクへ物理的に保存する」関数ではないという点です。
+
+```text
+fflush()
+    Cライブラリのユーザー空間バッファをカーネルへ渡す
+
+fsync()
+    カーネル側の dirty page をストレージへ反映させる
+
+fdatasync()
+    主にファイルデータの永続化を強める
+```
+
+つまり、`fflush()` の後でも、データはまだカーネルのページキャッシュ上にあるだけかもしれません。
+電源断やカーネルクラッシュまで考えるなら、`fsync()` や `fdatasync()` が必要になります。
+
+標準I/Oの `FILE *` から対応するファイルディスクリプタを得るには、POSIXの `fileno()` を使います。
+
+```c
+#include <stdio.h>
+
+int fileno(FILE *stream);
+```
+
+重要なファイルを保存する例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void) {
+    FILE *stream;
+    int fd;
+
+    stream = fopen("important.txt", "w");
+
+    if (stream == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    if (fputs("important data\n", stream) == EOF) {
+        perror("fputs");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fflush(stream) == EOF) {
+        perror("fflush");
+        fclose(stream);
+        exit(1);
+    }
+
+    fd = fileno(stream);
+
+    if (fd < 0) {
+        perror("fileno");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fsync(fd) != 0) {
+        perror("fsync");
+        fclose(stream);
+        exit(1);
+    }
+
+    if (fclose(stream) == EOF) {
+        perror("fclose");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+
+この順番が大事です。
+
+```text
+1. fputs() / fwrite()
+    stdioのバッファへ書く
+
+2. fflush()
+    stdioのバッファをカーネルへ渡す
+
+3. fsync()
+    カーネル側のデータをストレージへ反映する
+
+4. fclose()
+    ストリームを閉じ、最後のエラーも確認する
+```
+
+`fflush()` せずに `fsync(fileno(stream))` だけを呼ぶと、まだCライブラリのバッファ内に残っているデータはカーネルへ渡されていない可能性があります。
+その場合、`fsync()` はその未送信データを保存できません。
+
+```text
+危ない理解
+    fwrite() したから fsync() すれば全部保存される
+
+正しい理解
+    fwrite() のデータは stdio バッファに残ることがある
+    先に fflush() してから fsync() する
+```
+
+また、`fflush()` は入力ストリームに対して使うものではありません。
+標準Cで意味が明確なのは出力ストリーム、または直前の操作が出力である更新ストリームです。
+glibc/POSIXでは入力ストリームに対する拡張的な挙動もありますが、移植性を考えるなら、入力の読み捨て目的で `fflush(stdin)` のように書くのは避けます。
+
+```text
+避ける
+    fflush(stdin)
+
+理由
+    標準Cとして移植性のある使い方ではない
+    入力の掃除は別の方法で明示的に行う
+```
+
+UmuOSの視点では、`fflush()` と `fsync()` の違いは重要です。
+`fflush()` はユーザー空間のCライブラリの責任範囲です。
+`fsync()` はカーネルとファイルシステムの責任範囲です。
+
+```text
+UmuOSで分けて考える層
+
+ユーザー空間Cライブラリ
+    FILE構造体
+    stdioバッファ
+    fflush()
+
+カーネル
+    ファイルディスクリプタ
+    page cache
+    dirty page
+    fsync()
+
+デバイス/ストレージ
+    実際の永続化
+```
+
+この層の違いを理解しておくと、「printfしたのにファイルへ出ない」「fwriteしたのに電源断で消えた」「fsyncしたのにstdioバッファの分が残っていた」といった混乱を避けやすくなります。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
