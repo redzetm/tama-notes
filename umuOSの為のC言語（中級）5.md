@@ -793,3 +793,4 @@ pid_t vfork(void);
 
 Ushでは、まず `fork()` + `execvp()` + `waitpid()` の形を作るのが分かりやすいと思います。
 `vfork()` は、仕組みとして知っておく程度で十分です。
+
