@@ -535,3 +535,625 @@ LinuxのAPIを学ぶと、こういう小さな設計の選択肢が増えてい
 次は、複数のファイルディスクリプタを効率よく監視する仕組みとして、`epoll` を見ていきます。
 
 ### ４章の２　Event Pollインターフェース
+
+`epoll` は、複数のファイルディスクリプタを効率よく監視するためのLinux独自のI/O多重化インターフェースです。
+
+2章で見た `select()` や `poll()` でも、複数のfdを監視できます。
+たとえば、標準入力、ソケット、パイプなどのうち、どれが読み取り可能になったかを待つ、ということができます。
+
+しかし、`select()` や `poll()` には大きな弱点があります。
+監視したいfdの一覧を、システムコールを呼ぶたびに毎回カーネルへ渡す必要があることです。
+
+fdが数個なら問題は小さいです。
+しかし、ネットワークサーバーのように、数百、数千、あるいはそれ以上の接続を扱う場合、毎回すべてのfdをカーネルへ渡して、カーネル側でもすべてを調べるのは重くなります。
+
+イメージとしては、次のような違いです。
+
+```text
+poll()/select():
+	毎回、監視したいfd一覧を渡す
+	毎回、カーネルがfd一覧を調べる
+	毎回、結果をユーザー空間へ返す
+
+epoll:
+	先に監視したいfdをepollコンテキストへ登録する
+	変更があるときだけ追加、変更、削除する
+	待つときは「発生したイベント」だけを受け取る
+```
+
+`epoll` では、監視対象のfd集合をカーネル側に保持します。
+そのため、イベント待ちのたびに全fd一覧を渡し直す必要がありません。
+この設計により、大量のfdを扱うサーバープログラムでスケールしやすくなります。
+
+現在のLinuxでは、Webサーバー、プロキシ、イベント駆動型のネットワークプログラムなどで、`epoll` は非常によく使われます。
+ただし、POSIX標準ではなくLinux固有APIです。
+移植性を重視するプログラムでは、BSD系の `kqueue`、WindowsのIOCP、または抽象化ライブラリを使うこともあります。
+
+UmuOSの視点では、`epoll` は「fdをたくさん監視するには、fd一覧を毎回走査する設計だけでは限界がある」ということを教えてくれます。
+自作OSで最初から `epoll` 相当まで作る必要はないかもしれません。
+しかし、パイプ、端末、ソケット、プロセス通知などを扱うようになると、イベント待ちの設計は必ず重要になります。
+
+#### ４章の２の１　epollの基本構造
+
+`epoll` は、主に3つの操作で使います。
+
+```text
+1. epollコンテキストを作る
+	   epoll_create1()
+
+2. 監視したいfdを追加、変更、削除する
+	   epoll_ctl()
+
+3. イベントが発生するまで待つ
+	   epoll_wait()
+```
+
+ここでいう epollコンテキスト とは、監視対象fdの集合をカーネル側で管理するためのオブジェクトです。
+Linuxでは、このepollコンテキスト自体もファイルディスクリプタとして表現されます。
+
+つまり、`epoll_create1()` を呼ぶと、epoll用のfdが返ってきます。
+このfdは普通のファイルを指しているわけではありません。
+`epoll_ctl()` や `epoll_wait()` に渡すためのハンドルです。
+
+イメージとしては、次のようになります。
+
+```text
+epfd = epoll_create1(...)
+
+epfd が指すもの:
+	カーネル内のepollコンテキスト
+		監視対象fd 4
+		監視対象fd 5
+		監視対象fd 8
+```
+
+この `epfd` もfdなので、使い終わったら `close(epfd)` で閉じます。
+ここは地味ですが大事です。
+
+#### ４章の２の２　epollコンテキストの作成
+
+古い本では、`epoll_create()` が紹介されていることが多いです。
+プロトタイプは次のような形です。
+
+```c
+#include <sys/epoll.h>
+
+int epoll_create(int size);
+```
+
+`epoll_create()` は、epollコンテキストを作成し、それに対応するfdを返します。
+エラーの場合は `-1` を返し、`errno` に原因が入ります。
+
+ただし、現在のLinuxプログラミングでは、基本的には `epoll_create1()` を使う方がよいです。
+
+```c
+#include <sys/epoll.h>
+
+int epoll_create1(int flags);
+```
+
+`epoll_create1()` は Linux 2.6.27 以降で利用できます。
+現在の一般的なLinux環境では、こちらを使うのが自然です。
+
+よく使う指定は `EPOLL_CLOEXEC` です。
+
+```c
+int epfd = epoll_create1(EPOLL_CLOEXEC);
+if (epfd == -1) {
+	perror("epoll_create1");
+	return 1;
+}
+```
+
+`EPOLL_CLOEXEC` は、作成したepoll fdに close-on-exec を設定します。
+つまり、`exec()` で別プログラムを起動したときに、このfdを引き継がないようにします。
+
+Ushのようなシェルでは、これは特に重要です。
+シェルは `fork()` して `exec()` する処理をたくさん行います。
+不要なfdを子プロセスへ渡してしまうと、パイプが閉じない、リダイレクトが変な形で残る、監視用fdが外部コマンドへ漏れる、などの原因になります。
+
+古い `epoll_create()` の `size` 引数は、もともと「このくらいのfdを監視する予定です」というヒントでした。
+しかし、Linux 2.6.8以降では実質的に意味を持たず、正の値かどうかの確認に使われる程度です。
+そのため、現在は `epoll_create1()` を使うほうがすっきりします。
+
+`epoll_create1()` で起こりうる主なエラーは次のようなものです。
+
+EINVAL
+`flags` に無効な値を渡した場合です。
+
+EMFILE
+そのプロセスが開けるfd数の上限に達している場合です。
+
+ENFILE
+システム全体で開けるファイル数の上限に達している場合です。
+
+ENOMEM
+カーネルが必要なメモリを確保できなかった場合です。
+
+#### ４章の２の３　epollコンテキストの制御
+
+epollコンテキストへfdを追加したり、監視イベントを変更したり、削除したりするには `epoll_ctl()` を使います。
+
+```c
+#include <sys/epoll.h>
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+```
+
+引数の意味は次の通りです。
+
+`epfd`
+`epoll_create1()` などで作成したepollコンテキストのfdです。
+
+`op`
+追加、変更、削除のどれを行うかを指定します。
+
+`fd`
+監視対象にしたいファイルディスクリプタです。
+
+`event`
+どのイベントを監視するか、イベント発生時にどのデータを返すかを指定する構造体です。
+
+`op` に渡せる主な値は次の3つです。
+
+EPOLL_CTL_ADD
+fdをepollコンテキストへ追加します。
+
+EPOLL_CTL_MOD
+すでに追加されているfdの監視イベントを変更します。
+
+EPOLL_CTL_DEL
+fdをepollコンテキストから削除します。
+
+`struct epoll_event` は、現在のLinuxではおおむね次のような構造です。
+
+```c
+#include <stdint.h>
+#include <sys/epoll.h>
+
+typedef union epoll_data {
+	void     *ptr;
+	int       fd;
+	uint32_t  u32;
+	uint64_t  u64;
+} epoll_data_t;
+
+struct epoll_event {
+	uint32_t     events;
+	epoll_data_t data;
+};
+```
+
+実際にはヘッダで定義済みなので、自分でこの構造体を定義する必要はありません。
+ここではイメージをつかむために載せています。
+
+`events` には、監視したいイベントをビットORで指定します。
+よく使うものは次の通りです。
+
+EPOLLIN
+読み取り可能になったことを表します。
+次の `read()` がブロックせずに進められる可能性があります。
+
+EPOLLOUT
+書き込み可能になったことを表します。
+次の `write()` がブロックせずに進められる可能性があります。
+
+EPOLLERR
+エラーが発生したことを表します。
+これは明示的に指定しなくても通知されます。
+
+EPOLLHUP
+ハングアップが発生したことを表します。
+相手側が閉じたパイプやソケットなどで見かけます。
+これも明示的に指定しなくても通知されます。
+
+EPOLLPRI
+緊急データ、または高優先データがあることを表します。
+普通のファイルI/Oではあまり使いません。
+
+EPOLLET
+エッジトリガで監視します。
+これを指定しない場合、通常はレベルトリガです。
+
+EPOLLONESHOT
+一度イベントが発生したら、そのfdの監視を一時的に無効化します。
+再び監視したい場合は `EPOLL_CTL_MOD` で再設定します。
+
+`data` には、ユーザーが自由に使える値を入れられます。
+イベントが発生したとき、`epoll_wait()` の結果として同じ `data` が返ってきます。
+
+一番分かりやすい使い方は、`event.data.fd = fd` として、イベント発生時にfdを取り出せるようにする方法です。
+
+```c
+struct epoll_event event;
+
+event.events = EPOLLIN;
+event.data.fd = fd;
+
+if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) == -1) {
+	perror("epoll_ctl: add");
+}
+```
+
+すでに登録したfdの監視イベントを変更する場合は、`EPOLL_CTL_MOD` を使います。
+
+```c
+struct epoll_event event;
+
+event.events = EPOLLIN | EPOLLOUT;
+event.data.fd = fd;
+
+if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event) == -1) {
+	perror("epoll_ctl: mod");
+}
+```
+
+削除する場合は、現在のLinuxでは `event` に `NULL` を渡せます。
+
+```c
+if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) == -1) {
+	perror("epoll_ctl: del");
+}
+```
+
+古いLinuxカーネルでは、`EPOLL_CTL_DEL` でも `NULL` を嫌う時期がありました。
+しかし、現在のLinuxを前提にするなら、削除時は `NULL` で問題ありません。
+古い互換性を本気で考える場合だけ、ダミーの `struct epoll_event` を渡す、という理解でよいと思います。
+
+`epoll_ctl()` で起こりうる主なエラーも整理しておきます。
+
+EBADF
+`epfd` または `fd` が無効なファイルディスクリプタです。
+
+EEXIST
+`EPOLL_CTL_ADD` しようとしたfdが、すでに登録されています。
+
+EINVAL
+`epfd` がepoll fdではない、`op` が無効、または `epfd` と `fd` が同じ、などです。
+
+ENOENT
+`EPOLL_CTL_MOD` や `EPOLL_CTL_DEL` を指定したのに、そのfdが登録されていません。
+
+ENOMEM
+カーネルが必要なメモリを確保できませんでした。
+
+EPERM
+そのfdがepollで監視できない種類のfdです。
+
+#### ４章の２の４　epoll_wait()でイベントを待つ
+
+epollコンテキストに登録したfdのイベントを待つには、`epoll_wait()` を使います。
+
+```c
+#include <sys/epoll.h>
+
+int epoll_wait(int epfd,
+			   struct epoll_event *events,
+			   int maxevents,
+			   int timeout);
+```
+
+引数の意味は次の通りです。
+
+`epfd`
+epollコンテキストのfdです。
+
+`events`
+発生したイベントを受け取る配列です。
+
+`maxevents`
+一度に受け取る最大イベント数です。1以上である必要があります。
+
+`timeout`
+待ち時間をミリ秒で指定します。
+
+`timeout` の指定は重要です。
+
+```text
+timeout = -1
+	イベントが発生するまでずっと待つ
+
+timeout = 0
+	待たずにすぐ返る
+	イベントがなければ0を返す
+
+timeout > 0
+	指定ミリ秒だけ待つ
+	その間にイベントがなければ0を返す
+```
+
+`epoll_wait()` は、成功すると発生したイベント数を返します。
+0を返した場合は、タイムアウトしたという意味です。
+エラーの場合は `-1` を返し、`errno` に原因が入ります。
+
+よくある使い方は次のようになります。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <sys/epoll.h>
+
+#define MAX_EVENTS 64
+
+int wait_events(int epfd)
+{
+	struct epoll_event events[MAX_EVENTS];
+
+	for (;;) {
+		int nready = epoll_wait(epfd, events, MAX_EVENTS, -1);
+		if (nready == -1) {
+			if (errno == EINTR) {
+				continue;
+			}
+
+			perror("epoll_wait");
+			return -1;
+		}
+
+		for (int i = 0; i < nready; i++) {
+			printf("event=%u on fd=%d\n",
+				   events[i].events,
+				   events[i].data.fd);
+
+			/*
+			 * 実際のプログラムでは、events[i].events を見て、
+			 * events[i].data.fd に対して read() や write() を行います。
+			 */
+		}
+	}
+}
+```
+
+ここでは `malloc()` を使わず、固定長配列をスタック上に置いています。
+イベントを一度にいくつ受け取るかが分かっている小さなサンプルなら、これで十分です。
+
+実用コードでは、監視対象fdの数、イベント処理の設計、スレッド構成などによって、配列サイズやメモリ確保方法を決めます。
+
+`epoll_wait()` で起こりうる主なエラーは次の通りです。
+
+EBADF
+`epfd` が無効なfdです。
+
+EFAULT
+`events` が書き込み可能なメモリを指していません。
+
+EINTR
+イベント待ち中にシグナルで割り込まれました。
+実用コードでは、必要に応じて再試行します。
+
+EINVAL
+`epfd` がepoll fdではない、または `maxevents` が0以下です。
+
+#### ４章の２の５　小さなepollサンプル
+
+ここでは、標準入力を `epoll` で監視する小さなサンプルを見ます。
+標準入力、つまり fd 0 が読み取り可能になったら、入力された行を読み取って表示します。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <unistd.h>
+
+#define MAX_EVENTS 8
+#define BUF_SIZE 4096
+
+int main(void)
+{
+	int epfd = epoll_create1(EPOLL_CLOEXEC);
+	if (epfd == -1) {
+		perror("epoll_create1");
+		return 1;
+	}
+
+	struct epoll_event event;
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN;
+	event.data.fd = STDIN_FILENO;
+
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &event) == -1) {
+		perror("epoll_ctl");
+		close(epfd);
+		return 1;
+	}
+
+	puts("type something. Ctrl-D exits.");
+
+	for (;;) {
+		struct epoll_event events[MAX_EVENTS];
+		int nready = epoll_wait(epfd, events, MAX_EVENTS, -1);
+
+		if (nready == -1) {
+			if (errno == EINTR) {
+				continue;
+			}
+
+			perror("epoll_wait");
+			close(epfd);
+			return 1;
+		}
+
+		for (int i = 0; i < nready; i++) {
+			if (events[i].data.fd == STDIN_FILENO &&
+				(events[i].events & EPOLLIN)) {
+				char buf[BUF_SIZE];
+				ssize_t nread = read(STDIN_FILENO, buf, sizeof(buf));
+
+				if (nread == -1) {
+					perror("read");
+					close(epfd);
+					return 1;
+				}
+
+				if (nread == 0) {
+					close(epfd);
+					return 0;
+				}
+
+				if (write(STDOUT_FILENO, buf, (size_t)nread) == -1) {
+					perror("write");
+					close(epfd);
+					return 1;
+				}
+			}
+		}
+	}
+}
+```
+
+コンパイル例です。
+
+```bash
+gcc -Wall -Wextra -std=c17 epoll_stdin.c -o epoll_stdin
+./epoll_stdin
+```
+
+このサンプルでは標準入力だけを監視しているので、`epoll` のありがたみはまだ小さいです。
+しかし、fdを複数登録すれば、標準入力、パイプ、ソケットなどを同じ待ちループで扱えるようになります。
+
+Ushで考えるなら、将来的に次のようなものを同時に待つ設計が考えられます。
+
+```text
+標準入力からのコマンド入力
+ジョブ制御に関係する通知
+パイプや疑似端末からの出力
+内部イベント用のfd
+```
+
+小さなシェルではここまで必要ないかもしれません。
+しかし、イベントループという考え方は、OSやシェルを大きくしていくときにかなり重要になります。
+
+#### ４章の２の６　レベルトリガとエッジトリガ
+
+`epoll` には、レベルトリガとエッジトリガという2つのイベント通知方式があります。
+
+デフォルトはレベルトリガです。
+`EPOLLET` を指定するとエッジトリガになります。
+
+まず、レベルトリガは「状態」を見ます。
+読み取り可能なデータが残っている間は、何度でも「読み取り可能です」と通知されます。
+
+一方、エッジトリガは「変化」を見ます。
+読み取り不可能な状態から読み取り可能な状態へ変わった瞬間など、状態が変化したときに通知されます。
+
+パイプを例にすると分かりやすいです。
+
+```text
+1. 書き込み側がパイプへ1KBのデータを書く
+2. 読み取り側が epoll_wait() する
+3. 読み取り側が512バイトだけ読む
+4. 読み取り側がもう一度 epoll_wait() する
+```
+
+ステップ2では、レベルトリガでもエッジトリガでも通知されます。
+パイプにデータが入って、読み取り可能になったからです。
+
+違いが出るのはステップ4です。
+
+レベルトリガの場合、まだ512バイト残っているので、もう一度通知されます。
+つまり「まだ読める状態ですよ」と教えてくれます。
+
+エッジトリガの場合、ステップ3のあとに新しいデータが追加されていなければ、通知されない可能性があります。
+なぜなら、読み取り可能という状態への新しい変化が起きていないからです。
+
+図にすると、ざっくり次のようになります。
+
+```text
+レベルトリガ:
+	データが残っている間は通知される
+
+	パイプ内: 1024B -> 512B -> 512B
+			  通知     通知     通知
+
+エッジトリガ:
+	状態が変わったときに通知される
+
+	パイプ内: 0B -> 1024B -> 512B
+			 変化   通知     通知なしの場合がある
+```
+
+このため、エッジトリガを使う場合は、基本的にノンブロッキングI/Oと組み合わせます。
+そして、`read()` や `write()` を、`EAGAIN` または `EWOULDBLOCK` になるまで繰り返す、という書き方をします。
+
+```text
+エッジトリガの基本方針:
+	fdをノンブロッキングにする
+	イベントが来たら読めるだけ読む
+	read() が EAGAIN になるまで読む
+	そこで初めて「今はもう読めない」と判断する
+```
+
+これをしないと、データが残っているのに次の通知が来なくて、処理が止まったように見えることがあります。
+
+初心者段階では、まずレベルトリガを使うのが安全です。
+`select()` や `poll()` に近い感覚で扱えるためです。
+
+エッジトリガは高性能なイベント駆動サーバーで使われることがありますが、書き方を間違えるとバグが見つけにくくなります。
+特に、ノンブロッキングI/O、部分読み書き、`EAGAIN` の扱いを理解してから使うのがよいと思います。
+
+#### ４章の２の７　epollで注意すること
+
+`epoll` は強力ですが、いくつか注意点があります。
+
+まず、`epoll` はLinux固有です。
+POSIX標準ではありません。
+Linux専用プログラムなら問題ありませんが、他のUnix系OSへ移植したい場合は別の仕組みが必要です。
+
+次に、`epoll` で監視できるfdと、できないfdがあります。
+ソケット、パイプ、端末などはよく使われます。
+一方、普通の通常ファイルは、常に読み書き可能と見なされることが多く、`epoll` で待つ意味が薄いです。
+通常ファイルのディスクI/O完了を非同期に待つ、という用途には、`epoll` は基本的に向いていません。
+そのあたりは、後で非同期I/Oや `io_uring` の話に関係してきます。
+
+また、`EPOLLERR` と `EPOLLHUP` は、明示的に指定していなくても返ることがあります。
+そのため、イベント処理では `EPOLLIN` だけを見るのではなく、エラーや切断も考慮します。
+
+```c
+if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+	/* エラーまたは切断として扱う */
+}
+```
+
+さらに、`epoll_wait()` はシグナルで割り込まれて `EINTR` を返すことがあります。
+シェルのようにシグナルを扱うプログラムでは、これはかなり現実的な問題です。
+`Ctrl-C`、ジョブ制御、子プロセス終了通知などと絡むため、`EINTR` をどう扱うかは丁寧に考える必要があります。
+
+#### ４章の２の８　UmuOSでどう考えるか
+
+UmuOSの設計として `epoll` を見ると、重要なのはAPIそのものよりも、イベント待ちの抽象化です。
+
+単純なOSでは、プロセスが `read()` を呼んだら、データが来るまでそのプロセスを寝かせる、という設計から始められます。
+しかし、1つのプロセスが複数の入力元を同時に待ちたい場合は、それだけでは足りません。
+
+たとえば、シェルが次のようなものを同時に気にしたい場合です。
+
+```text
+キーボードから入力が来たか
+子プロセスが終了したか
+パイプからデータが来たか
+端末状態が変わったか
+タイマーが切れたか
+```
+
+これらを全部、単純なブロッキング `read()` だけで扱うのは難しいです。
+そこで、イベントを登録し、発生したイベントだけを受け取る仕組みが欲しくなります。
+
+UmuOSで最初に作るなら、Linuxの `epoll` を完全再現する必要はありません。
+まずは、次のような小さな抽象化でもよいと思います。
+
+```text
+watch(fd, event_mask)
+wait_event(timeout)
+unwatch(fd)
+```
+
+このような仕組みがあると、シェル、端末、パイプ、将来のソケットなどをイベント駆動で扱いやすくなります。
+
+Linuxの `epoll` は、そのかなり実用的で高性能な完成形の1つです。
+UmuOSでは、まず「イベントを待つ対象を登録する」「発生したイベントだけ受け取る」「fdとイベントを結びつける」という考え方を吸収すると良さそうです。
+
+次は、ファイルをメモリへ対応づけて扱う、メモリマップI/Oを見ていきます。
+
+### ４章の３　ファイルをメモリへマッピングする
