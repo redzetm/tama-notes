@@ -794,3 +794,768 @@ pid_t vfork(void);
 Ushでは、まず `fork()` + `execvp()` + `waitpid()` の形を作るのが分かりやすいと思います。
 `vfork()` は、仕組みとして知っておく程度で十分です。
 
+### ５章の３　プロセスの終了
+
+プロセスは、いつか必ず終了します。
+正常に仕事を終えて終了することもあれば、エラーで終了することもあります。
+また、シグナルによって強制的に終了させられることもあります。
+
+Cプログラムで現在のプロセスを終了する代表的な関数は `exit()` です。
+
+```c
+#include <stdlib.h>
+
+void exit(int status);
+```
+
+`exit()` は、Cライブラリ側の終了処理を行ったあと、最終的にカーネルへ「このプロセスは終了します」と通知します。
+`exit()` は戻りません。
+そのため、`exit()` の後に普通の処理を書いても実行されません。
+
+`status` は終了ステータスです。
+シェルや親プロセスは、この終了ステータスを見て、子プロセスが成功したのか失敗したのかを判断できます。
+
+一般的には、0が成功、0以外が失敗です。
+
+```c
+#include <stdlib.h>
+
+exit(EXIT_SUCCESS);
+exit(EXIT_FAILURE);
+```
+
+`EXIT_SUCCESS` と `EXIT_FAILURE` は、移植性を意識したマクロです。
+Linuxでは多くの場合、`EXIT_SUCCESS` は0、`EXIT_FAILURE` は1です。
+
+シェルで直前のコマンドの終了ステータスを見るには、普通は `$?` を使います。
+
+```bash
+./some_command
+echo $?
+```
+
+Ushを作る場合も、直前のコマンドの終了ステータスを保存して、将来的には `$?` 相当で参照できるようにする設計が考えられます。
+
+#### ５章の３の１　exit() が行う処理
+
+`exit()` は、単にカーネルへ終了を伝えるだけではありません。
+その前に、Cライブラリ側の後始末を行います。
+
+代表的には次のような処理です。
+
+```text
+atexit() に登録された関数を実行する
+標準I/Oストリームをflushする
+tmpfile() で作成した一時ファイルを削除する
+最終的に _exit() 相当でカーネルへ終了を伝える
+```
+
+3章で見たように、標準I/Oにはユーザー空間バッファがあります。
+そのため、`printf()` した内容がまだ実際のfdへ書き出されていないことがあります。
+`exit()` は、通常このバッファをflushします。
+
+```c
+printf("hello");
+exit(EXIT_SUCCESS);
+```
+
+この場合、改行がなくても `exit()` の終了処理で標準出力がflushされ、`hello` が出力されることがあります。
+
+ただし、`fork()` 後の子プロセスで `exec()` に失敗した場合などは、前節で見たように `exit()` ではなく `_exit()` を使うことが重要です。
+親からコピーされたstdioバッファを、子が二重にflushしてしまう可能性があるからです。
+
+#### ５章の３の２　_exit() と _Exit()
+
+`_exit()` は、Cライブラリの通常の終了処理をほとんど行わず、直接カーネルへプロセス終了を通知します。
+
+```c
+#include <unistd.h>
+
+void _exit(int status);
+```
+
+`_exit()` は、stdioのflushや `atexit()` 関数の実行を行いません。
+そのため、出力バッファに残っている内容は失われることがあります。
+
+```c
+printf("hello");
+_exit(0);
+```
+
+この場合、`hello` が表示されない可能性があります。
+
+一方で、`fork()` 後の子プロセスで `exec()` に失敗したときや、`vfork()` 後の子プロセスでは `_exit()` が必要になります。
+
+ISO Cでは `_Exit()` も定義されています。
+
+```c
+#include <stdlib.h>
+
+void _Exit(int status);
+```
+
+考え方としては `_exit()` とほぼ同じで、Cライブラリの通常の終了処理を行わずに終了します。
+
+整理すると、次のようになります。
+
+```text
+普通のプログラム終了:
+	return 0;
+	exit(EXIT_SUCCESS);
+
+fork後の子プロセスでexec失敗:
+	_exit(127);
+
+vfork後の子プロセス:
+	exec系関数 または _exit()
+```
+
+#### ５章の３の３　main() から return する
+
+Cプログラムでは、`main()` から `return` してもプロセスは終了します。
+
+```c
+int main(void)
+{
+	return 0;
+}
+```
+
+これは、だいたい `exit(0)` に近い意味になります。
+`main()` の戻り値が終了ステータスになります。
+
+C99以降では、`main()` の最後に到達した場合は、`return 0;` と同じ扱いになります。
+ただ、学習用や明確なコードでは、終了ステータスを明示するほうが分かりやすいです。
+
+```c
+int main(void)
+{
+	/* 処理 */
+	return 0;
+}
+```
+
+Ushのようなシェルでは、外部コマンドの終了ステータスを扱うため、終了コードの意味をかなり意識することになります。
+
+#### ５章の３の４　シグナルによる終了
+
+プロセスは、`exit()` 以外でも終了します。
+代表的なのがシグナルによる終了です。
+
+たとえば、次のようなシグナルがあります。
+
+SIGTERM
+通常の終了要求です。
+`kill` コマンドがデフォルトで送るシグナルです。
+
+SIGKILL
+強制終了です。
+プロセスは捕捉も無視もできません。
+
+SIGSEGV
+不正なメモリアクセス、いわゆるセグメンテーション違反で発生します。
+
+SIGABRT
+`abort()` によって送られることが多いシグナルです。
+
+シグナルについては後の章で詳しく扱います。
+ここでは、子プロセスの終了状態を調べるときに、「普通に `exit()` したのか」「シグナルで終了したのか」を区別できる、という点を押さえれば大丈夫です。
+
+#### ５章の３の５　atexit()
+
+`atexit()` は、プロセスが通常終了するときに呼び出してほしい関数を登録するための関数です。
+
+```c
+#include <stdlib.h>
+
+int atexit(void (*function)(void));
+```
+
+登録する関数は、引数も戻り値も持ちません。
+
+```c
+void cleanup(void)
+{
+	/* 終了時の後始末 */
+}
+```
+
+サンプルです。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+static void cleanup(void)
+{
+	puts("cleanup called");
+}
+
+int main(void)
+{
+	if (atexit(cleanup) != 0) {
+		fputs("atexit failed\n", stderr);
+		return 1;
+	}
+
+	puts("main end");
+	return 0;
+}
+```
+
+このプログラムでは、`main()` から戻るときに `cleanup()` が呼ばれます。
+
+複数の関数を登録した場合、実行順序は登録した順番の逆です。
+最後に登録した関数が最初に呼ばれます。
+
+```text
+atexit(A)
+atexit(B)
+atexit(C)
+
+終了時:
+	C
+	B
+	A
+```
+
+`exec()` に成功した場合、古いプロセスイメージは消えるため、登録済みの `atexit()` 関数も消えます。
+また、シグナルで強制終了した場合は、通常 `atexit()` に登録した関数は実行されません。
+
+`atexit()` に登録した関数の中で `exit()` を呼ぶのは避けるべきです。
+終了処理が再帰的になり、ややこしい動作になります。
+
+#### ５章の３の６　on_exit()
+
+glibcには `on_exit()` という関数もあります。
+
+```c
+#include <stdlib.h>
+
+int on_exit(void (*function)(int, void *), void *arg);
+```
+
+`on_exit()` で登録する関数には、終了ステータスと任意の引数が渡されます。
+
+```c
+void handler(int status, void *arg);
+```
+
+ただし、`on_exit()` は標準的なCやPOSIXの移植性あるAPIではありません。
+Linux/glibcでは使えますが、他のUnix系OSでは使えないことがあります。
+
+現在の学習やUmuOS向けの移植性を考えるなら、基本は `atexit()` を使うと考えておけばよいです。
+
+#### ５章の３の７　SIGCHLD
+
+子プロセスが終了すると、カーネルは親プロセスへ `SIGCHLD` シグナルを送ります。
+
+`SIGCHLD` は、子プロセスの状態が変化したことを知らせるシグナルです。
+終了だけでなく、停止や再開でも関係することがあります。
+
+シェルにとって、`SIGCHLD` はかなり重要です。
+バックグラウンドジョブが終了したことを知るために使えるからです。
+
+ただし、シグナルは非同期に届きます。
+つまり、親プロセスがどの処理をしている最中でも割り込んでくる可能性があります。
+
+そのため、`SIGCHLD` ハンドラの中で複雑な処理をするのは危険です。
+実用的には、ハンドラではフラグを立てるだけにして、メインループ側で `waitpid()` する設計などがよく使われます。
+
+シグナルについては9章で詳しく見ます。
+ここでは、子プロセスが終了しても、それだけでは親が終了ステータスを受け取ったことにはならない、という点が重要です。
+
+親は `wait()` や `waitpid()` で、子プロセスの終了状態を回収する必要があります。
+
+### ５章の４　子プロセスの終了を待つ
+
+子プロセスが終了したとき、親プロセスはその終了状態を取得できます。
+このために使う基本的な関数が `wait()` です。
+
+```c
+#include <sys/types.h>
+#include <sys/wait.h>
+
+pid_t wait(int *status);
+```
+
+`wait()` は、終了した子プロセスがあれば、そのpidを返します。
+終了した子プロセスがまだなければ、通常はブロックして待ちます。
+
+`status` が `NULL` でなければ、子プロセスの終了状態が格納されます。
+この値はビットを直接読むのではなく、専用のマクロで調べます。
+
+#### ５章の４の１　ゾンビプロセス
+
+子プロセスが終了した瞬間に、カーネルがその情報を完全に消してしまうと、親プロセスは終了ステータスを取得できなくなります。
+
+そこでUnixでは、終了した子プロセスを一時的にゾンビ状態として残します。
+
+ゾンビ状態のプロセスは、もう実行されません。
+メモリ空間など大部分のリソースは解放済みです。
+しかし、pid、終了ステータス、リソース使用量など、親が回収するために必要な最小限の情報だけが残ります。
+
+親プロセスが `wait()` や `waitpid()` を呼ぶと、その情報を受け取り、カーネルはゾンビを完全に破棄できます。
+
+```text
+子プロセス終了
+	-> ゾンビ状態になる
+
+親プロセスが wait()
+	-> 終了ステータスを受け取る
+	-> ゾンビが消える
+```
+
+シェルやサーバープログラムが子プロセスを作る場合、終了した子をきちんと回収しないと、ゾンビが溜まります。
+Ushでも、外部コマンドを起動したら、フォアグラウンドなら `waitpid()` で待つ、バックグラウンドなら `SIGCHLD` と組み合わせて後で回収する、という設計が必要になります。
+
+親プロセスが子プロセスより先に終了した場合、子プロセスは別の親へ引き取られます。
+伝統的にはpid 1のinitが引き取る、と説明されます。
+現在のLinuxでは、PID名前空間やsubreaperの仕組みもあり、必ずしもグローバルなpid 1だけとは限りません。
+ただし、基本的な理解としては「孤児になったプロセスは適切な親へつなぎ直され、最終的には回収される」と考えればよいです。
+
+#### ５章の４の２　wait() と終了状態マクロ
+
+`wait()` の `status` は、そのまま整数として読むものではありません。
+次のようなマクロで確認します。
+
+```c
+#include <sys/wait.h>
+
+WIFEXITED(status)
+WEXITSTATUS(status)
+WIFSIGNALED(status)
+WTERMSIG(status)
+WIFSTOPPED(status)
+WSTOPSIG(status)
+WIFCONTINUED(status)
+```
+
+よく使うものを整理します。
+
+WIFEXITED(status)
+子プロセスが `exit()`、`_exit()`、または `main()` からのreturnで通常終了した場合に真になります。
+
+WEXITSTATUS(status)
+`WIFEXITED(status)` が真の場合に、終了ステータスを取り出します。
+
+WIFSIGNALED(status)
+子プロセスがシグナルで終了した場合に真になります。
+
+WTERMSIG(status)
+`WIFSIGNALED(status)` が真の場合に、終了させたシグナル番号を取り出します。
+
+WIFSTOPPED(status)
+子プロセスが停止した場合に真になります。
+ジョブ制御やデバッガで重要です。
+
+WIFCONTINUED(status)
+停止していた子プロセスが再開した場合に真になります。
+こちらもジョブ制御で関係します。
+
+`WCOREDUMP(status)` というマクロも多くのUnix系OSで使えますが、POSIX標準ではありません。
+使う場合は、環境によっては `#ifdef WCOREDUMP` で囲むとよいです。
+
+#### ５章の４の３　wait() のサンプル
+
+次のサンプルは、子プロセスを作り、子が終了するのを親が待ち、終了ステータスを表示します。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static void print_status(int status)
+{
+	if (WIFEXITED(status)) {
+		printf("normal exit: status=%d\n", WEXITSTATUS(status));
+	} else if (WIFSIGNALED(status)) {
+		printf("killed by signal: signal=%d", WTERMSIG(status));
+#ifdef WCOREDUMP
+		if (WCOREDUMP(status)) {
+			printf(" (core dumped)");
+		}
+#endif
+		putchar('\n');
+	} else if (WIFSTOPPED(status)) {
+		printf("stopped by signal: signal=%d\n", WSTOPSIG(status));
+#ifdef WIFCONTINUED
+	} else if (WIFCONTINUED(status)) {
+		puts("continued");
+#endif
+	}
+}
+
+int main(void)
+{
+	pid_t pid = fork();
+
+	if (pid == -1) {
+		perror("fork");
+		return 1;
+	}
+
+	if (pid == 0) {
+		_exit(42);
+	}
+
+	int status;
+	pid_t waited;
+
+	do {
+		waited = wait(&status);
+	} while (waited == -1 && errno == EINTR);
+
+	if (waited == -1) {
+		perror("wait");
+		return 1;
+	}
+
+	printf("child pid=%ld\n", (long)waited);
+	print_status(status);
+
+	return 0;
+}
+```
+
+ここでは、`wait()` が `EINTR` で中断された場合に再試行しています。
+シグナルを扱うプログラムでは、このような処理が必要になることがあります。
+
+子プロセス側では `_exit(42)` を使っています。
+これは、`fork()` 後の子プロセスで余計なCライブラリ終了処理を避けるためです。
+
+#### ５章の４の４　waitpid()
+
+複数の子プロセスがある場合、任意の子ではなく、特定の子だけを待ちたいことがあります。
+その場合は `waitpid()` を使います。
+
+```c
+#include <sys/types.h>
+#include <sys/wait.h>
+
+pid_t waitpid(pid_t pid, int *status, int options);
+```
+
+`pid` の指定方法は少し特殊です。
+
+```text
+pid > 0
+	そのpidの子プロセスを待つ
+
+pid == -1
+	任意の子プロセスを待つ
+	wait() とほぼ同じ
+
+pid == 0
+	呼び出し元と同じプロセスグループに属する子を待つ
+
+pid < -1
+	-pid に等しいプロセスグループIDを持つ子を待つ
+```
+
+`options` には、主に次のような値を指定できます。
+
+WNOHANG
+まだ状態変化した子プロセスがいない場合、ブロックせずに0を返します。
+
+WUNTRACED
+停止した子プロセスも報告します。
+ジョブ制御で重要です。
+
+WCONTINUED
+再開した子プロセスも報告します。
+これもジョブ制御で重要です。
+
+`waitpid()` の戻り値は次のようになります。
+
+```text
+> 0
+	状態変化した子プロセスのpid
+
+0
+	WNOHANG指定時、まだ状態変化した子がいない
+
+-1
+	エラー
+```
+
+#### ５章の４の５　waitpid() のサンプル
+
+特定の子プロセスを待つ例です。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(void)
+{
+	pid_t pid = fork();
+
+	if (pid == -1) {
+		perror("fork");
+		return 1;
+	}
+
+	if (pid == 0) {
+		char *const argv[] = { "sh", "-c", "exit 7", NULL };
+		execvp("sh", argv);
+		perror("execvp");
+		_exit(127);
+	}
+
+	int status;
+	pid_t ret;
+
+	do {
+		ret = waitpid(pid, &status, 0);
+	} while (ret == -1 && errno == EINTR);
+
+	if (ret == -1) {
+		perror("waitpid");
+		return 1;
+	}
+
+	if (WIFEXITED(status)) {
+		printf("child exited: %d\n", WEXITSTATUS(status));
+	} else if (WIFSIGNALED(status)) {
+		printf("child killed by signal: %d\n", WTERMSIG(status));
+	}
+
+	return 0;
+}
+```
+
+シェルでフォアグラウンドコマンドを実行する場合、基本形はこのようになります。
+
+```text
+fork()
+子プロセスでexecvp()
+親プロセスでwaitpid(child_pid, ...)
+終了ステータスを保存
+```
+
+バックグラウンドジョブの場合は、親がすぐにプロンプトへ戻るため、`WNOHANG` や `SIGCHLD` と組み合わせて後から回収します。
+
+#### ５章の４の６　waitid()
+
+より細かい情報が必要な場合は `waitid()` もあります。
+
+```c
+#include <sys/wait.h>
+
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
+```
+
+`waitid()` は、`siginfo_t` に詳しい情報を返します。
+たとえば、子プロセスのpid、uid、終了理由、終了ステータスまたはシグナル番号などです。
+
+対象の指定には `idtype` と `id` を使います。
+
+```text
+P_PID
+	指定したpidの子プロセス
+
+P_PGID
+	指定したプロセスグループIDの子プロセス
+
+P_ALL
+	任意の子プロセス
+```
+
+`options` には、`WEXITED`、`WSTOPPED`、`WCONTINUED`、`WNOHANG`、`WNOWAIT` などを指定します。
+
+`WNOWAIT` を指定すると、状態を取得しても子プロセスを回収しません。
+つまり、ゾンビ状態のまま残します。
+あとで改めて回収する必要があります。
+
+`waitid()` は強力ですが、普通のシェルや学習用コードでは、まず `waitpid()` を使えるようになるのが先でよいと思います。
+
+#### ５章の４の７　wait3() と wait4()
+
+BSD系由来のAPIとして、`wait3()` と `wait4()` もあります。
+
+```c
+#include <sys/resource.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+pid_t wait3(int *status, int options, struct rusage *rusage);
+pid_t wait4(pid_t pid, int *status, int options, struct rusage *rusage);
+```
+
+これらは、子プロセスの終了状態に加えて、リソース使用量を `struct rusage` で取得できます。
+
+ただし、POSIX標準の中心的なAPIではありません。
+移植性を考えるなら、基本は `wait()` / `waitpid()` / 必要なら `waitid()` と覚えておくのがよいです。
+
+リソース使用量を取りたい場合は、Linuxでは `wait4()` や `getrusage()` が関係します。
+このあたりは次章のリソース管理ともつながります。
+
+#### ５章の４の８　system()
+
+`system()` は、コマンド文字列をシェルに渡して実行し、その終了を待つ関数です。
+
+```c
+#include <stdlib.h>
+
+int system(const char *command);
+```
+
+内部的には、おおまかに次のようなことをします。
+
+```text
+/bin/sh -c command
+```
+
+たとえば次のコードは、シェル経由で `ls -l` を実行します。
+
+```c
+#include <stdlib.h>
+
+int main(void)
+{
+	int status = system("ls -l");
+	return status == -1 ? 1 : 0;
+}
+```
+
+`system()` は手軽ですが、注意点があります。
+
+まず、シェルを経由します。
+そのため、ユーザー入力をそのまま文字列連結して渡すと、コマンドインジェクションの危険があります。
+
+```c
+/* 危険な例: user_input が "file; rm -rf ..." のような文字列なら問題になる */
+system(user_input);
+```
+
+外部コマンドを安全に起動したい場合は、`fork()` + `execvp()` のように、引数を配列として渡す形のほうが安全です。
+
+また、`system()` の戻り値は、実行したコマンドの終了コードそのものではなく、`wait()` 系のstatus形式です。
+終了コードを取り出すには、`WIFEXITED()` と `WEXITSTATUS()` を使います。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+
+int main(void)
+{
+	int status = system("sh -c 'exit 3'");
+
+	if (status == -1) {
+		perror("system");
+		return 1;
+	}
+
+	if (WIFEXITED(status)) {
+		printf("exit status=%d\n", WEXITSTATUS(status));
+	}
+
+	return 0;
+}
+```
+
+`system(NULL)` を呼ぶと、シェルが利用可能かどうかを確認できます。
+
+```c
+if (system(NULL)) {
+	puts("shell is available");
+}
+```
+
+ただし、Ushを作る立場では、`system()` を使ってコマンド実行を済ませてしまうと、シェルの中身を学べません。
+Ushでは、`fork()`、`execvp()`、`waitpid()` を自分で組み合わせるのが本筋です。
+
+#### ５章の４の９　my_system() の実装イメージ
+
+`system()` の仕組みを理解するために、簡単な `my_system()` を考えると勉強になります。
+本物の `system()` はシグナルの扱いなどがもっと複雑ですが、基本形は次のようになります。
+
+```c
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int my_system(const char *command)
+{
+	if (command == NULL) {
+		return 1;
+	}
+
+	pid_t pid = fork();
+	if (pid == -1) {
+		return -1;
+	}
+
+	if (pid == 0) {
+		char *const argv[] = { "sh", "-c", (char *)command, NULL };
+		execv("/bin/sh", argv);
+		_exit(127);
+	}
+
+	int status;
+
+	for (;;) {
+		if (waitpid(pid, &status, 0) == -1) {
+			if (errno == EINTR) {
+				continue;
+			}
+
+			return -1;
+		}
+
+		break;
+	}
+
+	return status;
+}
+```
+
+この実装では、子プロセスで `/bin/sh -c command` を実行し、親プロセスが `waitpid()` で待っています。
+
+本物の `system()` とは違い、`SIGINT`、`SIGQUIT`、`SIGCHLD` の扱いを省略しています。
+そのため、完全な互換実装ではありません。
+しかし、`fork()`、`exec()`、`waitpid()` のつながりを見る教材としては分かりやすいです。
+
+#### ５章の４の１０　UmuOSでどう考えるか
+
+UmuOSやUshの視点では、この節はかなり重要です。
+
+シェルが外部コマンドを実行するには、次の処理が必要になります。
+
+```text
+1. fork() で子プロセスを作る
+2. 子プロセスでリダイレクトやパイプのfdを設定する
+3. 子プロセスで execvp() する
+4. 親プロセスは必要なら waitpid() する
+5. 終了ステータスを保存する
+6. バックグラウンドジョブなら後で回収する
+```
+
+フォアグラウンド実行なら、親シェルは子プロセスの終了を待ちます。
+バックグラウンド実行なら、親シェルはすぐにプロンプトへ戻り、後で `SIGCHLD` や `waitpid(..., WNOHANG)` を使って終了した子を回収します。
+
+UmuOSで最初に実装するなら、まずはフォアグラウンド実行だけで十分です。
+
+```text
+最初のUsh:
+	コマンドを読む
+	fork()
+	子でexec()
+	親でwaitpid()
+```
+
+これが動くと、シェルとして一気にそれらしくなります。
+
+その次に、リダイレクト、パイプ、バックグラウンド実行、ジョブ制御へ進むのがよさそうです。
+
