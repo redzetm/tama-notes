@@ -244,7 +244,8 @@ close()
 ```
 
 現在のLinuxプログラミングでは、ファイル作成も含めて `open()` を使うことが多いです。
-古いコードでは `creat()` が出てくることもありますが、`creat(path, mode)` は、概念的には `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)` に近いものです。
+古いコードでは `creat()` が出てくることもありますが、`creat(path, mode)` は、
+概念的には `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)` に近いものです。
 新しく書くコードでは、意図が分かりやすい `open()` を使う方がよいと思います。
 
 #### ２章の２の１　open()
