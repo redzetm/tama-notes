@@ -519,8 +519,8 @@ int main(void)
     ssize_t n;
 
     if (pipe(pipefd) < 0) {                                         //pipe()の戻り値は0成功、-1失敗
-        perror("pipe");
-        exit(1);
+        perror("pipe");                                             //デフォでpipe()したときは、pipefd[0]には　O_RDONLY
+        exit(1);                                                    //
     }
 
     flags = fcntl(pipefd[0], F_GETFL);
