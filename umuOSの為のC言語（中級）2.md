@@ -523,7 +523,7 @@ int main(void)
         exit(1);                                                    //pipefd[1]には O_WRONLYが入るのが仕様です
     }
 
-    flags = fcntl(pipefd[0], F_GETFL);
+    flags = fcntl(pipefd[0], F_GETFL);      // flagsには、pipefd[0] に現在設定されている状態フラグ（f_flags）が入る
     if (flags < 0) {
         perror("fcntl F_GETFL");
         close(pipefd[0]);
