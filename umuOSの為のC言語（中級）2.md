@@ -520,7 +520,7 @@ int main(void)
 
     if (pipe(pipefd) < 0) {                                         //pipe()の戻り値は0成功、-1失敗
         perror("pipe");                                             //デフォでpipe()したときは、pipefd[0]には　O_RDONLY
-        exit(1);                                                    //
+        exit(1);                                                    //pipefd[1]には O_WRONLYが入るのが仕様です
     }
 
     flags = fcntl(pipefd[0], F_GETFL);
