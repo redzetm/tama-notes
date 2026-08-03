@@ -518,7 +518,7 @@ int main(void)
     char buf[128];
     ssize_t n;
 
-    if (pipe(pipefd) < 0) {
+    if (pipe(pipefd) < 0) {                                         //pipe()の戻り値は0成功、-1失敗
         perror("pipe");
         exit(1);
     }
