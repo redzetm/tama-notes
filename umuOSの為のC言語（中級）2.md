@@ -493,6 +493,78 @@ fd = open("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 Ushのようなシェルの基本実装では、最初から `O_NONBLOCK` を多用する必要はありません。
 ただし、将来的にジョブ制御、イベントループ、非同期I/Oを扱う場合には重要になります。
 
+`O_NONBLOCK` は、`open()` の時点で指定することもできます。
+
+```c
+fd = open("some_fifo", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+```
+
+また、すでに開いているファイルディスクリプタに対して、あとから `fcntl()` で設定することもできます。
+次の例では、パイプの読み取り側をノンブロッキングにしています。
+パイプにまだデータがない場合でも、`read()` は待ち続けず、エラーとして戻ります。
+
+```c
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int pipefd[2];
+    int flags;
+    char buf[128];
+    ssize_t n;
+
+    if (pipe(pipefd) < 0) {
+        perror("pipe");
+        exit(1);
+    }
+
+    flags = fcntl(pipefd[0], F_GETFL);
+    if (flags < 0) {
+        perror("fcntl F_GETFL");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        exit(1);
+    }
+
+    if (fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl F_SETFL");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        exit(1);
+    }
+
+    n = read(pipefd[0], buf, sizeof(buf));
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("データがないので、待たずに戻りました\n");
+        } else {
+            perror("read");
+        }
+    } else if (n == 0) {
+        printf("EOFです\n");
+    } else {
+        printf("%zdバイト読みました: %.*s\n", n, (int)n, buf);
+    }
+
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    return 0;
+}
+```
+
+この例では、書き込み側 `pipefd[1]` を開いたままにしている点が重要です。
+もし書き込み側を先に閉じると、読み取り側の `read()` は「データ待ち」ではなくEOFとして `0` を返します。
+
+`O_NONBLOCK` のときに「今は読み書きできない」ことを表す代表的なエラーが `EAGAIN` です。
+環境によっては `EWOULDBLOCK` という名前も使われます。
+Linuxでは多くの場合この2つは同じ値ですが、移植性を考えるなら両方を見る書き方がよく使われます。
+
 ##### ２章の２の３の５　O_SYNCとO_DIRECT
 
 `O_SYNC` は、書き込みをディスクへ同期させたい場合に使います。
