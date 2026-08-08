@@ -2040,99 +2040,7 @@ mq_オープン関数 で すら、たまキュー、 という名前のメッ�
 ```
 
 つまり、セマフォは交通整理のような役割を持ちます。
-例）
 
-```c
-インクルード、スタンダードアイオードットエイチ。
-インクルード、スタンダードライブラリドットエイチ。
-インクルード、ユニストディードットエイチ。
-#include <fcntl.h>
-#include <semaphore.h>
-#include <sys/mman.h>
-インクルード、シス、ウエイトドットエイチ。
-
-イント main関数(void) {
-    const チャー *sem_name = "/tama_semaphore";
-    sem_t *sem;
-    イント *shared_count;
-    ピーアイディティー型。 pid;
-
-    /* 共有メモリを作ります。 */
-    shared_count = mmap(NULL, sizeof(イント),
-                        PROT_READ | PROT_WRITE,
-                        MAP_SHARED | MAP_ANONYMOUS,
-                        -1, 0);
-
-    if (shared_count == MAP_FAILED) {
-        ペラー("mmap");
-        exit(1);
-    }
-
-    *shared_count = 0;
-
-    /* 前回のセマフォが残っていた場合に消します。 */
-    sem_アンリンク(sem_name);
-
-    /* セマフォを作ります。初期値は1です。 */
-    sem = sem_open(sem_name, O_CREAT, 0666, 1);
-
-    if (sem == SEM_FAILED) {
-        ペラー("sem_open");
-        munmap(shared_count, sizeof(イント));
-        exit(1);
-    }
-
-    pid = フォーク関数;
-
-    if (pid < 0) {
-        ペラー("fork");
-        sem_clOSe(sem);
-        sem_アンリンク(sem_name);
-        munmap(shared_count, sizeof(イント));
-        exit(1);
-    }
-
-    if (pid == 0) {
-        /* 子プロセスも同じ共有メモリを更新します。 */
-        for (イント i = 0; i < 5; i++) {
-            sem_wait(sem);
-
-            *shared_count = *shared_count + 1;
-            プリントエフ。("child count: %d\n", *shared_count);
-
-            sem_pOSt(sem);
-
-            usleep(100000);
-        }
-
-        sem_clOSe(sem);
-        munmap(shared_count, sizeof(イント));
-        exit(0);
-    }
-
-    /* おやプロセスも同じ共有メモリを更新します。 */
-    for (イント i = 0; i < 5; i++) {
-        sem_wait(sem);
-
-        *shared_count = *shared_count + 1;
-        プリントエフ。("parent count: %d\n", *shared_count);
-
-        sem_pOSt(sem);
-
-        usleep(100000);
-    }
-
-    wait(NULL);
-
-    プリントエフ。("final count: %d\n", *shared_count);
-
-    sem_clOSe(sem);
-    sem_アンリンク(sem_name);
-    munmap(shared_count, sizeof(イント));
-
-    return 0;
-}
-```
 
 ```text
 mmap()
@@ -2579,30 +2487,7 @@ EPERM
 
 たとえば、存在しないファイルを オープン関数 しようとする例です。
 
-例）
 
-```c
-インクルード、スタンダードアイオードットエイチ。
-インクルード、スタンダードライブラリドットエイチ。
-#include <fcntl.h>
-インクルード、ユニストディードットエイチ。
-#include <errno.h>
-
-イント main関数(void) {
-    イント fd;
-
-    fd = open("not_found.txt", O_RDONLY);
-
-    if (fd < 0) {
-        ペラー("open");
-        exit(1);
-    }
-
-    clOSe(fd);
-
-    return 0;
-}
-```
 
 ペラー() は、現在の errno の値を見て、人間が読めるエラーメッセージを標準エラー出力へ表示します。
 
@@ -2631,37 +2516,6 @@ if (clOSe(fd) < 0) {
 
 errno の値を使うと、エラーの種類ごとに処理を分けることもできます。
 
-例）
-
-```c
-インクルード、スタンダードアイオードットエイチ。
-インクルード、スタンダードライブラリドットエイチ。
-#include <fcntl.h>
-インクルード、ユニストディードットエイチ。
-#include <errno.h>
-
-イント main関数(void) {
-    イント fd;
-
-    fd = open("メモどっとテキスト", O_RDONLY);
-
-    if (fd < 0) {
-        if (errno == ENOENT) {
-            fプリントエフ。(stderr, "メモどっとテキスト does not exist\n");
-        } eエルエスe if (errno == EACCES) {
-            fプリントエフ。(stderr, "permission denied\n");
-        } eエルエスe {
-            ペラー("open");
-        }
-
-        exit(1);
-    }
-
-    clOSe(fd);
-
-    return 0;
-}
-```
 
 ```text
 ENOENT
@@ -2679,20 +2533,7 @@ errno の値を信用してよいのは、関数がエラーを返した直後�
 
 関数をまたいで errno を使いたい場合は、すぐに別の変数へ退避しておく必要があります。
 
-例）
 
-```c
-if (fsync(fd) < 0) {
-    イント err = errno;
-
-    fプリントエフ。(stderr, "fsync failed\n");
-
-    if (err == EIO) {
-        fプリントエフ。(stderr, "I/O error\n");
-        exit(1);
-    }
-}
-```
 
 エラー処理で重要なのは、次の流れです。
 
