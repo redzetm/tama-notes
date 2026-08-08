@@ -3358,7 +3358,7 @@ int main(void) {
 
     pos = lseek(fd, (off_t)1825, SEEK_SET);
 
-    if (pos == (off_t)-1) {
+    if (pos == (off_t)-1) {　　　　　　　　　//off_tとの比較だからキャストして-1のエラーか確認
         perror("lseek");
         close(fd);
         exit(1);
