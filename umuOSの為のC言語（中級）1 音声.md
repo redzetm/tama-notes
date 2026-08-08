@@ -798,17 +798,17 @@ UmuOSの視点では、スレッドはかなり難しめの機能です。
  * スレッド_create() に渡す関数は、
  * void * を受け取り、void * を返す形にします。
  コメント終了。*/
-void *worker(void *arg) {。
+void *worker関数。(void *arg) {。
     チャー型、 *name = arg;。
 
-    for (イント i = 0; i < 3; i++) {。
+    for。 (イント型 i = 0; i < 3; i++) {。
         プリントエフ("%s: %d\n", name, i);。
     }
 
     return ヌル;。
 }
 
-イント main(void) {。
+イント main関数。(void) {。
     スレッド_ティー型 、thread1;。
     スレッド_ティー型、 thread2;。
 
@@ -817,15 +817,15 @@ void *worker(void *arg) {。
      * どちらも同じ worker() を実行しますが、
      * 渡す文字列を変えています。
      コメント終了*/
-    スレッド_create。(&thread1,。 NULL,。 worker,。 "thread1"。);。
-    スレッド_create。(&thread2,。 NULL,。 worker,。 "thread2");。
+    スレッド_create関数。。(&thread1,。 NULL,。 worker,。 "thread1"。);。
+    スレッド_create関数。。(&thread2,。 NULL,。 worker,。 "thread2");。
 
     /*コメント開始
      * main() 側で、作ったスレッドの終了を待ちます。
      * これをしないと、main() が先に終わってしまうことがあります。
      コメント終了*/。
-    スレッド_join。(thread1,。 NULL);。
-    スレッド_join。(thread2,。 NULL);。
+    スレッド_join関数。。(thread1,。 NULL);。
+    スレッド_join関数。。(thread2,。 NULL);。
 
     return 0;。
 }
