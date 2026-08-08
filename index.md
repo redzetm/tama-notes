@@ -41,6 +41,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語４（初級）　ポインタ・文字列とポインタ 編]({{ '/umuOSの為のC言語4.html' | relative_url }})
 - [UmuOSの為のC言語５（初級）　構造体・ファイル処理編]({{ '/umuOSの為のC言語5.html' | relative_url }})
 - [UmuOSの為のC言語１（中級）　1章　概要および主要概念]({{ '/umuOSの為のC言語（中級）1.html' | relative_url }})
+- [聴いて覚えるUmuOSの為のC言語１（中級）　1章　概要および主要概念（ブラウザの音声読み上げで利用）]({{ '/umuOSの為のC言語（中級）1 音声.html' | relative_url }})
 - [UmuOSの為のC言語２（中級）　2章　ファイルI/O]({{ '/umuOSの為のC言語（中級）2.html' | relative_url }})
 - [UmuOSの為のC言語３（中級）　3章　I/Oのバッファリング]({{ '/umuOSの為のC言語（中級）3.html' | relative_url }})
 - [UmuOSの為のC言語４（中級）　4章　高度なファイルI/O]({{ '/umuOSの為のC言語（中級）4.html' | relative_url }})
