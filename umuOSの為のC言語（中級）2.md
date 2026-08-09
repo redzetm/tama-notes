@@ -4820,7 +4820,6 @@ fsync() / fdatasync() / sync()
 #### ２章の１２の１０　pdflushという古い説明の補正
 
 古いLinux資料では、dirtyバッファの書き戻しを担当するものとして `pdflush` というカーネルスレッドが説明されることがあります。
-貼り付け元の本文にも、この説明が出てきます。
 
 ただし、これは古いLinuxカーネルの説明です。
 現在のLinuxでは、`pdflush` は使われておらず、ストレージやbacking deviceごとの writeback worker、flusher thread 系の仕組みに置き換わっています。
