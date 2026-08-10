@@ -183,13 +183,13 @@ write関数から見ると、それは単なるバイト列です。。
 シグナルで処理が割り込まれる。などの理由で、失敗することがあります。。
 そのため、write関数の、もどりち、は、必ず確認します。。
 
-writeのもどりち、には、ssize_tという型がよく使われます。。
-ssize_tは、サイズをひょうせるだけでなく、失敗をひょうすマイナス1も返せる、符号付きの整数型です。。
-成功した場合、writeは、実際に書き込めたバイト数を返します。。
-失敗した場合は、マイナス1を返し、詳しい理由はerrnoに入ります。。
+write関数の、もどりち、には、エスサイズティーという型、がよく使われます。。
+エスサイズティーは、サイズをあらわせる、だけでなく、失敗をあらわす、マイナス1も返せる。符号付きの整数型です。。
+成功した場合、write関数は、実際に書き込めたバイト数を返します。。
+失敗した場合は、マイナス1を返し、詳しい理由はエルノーに、はいります。。
 そのため、もどりち、が0以上なら、少なくともエラーではなく、もどりち、がマイナス1なら、書き込みに失敗したと判断します。。
 
-エラーが起きたときには、perrorを使うと、errnoに対応した人間向けのメッセージをひょう示できます。。
+エラーが起きたときには、perrorを使うと、エルノーに対応した人間向けのメッセージをひょう示できます。。
 たとえば、writeという文字列をperrorに渡しておくと、writeの処理で何が失敗したのかを追いやすくなります。。
 その後、処理を続けられないなら、exitで異常終了させる、という流れになります。。
 
@@ -270,13 +270,13 @@ int オープン(const char *path, int flags, mode_t mode);
 
 失敗
     -1
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 ファイルを読み取り専用でひらく例です。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -323,7 +323,7 @@ O_RDWR
 ファイルを作成し、書き込み用にひらく例です。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -501,7 +501,7 @@ fd = オープン("some_fifo", O_RDONLY | おーノンブロック | おーク�
 パイプにまだデータがない場合でも、`read関数` は待ち続けず、エラーとして戻ります。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -513,7 +513,7 @@ int main(void)
     int パイプfd[2];
     int flags;
     char buf[128];
-    ssize_t n;
+    エスサイズティー n;
 
     if (パイプ(パイプfd) < 0) {                                         //パイプ関数のもどりち、は0成功、-1失敗
         perror("パイプ");                                             //デフォでパイプ関数したときは、パイプfd[0]には　O_RDONLY
@@ -537,7 +537,7 @@ int main(void)
 
     n = read(パイプfd[0], buf, sizeof(buf));
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (エルノー == EAGAIN || エルノー == EWOULDBLOCK) {
             プリントエフ("データがないので、待たずに戻りました\n");
         } else {
             perror("read");
@@ -975,10 +975,10 @@ fd = オープン(ファイル, O_WRONLY | O_CREAT | O_TRUNC | おークロー�
 古い本や古いコードを読むためには知っておく価値があります。
 しかし、UmuOSやウーシュの新しいサンプルを書くなら、基本は `オープン関数` に寄せるのが読みやすいと思います。
 
-#### ２章の２の７　オープン関数 と creat関数 のもどりち、と errno
+#### ２章の２の７　オープン関数 と creat関数 のもどりち、と エルノー
 
 `オープン関数` と `creat関数` は、成功するとファイルディスクリプタを返します。
-失敗すると `-1` を返し、失敗理由を `errno` に設定します。
+失敗すると `-1` を返し、失敗理由を `エルノー` に設定します。
 
 ```text
 成功
@@ -986,7 +986,7 @@ fd = オープン(ファイル, O_WRONLY | O_CREAT | O_TRUNC | おークロー�
 
 失敗
     -1を返す
-    errno に失敗理由が入る
+    エルノー に失敗理由が入る
 ```
 
 ここで注意したいのは、正常なfdとして `0` が返る可能性があることです。
@@ -1014,17 +1014,17 @@ if (!fd) {
 
 なぜなら、`fd` が `0` のとき、本当は成功しているのに失敗扱いしてしまうからです。
 
-`errno` は、直前のシステムコールやライブラリ関数が失敗した理由をひょうすための変数です。
-ただし、成功したときに `errno` が自動的に0へ戻るとは限りません。
-そのため、`errno` は「もどりち、が失敗を示したときだけ読む」と考えるのが基本です。
+`エルノー` は、直前のシステムコールやライブラリ関数が失敗した理由をひょうすための変数です。
+ただし、成功したときに `エルノー` が自動的に0へ戻るとは限りません。
+そのため、`エルノー` は「もどりち、が失敗を示したときだけ読む」と考えるのが基本です。
 
 ```text
 正しい考え方
     もどりち、を見る
-    失敗だった場合だけ errno を見る
+    失敗だった場合だけ エルノー を見る
 
 避けたい考え方
-    errno だけを見て成功・失敗を判断する
+    エルノー だけを見て成功・失敗を判断する
 ```
 
 オープン関数 の失敗理由としては、たとえば次のようなものがあります。
@@ -1078,7 +1078,7 @@ int main(void) {
 
 UmuOSの設計でも、システムコールは単に「成功・失敗」を返すだけでは足りません。
 失敗したときに、ユーザープログラムが原因を区別できる必要があります。
-Linuxの `errno` は、そのための代ひょう的な設計です。
+Linuxの `エルノー` は、そのための代ひょう的な設計です。
 
 ### ２章の３　ファイル読み取り: read関数
 
@@ -1088,7 +1088,7 @@ Linuxで低レベルにファイルを読み取る基本のシステムコール
 ```c
 #include ユニストディードットエイチ。
 
-ssize_t read(int fd, void *buf, size_t count);
+エスサイズティー read(int fd, void *buf, size_t count);
 ```
 
 意味は次の通りです。
@@ -1135,7 +1135,7 @@ read(fd, buf, 100)
 int main(void) {
     char buf[128];
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
@@ -1192,7 +1192,7 @@ int main(void) {
 
 もどりち、 == -1
     エラー
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 ここで特に大事なのは、`read関数` が `count` より小さい正の値を返しても異常とは限らないことです。
@@ -1216,7 +1216,7 @@ int main(void) {
 
 ```c
 char buf[100];
-ssize_t n;
+エスサイズティー n;
 
 n = read(fd, buf, sizeof(buf));
 
@@ -1266,7 +1266,7 @@ EOFは終わりです。
 #### ２章の３の４　EINTR
 
 `read関数` は、シグナルによって中断されることがあります。
-1バイトも読み取っていない状態でシグナルに割り込まれた場合、`read関数` は `-1` を返し、`errno` に `EINTR` を設定することがあります。
+1バイトも読み取っていない状態でシグナルに割り込まれた場合、`read関数` は `-1` を返し、`エルノー` に `EINTR` を設定することがあります。
 
 ```text
 EINTR
@@ -1277,12 +1277,12 @@ EINTR
 この場合、多くの読み取り処理では、もう一度 `read関数` をやり直せます。
 
 ```c
-ssize_t n;
+エスサイズティー n;
 
 for (;;) {
     n = read(fd, buf, sizeof(buf));
 
-    if (n < 0 && errno == EINTR) {
+    if (n < 0 && エルノー == EINTR) {
         continue;
     }
 
@@ -1305,14 +1305,14 @@ for (;;) {
 次の関数は、EOFまたはエラーになるまで、指定されたバイト数をできるだけ読み取ります。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <stddef.h>
 #include ユニストディードットエイチ。
 
-ssize_t read_full(int fd, void *buf, size_t len) {
+エスサイズティー read_full(int fd, void *buf, size_t len) {
     char *p;
     size_t left;
-    ssize_t n;
+    エスサイズティー n;
 
     p = buf;
     left = len;
@@ -1321,7 +1321,7 @@ ssize_t read_full(int fd, void *buf, size_t len) {
         n = read(fd, p, left);
 
         if (n < 0) {
-            if (errno == EINTR) {
+            if (エルノー == EINTR) {
                 continue;
             }
 
@@ -1336,7 +1336,7 @@ ssize_t read_full(int fd, void *buf, size_t len) {
         left -= n;
     }
 
-    return (ssize_t)(len - left);
+    return (エスサイズティー)(len - left);
 }
 ```
 
@@ -1376,7 +1376,7 @@ Cでは `void *` のままではバイト単位のポインタ演算をしにく
 int main(void) {
     char header[16];
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
@@ -1416,7 +1416,7 @@ EOFで16バイト未満しか読めなかった場合は、短い読み取りと
 次は、`memo.txt` の内容を標準出力へ流す簡単な `cat` 風の例です。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1425,7 +1425,7 @@ EOFで16バイト未満しか読めなかった場合は、短い読み取りと
 int main(void) {
     char buf[4096];
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
@@ -1438,7 +1438,7 @@ int main(void) {
         n = read(fd, buf, sizeof(buf));
 
         if (n < 0) {
-            if (errno == EINTR) {
+            if (エルノー == EINTR) {
                 continue;
             }
 
@@ -1487,7 +1487,7 @@ int main(void) {
     データがなければ待たずに戻る
 ```
 
-このとき `read関数` は `-1` を返し、`errno` に `EAGAIN` または `EWOULDBLOCK` を設定することがあります。
+このとき `read関数` は `-1` を返し、`エルノー` に `EAGAIN` または `EWOULDBLOCK` を設定することがあります。
 Linuxでは、この2つは同じ値であることが多いですが、移植性を考えるなら両方を確認するのが無難です。
 
 ```text
@@ -1500,7 +1500,7 @@ EAGAIN / EWOULDBLOCK
 簡単な例です。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1509,7 +1509,7 @@ EAGAIN / EWOULDBLOCK
 int main(void) {
     char buf[1024];
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_RDONLY | おーノンブロック | おークローズエグゼック);
 
@@ -1521,9 +1521,9 @@ int main(void) {
     n = read(fd, buf, sizeof(buf));
 
     if (n < 0) {
-        if (errno == EINTR) {
+        if (エルノー == EINTR) {
             エフプリントエフ(STDエラー, "read was interrupted; try again\n");
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        } else if (エルノー == EAGAIN || エルノー == EWOULDBLOCK) {
             エフプリントエフ(STDエラー, "no data available now; try again later\n");
         } else {
             perror("read");
@@ -1552,9 +1552,9 @@ int main(void) {
 ウーシュのようなシェルを最初に作る段階では、普通のブロッキングあいおーで十分な場面が多いです。
 ただし、将来的にジョブ制御、疑似端末、イベントループを扱うなら、`EAGAIN` とノンブロッキングあいおーの理解は重要になります。
 
-#### ２章の３の８　read関数 でよく見る errno
+#### ２章の３の８　read関数 でよく見る エルノー
 
-`read関数` が `-1` を返した場合は、`errno` に失敗理由が入ります。
+`read関数` が `-1` を返した場合は、`エルノー` に失敗理由が入ります。
 代ひょう的なものを整理します。
 
 ```text
@@ -1587,8 +1587,8 @@ OSらしい振る舞いに近づきます。
 `read関数` の第3引数 `count` は `size_t` です。
 `size_t` は、サイズをひょうす符号なし整数型です。
 
-一方で、`read関数` のもどりち、は `ssize_t` です。
-`ssize_t` は、`size_t` の符号付き版のような型です。
+一方で、`read関数` のもどりち、は `エスサイズティー` です。
+`エスサイズティー` は、`size_t` の符号付き版のような型です。
 なぜ符号付きなのかというと、エラー時に `-1` を返す必要があるからです。
 
 ```text
@@ -1596,7 +1596,7 @@ size_t
     サイズをひょうす型
     符号なし
 
-ssize_t
+エスサイズティー
     read関数 や write関数 のもどりち、でよく使う型
     符号付き
     -1 でエラーをひょうせる
@@ -1650,7 +1650,7 @@ read関数 は最大countバイト読む
 
 もどりち、が-1
     エラー
-    errnoを見る
+    エルノーを見る
 
 EINTR
     シグナルで中断された
@@ -1680,11 +1680,11 @@ UmuOSの視点では、`read関数` は単に「ファイルから読む関数�
 ```c
 #include ユニストディードットエイチ。
 
-ssize_t write(int fd, const void *buf, size_t count);
+エスサイズティー write(int fd, const void *buf, size_t count);
 ```
 
-ここで出てくる `ssize_t write(...)` は、実行コードではなく、関数の形を示すプロトタイプ宣言です。
-つまり、`write関数` は `ssize_t` 型の値を返す関数、という意味です。
+ここで出てくる `エスサイズティー write(...)` は、実行コードではなく、関数の形を示すプロトタイプ宣言です。
+つまり、`write関数` は `エスサイズティー` 型の値を返す関数、という意味です。
 
 意味は次の通りです。
 
@@ -1731,7 +1731,7 @@ write(fd, buf, 100)
 
 int main(void) {
     const char *message = "My ship is solid!\n";
-    ssize_t n;
+    エスサイズティー n;
 
     n = write(STDアウトファイルナンバー, message, strlen(message));
 
@@ -1753,7 +1753,7 @@ int main(void) {
 
 #### ２章の４の２　write関数 のもどりち、
 
-`write関数` のもどりち、は、`read関数` と同じく `ssize_t` です。
+`write関数` のもどりち、は、`read関数` と同じく `エスサイズティー` です。
 成功時には実際に書き込んだバイト数を返し、失敗時には `-1` を返します。
 
 ```text
@@ -1770,7 +1770,7 @@ int main(void) {
 
 もどりち、 == -1
     エラー
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 `read関数` ではもどりち、 `0` が EOF を意味しました。
@@ -1806,7 +1806,7 @@ write関数 の 0
 ```c
 unsigned long word = 1720;
 size_t count;
-ssize_t n;
+エスサイズティー n;
 
 count = sizeof(word);
 n = write(fd, &word, count);
@@ -1828,14 +1828,14 @@ if (n < 0) {
 これは `read_full関数` の書き込み版のようなものです。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <stddef.h>
 #include ユニストディードットエイチ。
 
-ssize_t write_full(int fd, const void *buf, size_t len) {
+エスサイズティー write_full(int fd, const void *buf, size_t len) {
     const char *p;
     size_t left;
-    ssize_t n;
+    エスサイズティー n;
 
     p = buf;
     left = len;
@@ -1844,7 +1844,7 @@ ssize_t write_full(int fd, const void *buf, size_t len) {
         n = write(fd, p, left);
 
         if (n < 0) {
-            if (errno == EINTR) {
+            if (エルノー == EINTR) {
                 continue;
             }
 
@@ -1859,7 +1859,7 @@ ssize_t write_full(int fd, const void *buf, size_t len) {
         left -= n;
     }
 
-    return (ssize_t)(len - left);
+    return (エスサイズティー)(len - left);
 }
 ```
 
@@ -1900,7 +1900,7 @@ left
 int main(void) {
     const char *message = "hello from write_full\n";
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
@@ -1989,7 +1989,7 @@ UmuOSでログ機能を作る場合も、`おーアペンド` 相当の考え方
 
 書き込み側でよくあるのは、パイプやソケットの送信バッファがいっぱいになっている場合です。
 ブロッキングあいおーなら空きができるまで待ちます。
-ノンブロッキングあいおーなら、`write関数` は `-1` を返し、`errno` に `EAGAIN` または `EWOULDBLOCK` を設定することがあります。
+ノンブロッキングあいおーなら、`write関数` は `-1` を返し、`エルノー` に `EAGAIN` または `EWOULDBLOCK` を設定することがあります。
 
 ```text
 EAGAIN / EWOULDBLOCK
@@ -2004,9 +2004,9 @@ EAGAIN / EWOULDBLOCK
 実用的には、`poll関数`、`select関数`、`epoll関数` などで「書き込める状態になったか」を待つ設計と組み合わせます。
 データを書けないのに何度も `write関数` を呼び続けると、CPUを無駄に使ってしまうからです。
 
-#### ２章の４の７　write関数 でよく見る errno
+#### ２章の４の７　write関数 でよく見る エルノー
 
-`write関数` が `-1` を返した場合は、`errno` に失敗理由が入ります。
+`write関数` が `-1` を返した場合は、`エルノー` に失敗理由が入ります。
 代ひょう的なものを整理します。
 
 ```text
@@ -2044,7 +2044,7 @@ Eパイプ
 このとき、プロセスには通常 `SIGパイプ` シグナルも送られます。
 
 `SIGパイプ` のデフォルト動作はプロセス終了です。
-そのため、プログラムが `SIGパイプ` を無視または処理している場合にだけ、`write関数` のもどりち、として `-1` と `errno == Eパイプ` を
+そのため、プログラムが `SIGパイプ` を無視または処理している場合にだけ、`write関数` のもどりち、として `-1` と `エルノー == Eパイプ` を
 観測できることがあります。
 
 これは、シェルのパイプでよく見える現象です。
@@ -2063,7 +2063,7 @@ yes はまだ書こうとする
 #### ２章の４の８　write関数 のサイズ上限
 
 `write関数` の第3引数 `count` は `size_t` です。
-一方で、もどりち、は `ssize_t` です。
+一方で、もどりち、は `エスサイズティー` です。
 
 `read関数` と同じく、`count` にあまりにも大きな値を渡すのは避けるべきです。
 POSIXでは、`count` が `SSIZE_MAX` より大きい場合の動作は実装依存です。
@@ -2161,7 +2161,7 @@ write関数 は最大countバイト書く
 
 もどりち、が-1
     エラー
-    errnoを見る
+    エルノーを見る
 
 部分書き込み
     パイプ、ソケット、端末、ノンブロッキングあいおーで特に重要
@@ -2267,7 +2267,7 @@ int fsync(int fd);
 ```
 
 ここで出てくる `int fsync(int fd);` も、実行コードではなくプロトタイプ宣言です。
-`fsync関数` は成功すると `0`、失敗すると `-1` を返し、`errno` に理由を設定します。
+`fsync関数` は成功すると `0`、失敗すると `-1` を返し、`エルノー` に理由を設定します。
 
 ```text
 成功
@@ -2275,7 +2275,7 @@ int fsync(int fd);
 
 失敗
     -1
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 `fsync(fd)` を呼ぶと、そのfdで参照しているファイルについて、書き込まれたデータと、ファイルサイズや更新時刻などのメタデータをストレージへ反映しようとします。
@@ -2466,10 +2466,10 @@ fdatasync関数
 ファイルシステムによっては、`fdatasync関数` と `fsync関数` をほとんど同じように実装していることもあります。
 最初は、`fsync関数` は広めに同期、`fdatasync関数` はデータ中心に同期、と押さえれば十分です。
 
-#### ２章の５の４　fsync関数 と fdatasync関数 のもどりち、と errno
+#### ２章の５の４　fsync関数 と fdatasync関数 のもどりち、と エルノー
 
 `fsync関数` と `fdatasync関数` は、どちらも成功すると `0` を返します。
-エラーが発生した場合は `-1` を返し、`errno` に理由を設定します。
+エラーが発生した場合は `-1` を返し、`エルノー` に理由を設定します。
 
 ```text
 成功
@@ -2477,10 +2477,10 @@ fdatasync関数
 
 失敗
     -1
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
-代ひょう的な `errno` は次の通りです。
+代ひょう的な `エルノー` は次の通りです。
 
 ```text
 EBADF
@@ -2516,12 +2516,12 @@ if (ret < 0) {
 古い資料には、`fsync関数` が `EINVAL` で失敗した場合だけ `fdatasync関数` も試す、というかなり慎重なコードが載っていることがあります。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <stdio.h>
 #include ユニストディードットエイチ。
 
 if (fsync(fd) < 0) {
-    if (errno == EINVAL) {
+    if (エルノー == EINVAL) {
         if (fdatasync(fd) < 0) {
             perror("fdatasync");
         }
@@ -2546,7 +2546,7 @@ if (fsync(fd) < 0) {
     EINVAL などのエラー処理も考える
 ```
 
-UmuOSの視点では、この `errno` 設計も重要です。
+UmuOSの視点では、この `エルノー` 設計も重要です。
 同期に対応していない対象へ `fsync関数` した場合、単に失敗とするだけでなく、なぜ失敗したかをユーザープログラムへ返せると、
 OSとして扱いやすくなります。
 
@@ -2814,7 +2814,7 @@ fdatasync関数
 
 fsync関数 / fdatasync関数 のもどりち、
     成功なら0、失敗なら-1
-    errnoで原因を見る
+    エルノーで原因を見る
 
 ディレクトリエントリ
     ファイル名とアイノード番号の対応
@@ -2946,7 +2946,7 @@ O_DIRECTで制約を受けやすいもの
     実用上は4KB境界を意識することが多い
 ```
 
-アラインメントを満たさない場合、`read関数` や `write関数` が `-1` を返し、`errno` が `EINVAL` になることがあります。
+アラインメントを満たさない場合、`read関数` や `write関数` が `-1` を返し、`エルノー` が `EINVAL` になることがあります。
 
 #### ２章の６の３　posix_memalign関数 を使う例
 
@@ -2958,7 +2958,7 @@ O_DIRECTで制約を受けやすいもの
 ```c
 #define _GNU_SOURCE
 
-#include <errno.h>
+#include <エルノー.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3083,7 +3083,7 @@ int close(int fd);
 ```
 
 ここで出てくる `int close(int fd);` も、実行コードではなくプロトタイプ宣言です。
-`close関数` は成功すると `0`、失敗すると `-1` を返し、`errno` に理由を設定します。
+`close関数` は成功すると `0`、失敗すると `-1` を返し、`エルノー` に理由を設定します。
 
 ```text
 成功
@@ -3091,7 +3091,7 @@ int close(int fd);
 
 失敗
     -1
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 簡単な使い方は次の通りです。
@@ -3212,9 +3212,9 @@ close関数
 ただし、`close関数` のもどりち、も無視してよいわけではありません。
 遅延書き込みに関係するエラーが、`close関数` のタイミングで見えることがあるからです。
 
-#### ２章の７の５　close関数 の errno
+#### ２章の７の５　close関数 の エルノー
 
-`close関数` が `-1` を返した場合、`errno` に理由が入ります。
+`close関数` が `-1` を返した場合、`エルノー` に理由が入ります。
 代ひょう的なものは次の通りです。
 
 ```text
@@ -3276,7 +3276,7 @@ unlink済みファイル
 保存完了
     close関数 は fsync関数 の代わりではない
 
-errno
+エルノー
     EBADF、EIO、EINTR などに注意する
 ```
 
@@ -3306,7 +3306,7 @@ off_t lseek(int fd, off_t offset, int whence);
 
 ここで出てくる `off_t lseek(...)` も、実行コードではなくプロトタイプ宣言です。
 `lseek関数` は移動後のファイルポジションを返します。
-失敗すると `(off_t)-1` を返し、`errno` に理由を設定します。
+失敗すると `(off_t)-1` を返し、`エルノー` に理由を設定します。
 
 ```text
 成功
@@ -3314,7 +3314,7 @@ off_t lseek(int fd, off_t offset, int whence);
 
 失敗
     (off_t)-1
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 #### ２章の８の１　SEEK_SET、SEEK_CUR、SEEK_END
@@ -3521,7 +3521,7 @@ UmuOSでファイルシステムを作る場合、sparse ファイルをサポ�
     端末など一部のキャラクタデバイス
 ```
 
-シークできないfdに `lseek関数` すると、`-1` が返り、`errno` が `ESパイプ（イーエスパイプ）` になることがあります。
+シークできないfdに `lseek関数` すると、`-1` が返り、`エルノー` が `ESパイプ（イーエスパイプ）` になることがあります。
 ESパイプは、パイプに対してシークしたときのエラーです。
 
 ```text
@@ -3534,9 +3534,9 @@ ESパイプ
 `cmd < ファイル.txt` の入力元は通常ファイルなのでシークできる可能性があります。
 一方、`cmd1 | cmd2` の `cmd2` の標準入力はパイプなので、基本的にシークできません。
 
-#### ２章の８の５　lseek関数 の errno
+#### ２章の８の５　lseek関数 の エルノー
 
-`lseek関数` が失敗すると `(off_t)-1` を返し、`errno` に理由を設定します。
+`lseek関数` が失敗すると `(off_t)-1` を返し、`エルノー` に理由を設定します。
 代ひょう的なものは次の通りです。
 
 ```text
@@ -3644,10 +3644,10 @@ pread関数 / pwrite関数
 #define _Xオープン_SOURCE 500
 #include ユニストディードットエイチ。
 
-ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+エスサイズティー pread(int fd, void *buf, size_t count, off_t offset);
 ```
 
-ここで出てくる `ssize_t pread(...)` も、実行コードではなくプロトタイプ宣言です。
+ここで出てくる `エスサイズティー pread(...)` も、実行コードではなくプロトタイプ宣言です。
 `pread関数` は、`fd` が指すファイルの `offset` 位置から、最大 `count` バイトを `buf` へ読み取ります。
 
 ```text
@@ -3675,7 +3675,7 @@ offset
 
 -1
     エラー
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
 #### ２章の９の２　pwrite関数
@@ -3688,7 +3688,7 @@ offset
 #define _Xオープン_SOURCE 500
 #include ユニストディードットエイチ。
 
-ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+エスサイズティー pwrite(int fd, const void *buf, size_t count, off_t offset);
 ```
 
 `pwrite関数` は、`fd` が指すファイルの `offset` 位置へ、`buf` から最大 `count` バイトを書き込みます。
@@ -3756,7 +3756,7 @@ pread関数
 int main(void) {
     char buf[16];
     int fd;
-    ssize_t n;
+    エスサイズティー n;
 
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
@@ -3807,8 +3807,8 @@ int main(void) {
     同じfdで混ぜるなら、設計意図を明確にする
 ```
 
-`pread関数` の `errno` は、だいたい `read関数` と `lseek関数` の失敗理由を合わせたものと考えられます。
-`pwrite関数` の `errno` は、`write関数` と `lseek関数` の失敗理由を合わせたものと考えられます。
+`pread関数` の `エルノー` は、だいたい `read関数` と `lseek関数` の失敗理由を合わせたものと考えられます。
+`pwrite関数` の `エルノー` は、`write関数` と `lseek関数` の失敗理由を合わせたものと考えられます。
 
 ```text
 pread関数
@@ -3839,7 +3839,7 @@ int ftruncate(int fd, off_t length);
 ```
 
 ここで出てくる宣言もプロトタイプ宣言です。
-どちらも成功すると `0`、失敗すると `-1` を返し、`errno` に理由を設定します。
+どちらも成功すると `0`、失敗すると `-1` を返し、`エルノー` に理由を設定します。
 
 ```text
 truncate(path, length)
@@ -4078,7 +4078,7 @@ nfds
 fdは1つだけなので本当の意味での多重化ではありませんが、`select関数` の使い方を確認するには十分です。
 
 ```c
-#include <errno.h>
+#include <エルノー.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/select.h>
@@ -4092,7 +4092,7 @@ int main(void) {
     fd_set readfds;
     struct timeval timeout;
     int ret;
-    ssize_t n;
+    エスサイズティー n;
 
     FD_ZERO(&readfds);
     FD_SET(STDイン_ファイルNO, &readfds);
@@ -4103,7 +4103,7 @@ int main(void) {
     ret = select(STDイン_ファイルNO + 1, &readfds, NULL, NULL, &timeout);
 
     if (ret < 0) {
-        if (errno == EINTR) {
+        if (エルノー == EINTR) {
             エフプリントエフ(STDエラー, "select was interrupted\n");
             return 1;
         }
@@ -4175,7 +4175,7 @@ select関数 の弱点
     fd_set を毎回作り直す必要がある
 ```
 
-#### ２章の１１の４　select関数 のもどりち、と errno
+#### ２章の１１の４　select関数 のもどりち、と エルノー
 
 `select関数` のもどりち、は次の通りです。
 
@@ -4188,10 +4188,10 @@ select関数 の弱点
 
 -1
     エラー
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
-代ひょう的な `errno` は次の通りです。
+代ひょう的な `エルノー` は次の通りです。
 
 ```text
 EBADF
@@ -4375,7 +4375,7 @@ int main(void) {
 多くの環境では、標準出力はすぐ書き込み可能なので、`STDアウト is writable` がひょう示されやすいです。
 標準入力をファイルからリダイレクトした場合は、標準入力も読み取り可能として返ることがあります。
 
-#### ２章の１１の８　poll関数 のもどりち、と errno
+#### ２章の１１の８　poll関数 のもどりち、と エルノー
 
 `poll関数` のもどりち、は次の通りです。
 
@@ -4388,10 +4388,10 @@ int main(void) {
 
 -1
     エラー
-    errno に理由が入る
+    エルノー に理由が入る
 ```
 
-代ひょう的な `errno` は次の通りです。
+代ひょう的な `エルノー` は次の通りです。
 
 ```text
 EFAULT
@@ -4407,7 +4407,7 @@ ENOMEM
     内部処理に必要なメモリが不足した
 ```
 
-古い資料では `EBADF` が `poll関数` 自体の `errno` として説明されることがあります。
+古い資料では `EBADF` が `poll関数` 自体の `エルノー` として説明されることがあります。
 現在のLinuxでは、無効なfdは通常、`poll関数` の `-1` ではなく、その要素の `revents` に `POLLNVAL` として返ります。
 ここは `select関数` との違いとして重要です。
 
