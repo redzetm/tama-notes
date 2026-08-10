@@ -68,28 +68,28 @@ fd、 4、  -> パイプの読み取り口。
 fd、そのものは、単なる整数です。
 しかし、その先にはカーネルが管理する「ひらいているファイル」の情報があります。
 
-そこには、たとえば次のような情報が関係します。
+そこには、たとえば、次のような情報が関係します。
 
 ```text
-ファイルの実体
-    アイノードやデバイスなど、対象そのものに関係する情報
+ファイルの実体。
+    アイノードやデバイスなど、対象そのものに関係する情報。
 
-ファイルポジション
-    次にread関数やwrite関数する位置
+ファイルポジション。
+    次にread関数やwrite関数する位置。
 
-アクセスモード
-    読み取り専用、書き込み専用、読み書き両用など
+アクセスモード。
+    読み取り専用、書き込み専用、読み書き両用など。
 
-フラグ
-    O_APPEND、O_NONBLOCK、O_CLOEXEC など
+フラグ。
+    おーアペンド、おーノンブロック、おークローズエグゼック、 など。
 ```
 
 ファイルポジションは、読み書きのたびに進む「ファイル内の現在位置」です。
-通常ファイルを read関数 すると、読んだバイト数ぶんだけ位置が進みます。
-write関数 した場合も、書いたバイト数ぶんだけ位置が進みます。
+通常ファイルを read関数をつかい読み込むと、読んだバイト数ぶんだけ位置が進みます。
+write関数、で、書き込み した場合も、書いたバイト数ぶんだけ位置が進みます。
 
-UmuOSでファイルあいおーを考える場合も、単に「ファイルをひらく」だけでは足りません。
-少なくとも、プロセスごとのfdひょう、fd番号、ファイルポジション、アクセスモード、対象ファイルへの参照を管理する必要があります。
+UmuOSで、ファイルあいおーを考える場合も、単に「ファイルをひらく」だけでは足りません。
+少なくとも、プロセスごとのfdひょう、fd番号、ファイルポジション、アクセスモード、対象ファイルへの参照、を管理する必要があります。
 
 #### ２章の１の２　親子プロセスとfd
 
@@ -328,7 +328,7 @@ O_RDWR
 int main(void) {
     int fd;
 
-    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -350,7 +350,7 @@ int main(void) {
 }
 ```
 
-ここでは `O_CLOEXEC` も付けています。
+ここでは `おークローズエグゼック` も付けています。
 これは現代的にはかなり重要なフラグです。
 exec関数 で別プログラムを起動するとき、不要なfdが子プロセスへ漏れないようにするためです。
 
@@ -362,7 +362,7 @@ exec関数 で別プログラムを起動するとき、不要なfdが子プロ�
 オープン関数 では、基本のアクセスモードに加えて、ビットORで追加フラグを指定できます。
 
 ```text
-O_APPEND
+おーアペンド
     常にファイル末尾へ追記する
 
 O_CREAT
@@ -374,7 +374,7 @@ O_EXCL
 O_TRUNC
     既存ファイルを開いたときにサイズを0へ切り詰める
 
-O_CLOEXEC
+おークローズエグゼック
     exec関数 時にfdを自動的に閉じる
 
 O_DIRECTORY
@@ -383,7 +383,7 @@ O_DIRECTORY
 O_NOFOLLOW
     最後の要素がシンボリックリンクなら失敗させる
 
-O_NONBLOCK
+おーノンブロック
     可能ならノンブロッキングモードでひらく
 
 O_SYNC
@@ -409,24 +409,24 @@ O_DIRECT
 このとき、第3引数にパーミッションを指定します。
 
 ```c
-fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+fd = オープン("memo.txt", O_WRONLY | O_CREAT | おークローズエグゼック, 0644);
 ```
 
 ただし、ファイルがすでに存在する場合に上書きしたくないときは、`O_EXCL` も一緒に使います。
 
 ```c
-fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_EXCL | おークローズエグゼック, 0644);
 ```
 
 この指定では、`memo.txt` がすでに存在すると オープン関数 は失敗します。
 一時ファイルやロックファイルを作るときなど、競合を避けたい場面で重要になります。
 
-##### ２章の２の３の２　O_APPEND
+##### ２章の２の３の２　おーアペンド
 
-`O_APPEND` は、書き込みのたびにファイル末尾へ追記するためのフラグです。
+`おーアペンド` は、書き込みのたびにファイル末尾へ追記するためのフラグです。
 
 ログファイルのように、複数のプロセスから追記したい場合に便利です。
-単に lseek関数 で末尾へ移動してから write関数 するよりも、`O_APPEND` を使う方が安全です。
+単に lseek関数 で末尾へ移動してから write関数 するよりも、`おーアペンド` を使う方が安全です。
 なぜなら、末尾へ移動する処理と書き込み処理を、カーネルが一連の操作として扱えるからです。
 
 ```c
@@ -438,7 +438,7 @@ fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
 int main(void) {
     int fd;
 
-    fd = オープン("app.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    fd = オープン("app.log", O_WRONLY | O_CREAT | おーアペンド | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -468,28 +468,28 @@ UmuOSでログ機能を考える場合も、追記モードはかなり大事で
 存在しない場合は、`O_CREAT` があるので新しく作ります。
 
 ```c
-fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 ```
 
 注意点として、`O_TRUNC` は破壊的です。
 既存の内容が消えます。
 設定ファイルや重要なデータを扱う場合は、安易に使わない方がよいです。
 
-##### ２章の２の３の４　O_NONBLOCK
+##### ２章の２の３の４　おーノンブロック
 
-`O_NONBLOCK` は、可能ならあいおーで待たないようにするフラグです。
+`おーノンブロック` は、可能ならあいおーで待たないようにするフラグです。
 
 通常ファイルではあまり意識しません。
 一方で、FIFO、ソケット、端末などでは重要になります。
 データが来るまで read関数 が待ち続ける、接続できるまで待つ、といった動作を避けたい場合に使います。
 
-ウーシュのようなシェルの基本実装では、最初から `O_NONBLOCK` を多用する必要はありません。
+ウーシュのようなシェルの基本実装では、最初から `おーノンブロック` を多用する必要はありません。
 ただし、将来的にジョブ制御、イベントループ、非同期あいおーを扱う場合には重要になります。
 
-`O_NONBLOCK` は、`オープン関数` の時点で指定することもできます。
+`おーノンブロック` は、`オープン関数` の時点で指定することもできます。
 
 ```c
-fd = オープン("some_fifo", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+fd = オープン("some_fifo", O_RDONLY | おーノンブロック | おークローズエグゼック);
 ```
 
 また、すでにひらいているファイルディスクリプタに対して、あとから `fcntl関数` で設定することもできます。
@@ -524,7 +524,7 @@ int main(void)
         exit(1);
     }
 
-    if (fcntl(パイプfd[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (fcntl(パイプfd[0], F_SETFL, flags | おーノンブロック) < 0) {
         perror("fcntl F_SETFL");
         close(パイプfd[0]);
         close(パイプfd[1]);
@@ -554,7 +554,7 @@ int main(void)
 この例では、書き込み側 `パイプfd[1]` を開いたままにしている点が重要です。
 もし書き込み側を先に閉じると、読み取り側の `read関数` は「データ待ち」ではなくEOFとして `0` を返します。
 
-`O_NONBLOCK` のときに「今は読み書きできない」ことをひょうす代ひょう的なエラーが `EAGAIN` です。
+`おーノンブロック` のときに「今は読み書きできない」ことをひょうす代ひょう的なエラーが `EAGAIN` です。
 環境によっては `EWOULDBLOCK` という名前も使われます。
 Linuxでは多くの場合この2つは同じ値ですが、移植性を考えるなら両方を見る書き方がよく使われます。
 
@@ -702,7 +702,7 @@ O_CREAT あり
 そのため、`O_CREAT` を使うときは必ず第3引数を書く、と覚えておくのが安全です。
 
 ```c
-fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 ```
 
 `0644` は8進数です。
@@ -804,7 +804,7 @@ int main(void) {
 
     mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
-    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, mode);
 
     if (fd < 0) {
         perror("オープン");
@@ -889,7 +889,7 @@ mode のパーミッション
 たとえば、次のような指定も形としては可能です。
 
 ```c
-fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0444);
+fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0444);
 ```
 
 これは少し変に見えます。
@@ -959,12 +959,12 @@ int creat(const char *path, mode_t mode) {
 ただし、現代のコードでは、基本的には `オープン関数` を使う方が分かりやすいです。
 なぜなら、`オープン関数` の方が指定しているフラグが明示されるからです。
 
-特に今のLinuxプログラムでは、`O_CLOEXEC` を付けたい場面が多くあります。
-`creat関数` では `O_CLOEXEC` を同時に指定できません。
+特に今のLinuxプログラムでは、`おークローズエグゼック` を付けたい場面が多くあります。
+`creat関数` では `おークローズエグゼック` を同時に指定できません。
 そのため、fd漏れを避けたい現代的なコードでは、次のように `オープン関数` を使う方が実用的です。
 
 ```c
-fd = オープン(ファイル, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+fd = オープン(ファイル, O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 ```
 
 `creat関数` は歴史的な互換性のために残っているAPI、と考えるとよいです。
@@ -992,7 +992,7 @@ fd = オープン(ファイル, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 ```c
 int fd;
 
-fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
 if (fd < 0) {
     perror("オープン");
@@ -1056,7 +1056,7 @@ ENファイル
 int main(void) {
     int fd;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン memo.txt");
@@ -1133,7 +1133,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -1374,7 +1374,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -1423,7 +1423,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -1472,7 +1472,7 @@ int main(void) {
 
 #### ２章の３の７　ノンブロッキングあいおーと EAGAIN
 
-`O_NONBLOCK` を付けてfdをひらくと、対象によってはノンブロッキングあいおーになります。
+`おーノンブロック` を付けてfdをひらくと、対象によってはノンブロッキングあいおーになります。
 ノンブロッキングあいおーでは、データがまだないときに `read関数` が待たずに戻ります。
 
 ```text
@@ -1507,7 +1507,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おーノンブロック | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -1538,7 +1538,7 @@ int main(void) {
 }
 ```
 
-通常ファイルでは、`O_NONBLOCK` を付けても大きな意味がないことが多いです。
+通常ファイルでは、`おーノンブロック` を付けても大きな意味がないことが多いです。
 ノンブロッキングあいおーが重要になるのは、主に端末、パイプ、FIFO、ソケットなどです。
 
 また、ノンブロッキングにしたからプログラムが必ず速くなるわけではありません。
@@ -1898,7 +1898,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -1933,10 +1933,10 @@ int main(void) {
 
 #### ２章の４の５　アペンドモード
 
-`O_APPEND` フラグを付けてファイルをひらくと、書き込みは現在のファイルポジションではなく、常にファイル末尾に対して行われます。
+`おーアペンド` フラグを付けてファイルをひらくと、書き込みは現在のファイルポジションではなく、常にファイル末尾に対して行われます。
 
 ```c
-fd = オープン("app.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+fd = オープン("app.log", O_WRONLY | O_CREAT | おーアペンド | おークローズエグゼック, 0644);
 ```
 
 アペンドモードが重要になる代ひょう例はログファイルです。
@@ -1960,27 +1960,27 @@ fd = オープン("app.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 この場合、プロセスAが見ていた「末尾」は、プロセスBの書き込み後には本当の末尾ではなくなっています。
 これが競合状態です。
 
-`O_APPEND` を使うと、カーネルが各 `write関数` の直前にファイル末尾へ移動してから書き込みます。
+`おーアペンド` を使うと、カーネルが各 `write関数` の直前にファイル末尾へ移動してから書き込みます。
 この「末尾へ移動して書く」という処理が、他の書き込みに割り込まれない形で扱われるため、ログの追記に向いています。
 
 ```text
-O_APPENDなし
+おーアペンドなし
     lseek関数 と write関数 の間に別プロセスが割り込む可能性がある
 
-O_APPENDあり
+おーアペンドあり
     write関数 のたびにカーネルが末尾へ追記する
 ```
 
-ただし、`O_APPEND` を使えば複数プロセスのログが必ずきれいな行単位で混ざらない、という意味ではありません。
+ただし、`おーアペンド` を使えば複数プロセスのログが必ずきれいな行単位で混ざらない、という意味ではありません。
 1回の `write関数` の単位、ファイルシステム、ログのサイズ、実装条件によって考えるべきことがあります。
 ログを書くなら、1行をできるだけ1回の `write関数` で出す、という設計が分かりやすいです。
 
-UmuOSでログ機能を作る場合も、`O_APPEND` 相当の考え方は重要です。
+UmuOSでログ機能を作る場合も、`おーアペンド` 相当の考え方は重要です。
 単に「ファイル末尾へカーソルを移動してから書く」だけだと、複数プロセス対応のときに競合が出ます。
 
 #### ２章の４の６　ノンブロッキング書き込み
 
-`O_NONBLOCK` を付けてfdをひらくと、対象によってはノンブロッキング書き込みになります。
+`おーノンブロック` を付けてfdをひらくと、対象によってはノンブロッキング書き込みになります。
 ノンブロッキングあいおーでは、本来なら待つ場面で `write関数` が待たずに戻ることがあります。
 
 書き込み側でよくあるのは、パイプやソケットの送信バッファがいっぱいになっている場合です。
@@ -2162,7 +2162,7 @@ write関数 は最大countバイト書く
 部分書き込み
     パイプ、ソケット、端末、ノンブロッキングあいおーで特に重要
 
-O_APPEND
+おーアペンド
     write関数 のたびにファイル末尾へ追記する
     ログ出力で重要
 
@@ -2334,7 +2334,7 @@ int main(void) {
     const char *message = "important data\n";
     int fd;
 
-    fd = オープン("important.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    fd = オープン("important.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -2397,7 +2397,7 @@ int main(void) {
 int main(void) {
     int dirfd;
 
-    dirfd = オープン(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    dirfd = オープン(".", O_RDONLY | O_DIRECTORY | おークローズエグゼック);
 
     if (dirfd < 0) {
         perror("オープン directory");
@@ -2616,7 +2616,7 @@ int syncfs(int fd);
 つまり、`write関数` が戻る時点で、書き込んだデータをストレージへ反映する方向に強く制御できます。
 
 ```c
-fd = オープン("important.log", O_WRONLY | O_CREAT | O_APPEND | O_SYNC | O_CLOEXEC, 0644);
+fd = オープン("important.log", O_WRONLY | O_CREAT | おーアペンド | O_SYNC | おークローズエグゼック, 0644);
 ```
 
 もう少し丁寧に書くと、次のようになります。
@@ -2630,7 +2630,7 @@ fd = オープン("important.log", O_WRONLY | O_CREAT | O_APPEND | O_SYNC | O_CL
 int main(void) {
     int fd;
 
-    fd = オープン("important.log", O_WRONLY | O_CREAT | O_APPEND | O_SYNC | O_CLOEXEC, 0644);
+    fd = オープン("important.log", O_WRONLY | O_CREAT | おーアペンド | O_SYNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -2871,7 +2871,7 @@ UmuOSの視点では、同期あいおーは単なる便利機能ではありま
 Linuxでは、`オープン関数` に `O_DIRECT` フラグを指定することで、ページキャッシュをなるべく迂回するあいおーを要求できます。
 
 ```c
-fd = オープン("data.bin", O_RDWR | O_DIRECT | O_CLOEXEC);
+fd = オープン("data.bin", O_RDWR | O_DIRECT | おークローズエグゼック);
 ```
 
 ただし、最初に強調しておきます。
@@ -2981,7 +2981,7 @@ int main(void) {
 
     memset(buf, 0, size);
 
-    fd = オープン("direct.bin", O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT | O_CLOEXEC, 0644);
+    fd = オープン("direct.bin", O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -3342,7 +3342,7 @@ int main(void) {
     off_t pos;
     int fd;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -3455,7 +3455,7 @@ sparse ファイル
 int main(void) {
     int fd;
 
-    fd = オープン("sparse.bin", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    fd = オープン("sparse.bin", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
         perror("オープン");
@@ -3754,7 +3754,7 @@ int main(void) {
     int fd;
     ssize_t n;
 
-    fd = オープン("memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -3926,7 +3926,7 @@ ftruncate(fd, length)
 int main(void) {
     int fd;
 
-    fd = オープン("memo.txt", O_WRONLY | O_CLOEXEC);
+    fd = オープン("memo.txt", O_WRONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープン");
@@ -5010,14 +5010,14 @@ int main(void) {
     int dirfd;
     int fd;
 
-    dirfd = オープン("/home/tama", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    dirfd = オープン("/home/tama", O_RDONLY | O_DIRECTORY | おークローズエグゼック);
 
     if (dirfd < 0) {
         perror("オープン directory");
         exit(1);
     }
 
-    fd = オープンat(dirfd, "memo.txt", O_RDONLY | O_CLOEXEC);
+    fd = オープンat(dirfd, "memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
         perror("オープンat");
@@ -5071,7 +5071,7 @@ write関数
     fdへ最大countバイトを書き込む
     戻り値で実際に書けたバイト数、部分書き込み、エラーを判断する
 
-O_APPEND
+おーアペンド
     write関数 のたびにファイル末尾へ追記する
 
 writeback
@@ -5118,7 +5118,7 @@ VFS
 writeback
     dirtyページを後でストレージへ書き戻す
 
-O_CLOEXEC
+おークローズエグゼック
     現代的なコードではfd漏れ防止のためによく使う
 ```
 
