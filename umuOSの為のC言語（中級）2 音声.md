@@ -38,7 +38,7 @@ fd専用の特別な型があるわけではありません。
 
 カーネル。
     ファイルをひらく。
-    プロセスの、fdひょうに登録する。
+    プロセスの、エフディー対応表に登録する。
 
 ユーザープログラム。
     fdを受け取る。
@@ -56,13 +56,13 @@ fd専用の特別な型があるわけではありません。
 イメージとしては、次のようになります。
 
 ```text
-プロセスAのfdひょう。
+プロセスAのエフディー対応表。
 
-fd、 0、  -> 標準入力。
-fd、 1、  -> 標準出力。
-fd、 2 、 -> 標準エラー出力。
-fd、 3 、 -> スラホーム、スラたま、すら、めもてきすと。
-fd、 4、  -> パイプの読み取り口。
+fd、 ゼロ、  -> 標準入力。
+fd、 いち、  -> 標準出力。
+fd、 に、 -> 標準エラー出力。
+fd、 さん、 -> スラ、ホーム、スラ、たま、すら、めもてきすと。
+fd、 よん、  -> パイプの読み取り口。
 ```
 
 fd、そのものは、単なる整数です。
@@ -89,72 +89,72 @@ fd、そのものは、単なる整数です。
 write関数、で、書き込み した場合も、書いたバイト数ぶんだけ位置が進みます。
 
 UmuOSで、ファイルあいおーを考える場合も、単に。「ファイルをひらく」だけでは足りません。
-少なくとも、プロセスごとの、fdひょう、fd番号、ファイルポジション、アクセスモード、対象ファイルへの参照、を管理する必要があります。
+少なくとも、プロセスごとの、エフディー対応表、fd番号、ファイルポジション、アクセスモード、対象ファイルへの参照、を管理する必要があります。
 
 #### ２章の１、の２。　おや子プロセスとfd。
 
-Linuxでは、フォーク関数、 で子プロセスを作ると、子プロセスはおやプロセスのfd、を受け継ぎます。
+Linuxでは、フォーク関数、 で、子プロセスを作ると、子プロセスは、おやプロセスの、fd、を受け継ぎます。
 
 これは、シェルや、パイプを理解するうえで非常に重要です。
-たとえば、シェルが パイプ関数 で、fdを作り、フォーク関数 で、子プロセスを作ると、子プロセスもそのfd、を持った状態で開始できます。
-その後、デュープツー関数、 で標準入力や標準出力につなぎ替え、エグゼック関数 で別のコマンドへ置き換えることで、パイプ、や、リダイレクトが、
+たとえば、シェルが パイプ関数 で、fd、を作り、フォーク関数 で、子プロセスを作ると、子プロセスもその、fd、を持った状態で開始できます。
+その後。デュープツー関数。 で、標準入力や、標準出力につなぎ替え、エグゼック関数 で、別のコマンドへ置き換えることで、パイプ、や、リダイレクトが、
 実現できます。
 
 イメージとしては、次のようになります。
 
 ```text
 おやプロセス。
-    fd 3。 -> ファイル.txt。
+    fd、 さん。 -> ファイル.txt。
 
 フォーク関数したあとの、子プロセス。
-    fd 3。 -> ファイル.txt。
+    fd、 さん。 -> ファイル.txt。
 ```
 
 ただし、おやと、子は、別々のプロセスです。
-片方が fdを、close関数で閉じても、もう片方の、fdひょうから、同じfd番号が、自動的に消えるわけではありません。
+片方が fdを、close関数で、閉じても、もう片方の、エフディー対応表から、同じfd番号が、自動的に消えるわけではありません。
 一方で、フォーク関数直後は。同じ、「ひらいているファイル」を参照するため、ファイルポジションなどを共有する場合があります。
 
 ここは少し混乱しやすいです。
 最初は、次のように考えると分かりやすいです。
 
 ```text
-fdひょう。
+エフディー対応表。
     プロセスごとにある。
 
 ひらいているファイルの状態。
-    フォーク関数した直後に、おやこで、共有されることがある。
+    フォーク関数した直後に、おやこ、で、共有されることがある。
 
 close、fd。
-    そのプロセスの、fdひょうから、fdを、はずす。
+    そのプロセスの、エフディー対応表から、fd、を、はずす。
 ```
 
-スレッドの場合は、同じプロセス内で動くため、基本的にfdひょうを、共有します。
-そのため、あるスレッドが close、fd、 すると、同じプロセス内の別スレッドにも影響します。
+スレッドの場合は、同じプロセス内で動くため、基本的に、エフディー対応表を、共有します。
+そのため、あるスレッドが close、fd、 すると、同じプロセス内の、別スレッドにも影響します。
 
 #### ２章の１、の３。　標準入力・標準出力・標準エラー出力。
 
 通常、プロセスは起動時点で少なくとも3つのfdを持っています。
 
 ```text
-fd、 0。
+fd、 ゼロ。
     標準入力。
-    STDイン。
-    STDインファイルナンバー
+    エスティーディーイン。
+    エスティーディーインファイルナンバー
 
-fd、 1。
+fd、 いち。
     標準出力。
-    STDアウト。
-    STDアウトファイルナンバー。
+    エスティーディーアウト。
+    エスティーディーアウトファイルナンバー。
 
-fd、 2。
+fd、 に。
     標準エラー出力。
-    STDエラー。
-    STDエラーファイルナンバー。
+    エスティーディーエラー。
+    エスティーディーエラーファイルナンバー。
 ```
 。。
 
 C言語では、直接、ゼロ、いち、に、 と書くこともできます。
-しかし、意味が分かりやすいので、低レベルあいおーでは `STDインファイルナンバー`。`STDアウトファイルナンバー`。`STDエラーファイルナンバー`。
+しかし、意味が分かりやすいので、低レベルあいおーでは `エスティーディーインファイルナンバー`。`エスティーディーアウトファイルナンバー`。`エスティーディーエラーファイルナンバー`。
  を使う方が読みやすいです。
 これらは 、ヘッダファイルの。ユニストディードットエイチ。 で定義されています。
 
@@ -162,9 +162,9 @@ C言語では、直接、ゼロ、いち、に、 と書くこともできます
 
 標準出力へ、直接文字を出す場合、低レベルあいおーでは、プリントエフ関数、ではなく、write関数を使います。。
 write関数は、どこへ書くのか。何を書き込むのか。何バイト書き込むのか。という3つの情報を受け取ります。。
-標準出力へ書きたい場合、書き込み先の、fdには、STDアウトファイルナンバーを指定します。。
+標準出力へ書きたい場合、書き込み先の、fdには、エスティーディーアウトファイルナンバーを指定します。。
 これは、標準出力を表す、ファイルディスクリプタで、中身としては1番に対応します。。
-ただし、コードを読む人間にとっては、1と直接書くよりも、STDアウトファイルナンバー、と書いたほうが、標準出力へ書いているのだと分かりやすくなります。。
+ただし、コードを読む人間にとっては、1と直接書くよりも、エスティーディーアウトファイルナンバー、と書いたほうが、標準出力へ書いているのだと分かりやすくなります。。
 
 次に、書き込みたい文字列を用意します。。
 たとえば、hello、という文字列に改行を付けて出したい場合。実際に書き込むデータは、h、e、l、l、o、改行、という6バイトになります。。
@@ -279,8 +279,8 @@ int オープン(const char *path, int flags, mode_t mode);
 ```c
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -326,8 +326,8 @@ O_RDWR
 ```c
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -436,8 +436,8 @@ fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_EXCL | おークローズ�
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -504,8 +504,8 @@ fd = オープン("some_fifo", O_RDONLY | おーノンブロック | おーク�
 ```c
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <string.h>
 #include ユニストディードットエイチ。
 
@@ -798,8 +798,8 @@ S_IROTH
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <sys/stat.h>
 #include ユニストディードットエイチ。
 
@@ -1054,8 +1054,8 @@ ENファイル
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -1129,8 +1129,8 @@ read(fd, buf, 100)
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -1154,7 +1154,7 @@ int main(void) {
     }
 
     if (n > 0) {
-        if (write(STDアウトファイルナンバー, buf, n) < 0) {
+        if (write(エスティーディーアウトファイルナンバー, buf, n) < 0) {
             ペラー("write");
             close(fd);
             イグジット(1);
@@ -1307,7 +1307,7 @@ for (;;) {
 
 ```c
 #include <エルノー.h>
-#include <stddef.h>
+#include <エスティーディーdef.h>
 #include ユニストディードットエイチ。
 
 エスサイズティー read_full(int fd, void *buf, size_t len) {
@@ -1370,8 +1370,8 @@ Cでは `void *` のままではバイト単位のポインタ演算をしにく
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -1395,7 +1395,7 @@ int main(void) {
     }
 
     if ((size_t)n != sizeof(header)) {
-        エフプリントエフ(STDエラー, "short read: expected %zu bytes, got %zd bytes\n",
+        エフプリントエフ(エスティーディーエラー, "short read: expected %zu bytes, got %zd bytes\n",
                 sizeof(header), n);
         close(fd);
         イグジット(1);
@@ -1419,8 +1419,8 @@ EOFで16バイト未満しか読めなかった場合は、短い読み取りと
 ```c
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -1452,7 +1452,7 @@ int main(void) {
             break;
         }
 
-        if (write(STDアウトファイルナンバー, buf, n) < 0) {
+        if (write(エスティーディーアウトファイルナンバー, buf, n) < 0) {
             ペラー("write");
             close(fd);
             イグジット(1);
@@ -1503,8 +1503,8 @@ EAGAIN / EWOULDBLOCK
 ```c
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -1523,9 +1523,9 @@ int main(void) {
 
     if (n < 0) {
         if (エルノー == EINTR) {
-            エフプリントエフ(STDエラー, "read was interrupted; try again\n");
+            エフプリントエフ(エスティーディーエラー, "read was interrupted; try again\n");
         } else if (エルノー == EAGAIN || エルノー == EWOULDBLOCK) {
-            エフプリントエフ(STDエラー, "no data available now; try again later\n");
+            エフプリントエフ(エスティーディーエラー, "no data available now; try again later\n");
         } else {
             ペラー("read");
             close(fd);
@@ -1725,8 +1725,8 @@ write(fd, buf, 100)
 まずは、文字列を標準出力へ書き込む例です。
 
 ```c
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <string.h>
 #include ユニストディードットエイチ。
 
@@ -1734,7 +1734,7 @@ int main(void) {
     const char *message = "My ship is solid!\n";
     エスサイズティー n;
 
-    n = write(STDアウトファイルナンバー, message, strlen(message));
+    n = write(エスティーディーアウトファイルナンバー, message, strlen(message));
 
     if (n < 0) {
         ペラー("write");
@@ -1830,7 +1830,7 @@ if (n < 0) {
 
 ```c
 #include <エルノー.h>
-#include <stddef.h>
+#include <エスティーディーdef.h>
 #include ユニストディードットエイチ。
 
 エスサイズティー write_full(int fd, const void *buf, size_t len) {
@@ -1893,8 +1893,8 @@ left
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <string.h>
 #include ユニストディードットエイチ。
 
@@ -1919,7 +1919,7 @@ int main(void) {
     }
 
     if ((size_t)n != strlen(message)) {
-        エフプリントエフ(STDエラー, "short write: expected %zu bytes, wrote %zd bytes\n",
+        エフプリントエフ(エスティーディーエラー, "short write: expected %zu bytes, wrote %zd bytes\n",
                 strlen(message), n);
         close(fd);
         イグジット(1);
@@ -2330,8 +2330,8 @@ fsync関数
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <string.h>
 #include ユニストディードットエイチ。
 
@@ -2395,8 +2395,8 @@ int main(void) {
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -2518,7 +2518,7 @@ if (ret < 0) {
 
 ```c
 #include <エルノー.h>
-#include <stdio.h>
+#include <エスティーディーio.h>
 #include ユニストディードットエイチ。
 
 if (fsync(fd) < 0) {
@@ -2628,8 +2628,8 @@ fd = オープン("important.log", O_WRONLY | O_CREAT | おーアペンド | O_S
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -2961,8 +2961,8 @@ O_DIRECTで制約を受けやすいもの
 
 #include <エルノー.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <string.h>
 #include ユニストディードットエイチ。
 
@@ -2980,7 +2980,7 @@ int main(void) {
     ret = posix_memalign(&buf, alignment, size);
 
     if (ret != 0) {
-        エフプリントエフ(STDエラー, "posix_memalign: %s\n", strerror(ret));
+        エフプリントエフ(エスティーディーエラー, "posix_memalign: %s\n", strerror(ret));
         イグジット(1);
     }
 
@@ -3073,7 +3073,7 @@ UmuOSの視点では、ダイレクトあいおーはすぐに実装する必要
 ### ２章の７　ファイルクローズ: close関数
 
 ファイルディスクリプタを使い終えたら、`close関数` で閉じます。
-`close関数` は、プロセスのfdひょうからそのfdを外し、ひらいているファイルとの対応付けを解消します。
+`close関数` は、プロセスのエフディー対応表からそのfdを外し、ひらいているファイルとの対応付けを解消します。
 
 宣言は次のようになります。
 
@@ -3105,7 +3105,7 @@ if (close(fd) < 0) {
 
 #### ２章の７の１　close関数 が行うこと
 
-`close(fd)` を呼ぶと、そのプロセスのfdひょうから `fd` が取り除かれます。
+`close(fd)` を呼ぶと、そのプロセスのエフディー対応表から `fd` が取り除かれます。
 以後、その `fd` 番号は無効になります。
 
 ```text
@@ -3138,7 +3138,7 @@ fd2 = オープン("b.txt", ...);  -> 3が再利用されるかもしれない
 
 #### ２章の７の２　close関数 とカーネル内の参照
 
-`close関数` は、そのプロセスのfdひょうからfdを外します。
+`close関数` は、そのプロセスのエフディー対応表からfdを外します。
 しかし、同じファイルが他のfdや他のプロセスから参照されている場合、カーネル内の「ひらいているファイル」の情報がすぐに完全消滅するとは限りません。
 
 ```text
@@ -3263,7 +3263,7 @@ Linuxでは、`close関数` がエラーを返した場合でも、fd自体は�
 
 ```text
 close(fd)
-    fdひょうからfdを外す
+    エフディー対応表からfdを外す
 
 fd番号
     close後に再利用される可能性がある
@@ -3282,7 +3282,7 @@ unlink済みファイル
 ```
 
 UmuOSの視点では、`close関数` はfd管理の出口です。
-fdひょうから番号を外すだけでなく、参照数、アイノード、削除済みファイル、遅延書き込みエラーまで関係します。
+エフディー対応表から番号を外すだけでなく、参照数、アイノード、削除済みファイル、遅延書き込みエラーまで関係します。
 ウーシュのパイプ処理でも、不要なfdを正しく閉じることがEOF伝播やプロセス終了に直結します。
 
 ### ２章の８　ファイルシーク: lseek関数
@@ -3338,8 +3338,8 @@ SEEK_END
 ```c
 #include <fcntl.h>
 #include <inttypes.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <sys/types.h>
 #include ユニストディードットエイチ。
 
@@ -3453,8 +3453,8 @@ sparse ファイル
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -3750,8 +3750,8 @@ pread関数
 #define _Xオープン_SOURCE 500
 
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -3774,7 +3774,7 @@ int main(void) {
         イグジット(1);
     }
 
-    if (n > 0 && write(STDアウトファイルナンバー, buf, (size_t)n) < 0) {
+    if (n > 0 && write(エスティーディーアウトファイルナンバー, buf, (size_t)n) < 0) {
         ペラー("write");
         close(fd);
         イグジット(1);
@@ -3870,8 +3870,8 @@ truncate(path, 40)
 例です。
 
 ```c
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -3924,8 +3924,8 @@ ftruncate(fd, length)
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -4080,8 +4080,8 @@ fdは1つだけなので本当の意味での多重化ではありませんが�
 
 ```c
 #include <エルノー.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include <sys/select.h>
 #include ユニストディードットエイチ。
 
@@ -4096,16 +4096,16 @@ int main(void) {
     エスサイズティー n;
 
     FD_ZERO(&readfds);
-    FD_SET(STDイン_ファイルNO, &readfds);
+    FD_SET(エスティーディーイン_ファイルNO, &readfds);
 
     timeout.tv_sec = TIMEOUT_SEC;
     timeout.tv_usec = 0;
 
-    ret = select(STDイン_ファイルNO + 1, &readfds, NULL, NULL, &timeout);
+    ret = select(エスティーディーイン_ファイルNO + 1, &readfds, NULL, NULL, &timeout);
 
     if (ret < 0) {
         if (エルノー == EINTR) {
-            エフプリントエフ(STDエラー, "select was interrupted\n");
+            エフプリントエフ(エスティーディーエラー, "select was interrupted\n");
             return 1;
         }
 
@@ -4118,8 +4118,8 @@ int main(void) {
         return 0;
     }
 
-    if (FD_ISSET(STDイン_ファイルNO, &readfds)) {
-        n = read(STDイン_ファイルNO, buf, BUF_LEN);
+    if (FD_ISSET(エスティーディーイン_ファイルNO, &readfds)) {
+        n = read(エスティーディーイン_ファイルNO, buf, BUF_LEN);
 
         if (n < 0) {
             ペラー("read");
@@ -4135,7 +4135,7 @@ int main(void) {
 ```
 
 `select関数` が正の値を返したら、少なくとも1つのfdがあいおー可能です。
-この例では `FD_ISSET(STDイン_ファイルNO, &readfds)` で、標準入力が読み取り可能として返されたかを確認しています。
+この例では `FD_ISSET(エスティーディーイン_ファイルNO, &readfds)` で、標準入力が読み取り可能として返されたかを確認しています。
 
 注意点として、`select関数` が「読める」と返しても、その後の `read関数` が絶対に永久にブロックしないと雑に考えすぎない方がよいです。
 実用コードでは、対象や設計によってノンブロッキングあいおーと組み合わせることがあります。
@@ -4327,8 +4327,8 @@ timeout > 0
 
 ```c
 #include <poll.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 #define TIMEOUT_MS 5000
@@ -4337,11 +4337,11 @@ int main(void) {
     struct pollfd fds[2];
     int ret;
 
-    fds[0].fd = STDイン_ファイルNO;
+    fds[0].fd = エスティーディーイン_ファイルNO;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
 
-    fds[1].fd = STDアウトファイルナンバー;
+    fds[1].fd = エスティーディーアウトファイルナンバー;
     fds[1].events = POLLOUT;
     fds[1].revents = 0;
 
@@ -4358,22 +4358,22 @@ int main(void) {
     }
 
     if (fds[0].revents & POLLIN) {
-        プリントエフ("STDイン is readable\n");
+        プリントエフ("エスティーディーイン is readable\n");
     }
 
     if (fds[1].revents & POLLOUT) {
-        プリントエフ("STDアウト is writable\n");
+        プリントエフ("エスティーディーアウト is writable\n");
     }
 
     if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        プリントエフ("STDイン has an error-like event: 0x%x\n", fds[0].revents);
+        プリントエフ("エスティーディーイン has an error-like event: 0x%x\n", fds[0].revents);
     }
 
     return 0;
 }
 ```
 
-多くの環境では、標準出力はすぐ書き込み可能なので、`STDアウト is writable` が表示されやすいです。
+多くの環境では、標準出力はすぐ書き込み可能なので、`エスティーディーアウト is writable` が表示されやすいです。
 標準入力をファイルからリダイレクトした場合は、標準入力も読み取り可能として返ることがあります。
 
 #### ２章の１１の８　poll関数 のもどりち、と エルノー
@@ -4636,7 +4636,7 @@ VFS
 ```text
 1. アプリケーションが read(fd, buf, count) を呼ぶ
 2. libcのread関数ラッパからカーネルへ入る
-3. カーネルがfdひょうを調べる
+3. カーネルがエフディー対応表を調べる
 4. fdに対応するオープン ファイルを見つける
 5. VFSが対象のファイル操作を呼ぶ
 6. ページキャッシュを確認する
@@ -4925,7 +4925,7 @@ writeback
 ```
 
 最初のUmuOSでは、すべてをLinux並みに作る必要はありません。
-しかし、fdひょう、アイノード、ファイルポジション、ページキャッシュ、dirty、writebackという言葉がつながると、
+しかし、エフディー対応表、アイノード、ファイルポジション、ページキャッシュ、dirty、writebackという言葉がつながると、
 Linuxのファイルあいおーの骨格がかなり見えてきます。
 
 #### ２章の１２の１４　カーネル内の動作の要点
@@ -5007,8 +5007,8 @@ int オープンat(int dirfd, const char *path, int flags, mode_t mode);
 
 ```c
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <エスティーディーio.h>
+#include <エスティーディーlib.h>
 #include ユニストディードットエイチ。
 
 int main(void) {
@@ -5093,7 +5093,7 @@ O_DIRECT
     アラインメント制約が強く、通常用途ではまず使わない
 
 close関数
-    fdを閉じ、プロセスのfdひょうから外す
+    fdを閉じ、プロセスのエフディー対応表から外す
     遅延書き込みエラーが見えることもある
 
 lseek関数
@@ -5132,7 +5132,7 @@ writeback
 いったんファイルを開いた後は、read関数、write関数、close関数 などの操作は fd を通して行います。
 
 UmuOSを作る側の視点では、fdはユーザープログラムとカーネルをつなぐ小さな番号です。
-しかし、その裏側には、プロセスごとのfdひょう、ファイルポジション、アイノード、パーミッション、パイプやソケットなどの抽象化がつながっています。
+しかし、その裏側には、プロセスごとのエフディー対応表、ファイルポジション、アイノード、パーミッション、パイプやソケットなどの抽象化がつながっています。
 このfdの設計がしっかりしていると、シェル、リダイレクト、パイプ、ログ、デバイスあいおーなどを自然に組み立てられるようになります。
 
 この2章では、ファイルあいおーをユーザー空間のAPIとしてだけでなく、UmuOSを作るためのOS内部構造として見てきました。
