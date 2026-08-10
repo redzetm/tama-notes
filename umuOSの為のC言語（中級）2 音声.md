@@ -187,15 +187,16 @@ write関数の、もどりち、には、エスサイズティーという型、
 エスサイズティーは、サイズをあらわせる、だけでなく、失敗をあらわす、マイナス1も返せる。符号付きの整数型です。。
 成功した場合、write関数は、実際に書き込めたバイト数を返します。。
 失敗した場合は、マイナス1を返し、詳しい理由はエルノーに、はいります。。
-そのため、もどりち、が0以上なら、少なくともエラーではなく、もどりち、がマイナス1なら、書き込みに失敗したと判断します。。
+そのため、もどりち、が、ゼロ、以上なら、少なくともエラーではなく、もどりち、がマイナス1なら、書き込みに失敗したと判断します。。
 
-エラーが起きたときには、perrorを使うと、エルノーに対応した人間向けのメッセージをひょう示できます。。
-たとえば、writeという文字列をperrorに渡しておくと、writeの処理で何が失敗したのかを追いやすくなります。。
-その後、処理を続けられないなら、exitで異常終了させる、という流れになります。。
+エラーが起きたときには、ペラーを使うと、エルノーに対応した人間向けのメッセージを表示、できます。。
+たとえば、write、という文字列をペラーに渡しておくと、write、の処理で何が失敗したのかを追いやすくなります。。
+その後、処理を続けられないなら、イグジットで、異常終了させる、という流れになります。。
 
-ここで大切なのは、writeは、ファイルディスクリプタ、メモリアドレス、バイト数を使って、OSへかなり直接的に出力を依頼する関数だということです。。
-UmuOSの視点では、標準出力も普通の画面ひょう示ではなく、fd 1番に結びついた出力先として見るのが重要になります。。
-つまり、writeで標準出力へ文字を出すという処理は、OSがfdを通して入出力先を管理し、ユーザープログラムがそのfdへバイト列を流し込む、という仕組みの最小モデルになります。。
+ここで大切なのは、write関数は、ファイルディスクリプタ。メモリアドレス。バイト数を使って。OSへかなり直接的に出力を依頼する関数、だということです。。
+UmuOSの視点では、標準出力も普通の画面表示ではなく、fd 1番に結びついた出力先として見るのが重要になります。。
+つまり、write関数で標準出力へ文字を出すという処理は、OSが、fdを通して入出力先を管理し、ユーザープログラムが、
+そのfdへ、バイト列を流し込む、という仕組みの最小モデルになります。。
 
 #### ２章の１の４　fdが指すもの
 
@@ -288,8 +289,8 @@ int main(void) {
     fd = オープン("スラホーム、スラたま、すら、めもてきすと", O_RDONLY);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     close(fd);
@@ -335,19 +336,19 @@ int main(void) {
     fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (write(fd, "hello\n", 6) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -445,14 +446,14 @@ int main(void) {
     fd = オープン("app.log", O_WRONLY | O_CREAT | おーアペンド | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (write(fd, "started\n", 8) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     close(fd);
@@ -516,23 +517,23 @@ int main(void)
     エスサイズティー n;
 
     if (パイプ(パイプfd) < 0) {                                         //パイプ関数のもどりち、は0成功、-1失敗
-        perror("パイプ");                                             //デフォでパイプ関数したときは、パイプfd[0]には　O_RDONLY
-        exit(1);                                                    //パイプfd[1]には O_WRONLYが入るのが仕様です
+        ペラー("パイプ");                                             //デフォでパイプ関数したときは、パイプfd[0]には　O_RDONLY
+        イグジット(1);                                                    //パイプfd[1]には O_WRONLYが入るのが仕様です
     }
 
     flags = fcntl(パイプfd[0], F_GETFL);      // flagsには、パイプfd[0] に現在設定されている状態フラグ（f_flags）が入る
     if (flags < 0) {
-        perror("fcntl F_GETFL");
+        ペラー("fcntl F_GETFL");
         close(パイプfd[0]);
         close(パイプfd[1]);
-        exit(1);
+        イグジット(1);
     }
 
     if (fcntl(パイプfd[0], F_SETFL, flags | おーノンブロック) < 0) {
-        perror("fcntl F_SETFL");
+        ペラー("fcntl F_SETFL");
         close(パイプfd[0]);
         close(パイプfd[1]);
-        exit(1);
+        イグジット(1);
     }
 
     n = read(パイプfd[0], buf, sizeof(buf));
@@ -540,7 +541,7 @@ int main(void)
         if (エルノー == EAGAIN || エルノー == EWOULDBLOCK) {
             プリントエフ("データがないので、待たずに戻りました\n");
         } else {
-            perror("read");
+            ペラー("read");
         }
     } else if (n == 0) {
         プリントエフ("EOFです\n");
@@ -811,13 +812,13 @@ int main(void) {
     fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, mode);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -999,8 +1000,8 @@ int fd;
 fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
 if (fd < 0) {
-    perror("オープン");
-    exit(1);
+    ペラー("オープン");
+    イグジット(1);
 }
 ```
 
@@ -1049,7 +1050,7 @@ ENファイル
     システム全体で開けるファイル数の上限に達した
 ```
 
-実用上は、まず `perror関数` でエラー理由をひょう示できるようにしておくと分かりやすいです。
+実用上は、まず `ペラー関数` でエラー理由を表示できるようにしておくと分かりやすいです。
 
 ```c
 #include <fcntl.h>
@@ -1063,13 +1064,13 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン memo.txt");
-        exit(1);
+        ペラー("オープン memo.txt");
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -1124,7 +1125,7 @@ read(fd, buf, 100)
 
 #### ２章の３の１　read関数 の最小例
 
-まずは、ファイルから読み取って標準出力へひょう示する小さな例です。
+まずは、ファイルから読み取って標準出力へ表示する小さな例です。
 
 ```c
 #include <fcntl.h>
@@ -1140,29 +1141,29 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     n = read(fd, buf, sizeof(buf));
 
     if (n < 0) {
-        perror("read");
+        ペラー("read");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (n > 0) {
         if (write(STDアウトファイルナンバー, buf, n) < 0) {
-            perror("write");
+            ペラー("write");
             close(fd);
-            exit(1);
+            イグジット(1);
         }
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -1221,8 +1222,8 @@ char buf[100];
 n = read(fd, buf, sizeof(buf));
 
 if (n < 0) {
-    perror("read");
-    exit(1);
+    ペラー("read");
+    イグジット(1);
 }
 
 /* 危険: 100バイト全部読めたとは限らない */
@@ -1381,23 +1382,23 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     n = read_full(fd, header, sizeof(header));
 
     if (n < 0) {
-        perror("read_full");
+        ペラー("read_full");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if ((size_t)n != sizeof(header)) {
         エフプリントエフ(STDエラー, "short read: expected %zu bytes, got %zd bytes\n",
                 sizeof(header), n);
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     close(fd);
@@ -1430,8 +1431,8 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     for (;;) {
@@ -1442,9 +1443,9 @@ int main(void) {
                 continue;
             }
 
-            perror("read");
+            ペラー("read");
             close(fd);
-            exit(1);
+            イグジット(1);
         }
 
         if (n == 0) {
@@ -1452,15 +1453,15 @@ int main(void) {
         }
 
         if (write(STDアウトファイルナンバー, buf, n) < 0) {
-            perror("write");
+            ペラー("write");
             close(fd);
-            exit(1);
+            イグジット(1);
         }
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -1514,8 +1515,8 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おーノンブロック | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     n = read(fd, buf, sizeof(buf));
@@ -1526,9 +1527,9 @@ int main(void) {
         } else if (エルノー == EAGAIN || エルノー == EWOULDBLOCK) {
             エフプリントエフ(STDエラー, "no data available now; try again later\n");
         } else {
-            perror("read");
+            ペラー("read");
             close(fd);
-            exit(1);
+            イグジット(1);
         }
     } else if (n == 0) {
         プリントエフ("EOF\n");
@@ -1736,8 +1737,8 @@ int main(void) {
     n = write(STDアウトファイルナンバー, message, strlen(message));
 
     if (n < 0) {
-        perror("write");
-        exit(1);
+        ペラー("write");
+        イグジット(1);
     }
 
     return 0;
@@ -1812,8 +1813,8 @@ count = sizeof(word);
 n = write(fd, &word, count);
 
 if (n < 0) {
-    perror("write");
-    exit(1);
+    ペラー("write");
+    イグジット(1);
 }
 
 /* 危険: sizeof(word) バイト全部を書けたとは限らない */
@@ -1905,28 +1906,28 @@ int main(void) {
     fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     n = write_full(fd, message, strlen(message));
 
     if (n < 0) {
-        perror("write_full");
+        ペラー("write_full");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if ((size_t)n != strlen(message)) {
         エフプリントエフ(STDエラー, "short write: expected %zu bytes, wrote %zd bytes\n",
                 strlen(message), n);
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -2200,7 +2201,7 @@ UmuOSの視点では、`write関数` は単に「文字を出す関数」では�
     トランザクションのコミット後にデータを失いたくない
 
 エディタ
-    保存完了とひょう示した直後にクラッシュしても、内容を残したい
+    保存完了と表示した直後にクラッシュしても、内容を残したい
 
 パッケージマネージャ
     インストール途中のメタデータ破損を避けたい
@@ -2341,25 +2342,25 @@ int main(void) {
     fd = オープン("important.txt", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (write(fd, message, strlen(message)) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (fsync(fd) < 0) {
-        perror("fsync");
+        ペラー("fsync");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -2404,19 +2405,19 @@ int main(void) {
     dirfd = オープン(".", O_RDONLY | O_DIRECTORY | おークローズエグゼック);
 
     if (dirfd < 0) {
-        perror("オープン directory");
-        exit(1);
+        ペラー("オープン directory");
+        イグジット(1);
     }
 
     if (fsync(dirfd) < 0) {
-        perror("fsync directory");
+        ペラー("fsync directory");
         close(dirfd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(dirfd) < 0) {
-        perror("close directory");
-        exit(1);
+        ペラー("close directory");
+        イグジット(1);
     }
 
     return 0;
@@ -2509,7 +2510,7 @@ int ret;
 ret = fsync(fd);
 
 if (ret < 0) {
-    perror("fsync");
+    ペラー("fsync");
 }
 ```
 
@@ -2523,10 +2524,10 @@ if (ret < 0) {
 if (fsync(fd) < 0) {
     if (エルノー == EINVAL) {
         if (fdatasync(fd) < 0) {
-            perror("fdatasync");
+            ペラー("fdatasync");
         }
     } else {
-        perror("fsync");
+        ペラー("fsync");
     }
 }
 ```
@@ -2637,13 +2638,13 @@ int main(void) {
     fd = オープン("important.log", O_WRONLY | O_CREAT | おーアペンド | O_SYNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -2980,7 +2981,7 @@ int main(void) {
 
     if (ret != 0) {
         エフプリントエフ(STDエラー, "posix_memalign: %s\n", strerror(ret));
-        exit(1);
+        イグジット(1);
     }
 
     memset(buf, 0, size);
@@ -2988,22 +2989,22 @@ int main(void) {
     fd = オープン("direct.bin", O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
+        ペラー("オープン");
         free(buf);
-        exit(1);
+        イグジット(1);
     }
 
     if (write(fd, buf, size) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
         free(buf);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
+        ペラー("close");
         free(buf);
-        exit(1);
+        イグジット(1);
     }
 
     free(buf);
@@ -3098,7 +3099,7 @@ int close(int fd);
 
 ```c
 if (close(fd) < 0) {
-    perror("close");
+    ペラー("close");
 }
 ```
 
@@ -3235,8 +3236,8 @@ EINTR
 
 ```c
 if (close(fd) < 0) {
-    perror("close");
-    exit(1);
+    ペラー("close");
+    イグジット(1);
 }
 ```
 
@@ -3349,23 +3350,23 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     pos = lseek(fd, (off_t)1825, SEEK_SET);
 
     if (pos == (off_t)-1) {　　　　　　　　　//off_tとの比較だからキャストして-1のエラーか確認
-        perror("lseek");
+        ペラー("lseek");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     プリントエフ("new position: %jd\n", (intmax_t)pos);
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -3380,7 +3381,7 @@ off_t pos;
 pos = lseek(fd, 0, SEEK_END);
 
 if (pos == (off_t)-1) {
-    perror("lseek");
+    ペラー("lseek");
 }
 ```
 
@@ -3392,7 +3393,7 @@ off_t pos;
 pos = lseek(fd, 0, SEEK_CUR);
 
 if (pos == (off_t)-1) {
-    perror("lseek");
+    ペラー("lseek");
 } else {
     プリントエフ("current position: %jd\n", (intmax_t)pos);
 }
@@ -3462,25 +3463,25 @@ int main(void) {
     fd = オープン("sparse.bin", O_WRONLY | O_CREAT | O_TRUNC | おークローズエグゼック, 0644);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (lseek(fd, 1024 * 1024, SEEK_SET) == (off_t)-1) {
-        perror("lseek");
+        ペラー("lseek");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (write(fd, "X", 1) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -3761,27 +3762,27 @@ int main(void) {
     fd = オープン("memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     n = pread(fd, buf, sizeof(buf), 32);
 
     if (n < 0) {
-        perror("pread");
+        ペラー("pread");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (n > 0 && write(STDアウトファイルナンバー, buf, (size_t)n) < 0) {
-        perror("write");
+        ペラー("write");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -3875,8 +3876,8 @@ truncate(path, 40)
 
 int main(void) {
     if (truncate("pirate.txt", 45) < 0) {
-        perror("truncate");
-        exit(1);
+        ペラー("truncate");
+        イグジット(1);
     }
 
     return 0;
@@ -3933,19 +3934,19 @@ int main(void) {
     fd = オープン("memo.txt", O_WRONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープン");
-        exit(1);
+        ペラー("オープン");
+        イグジット(1);
     }
 
     if (ftruncate(fd, 0) < 0) {
-        perror("ftruncate");
+        ペラー("ftruncate");
         close(fd);
-        exit(1);
+        イグジット(1);
     }
 
     if (close(fd) < 0) {
-        perror("close");
-        exit(1);
+        ペラー("close");
+        イグジット(1);
     }
 
     return 0;
@@ -4108,7 +4109,7 @@ int main(void) {
             return 1;
         }
 
-        perror("select");
+        ペラー("select");
         return 1;
     }
 
@@ -4121,7 +4122,7 @@ int main(void) {
         n = read(STDイン_ファイルNO, buf, BUF_LEN);
 
         if (n < 0) {
-            perror("read");
+            ペラー("read");
             return 1;
         }
 
@@ -4347,8 +4348,8 @@ int main(void) {
     ret = poll(fds, 2, TIMEOUT_MS);
 
     if (ret < 0) {
-        perror("poll");
-        exit(1);
+        ペラー("poll");
+        イグジット(1);
     }
 
     if (ret == 0) {
@@ -4372,7 +4373,7 @@ int main(void) {
 }
 ```
 
-多くの環境では、標準出力はすぐ書き込み可能なので、`STDアウト is writable` がひょう示されやすいです。
+多くの環境では、標準出力はすぐ書き込み可能なので、`STDアウト is writable` が表示されやすいです。
 標準入力をファイルからリダイレクトした場合は、標準入力も読み取り可能として返ることがあります。
 
 #### ２章の１１の８　poll関数 のもどりち、と エルノー
@@ -5017,16 +5018,16 @@ int main(void) {
     dirfd = オープン("/home/tama", O_RDONLY | O_DIRECTORY | おークローズエグゼック);
 
     if (dirfd < 0) {
-        perror("オープン directory");
-        exit(1);
+        ペラー("オープン directory");
+        イグジット(1);
     }
 
     fd = オープンat(dirfd, "memo.txt", O_RDONLY | おークローズエグゼック);
 
     if (fd < 0) {
-        perror("オープンat");
+        ペラー("オープンat");
         close(dirfd);
-        exit(1);
+        イグジット(1);
     }
 
     close(fd);
