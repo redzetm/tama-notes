@@ -91,7 +91,7 @@ write関数、で、書き込み した場合も、書いたバイト数ぶん�
 UmuOSで、ファイルあいおーを考える場合も、単に。「ファイルをひらく」だけでは足りません。
 少なくとも、プロセスごとの、fdひょう、fd番号、ファイルポジション、アクセスモード、対象ファイルへの参照、を管理する必要があります。
 
-#### ２章の１の２。　おや子プロセスとfd。
+#### ２章の１、の２。　おや子プロセスとfd。
 
 Linuxでは、フォーク関数、 で子プロセスを作ると、子プロセスはおやプロセスのfd、を受け継ぎます。
 
@@ -103,75 +103,77 @@ Linuxでは、フォーク関数、 で子プロセスを作ると、子プロ�
 イメージとしては、次のようになります。
 
 ```text
-おやプロセス
-    fd 3 -> ファイル.txt
+おやプロセス。
+    fd 3。 -> ファイル.txt。
 
-フォーク関数 後の子プロセス
-    fd 3 -> ファイル.txt
+フォーク関数したあとの、子プロセス。
+    fd 3。 -> ファイル.txt。
 ```
 
-ただし、おやと子は別々のプロセスです。
-片方が close(fd) しても、もう片方のfdひょうから同じfd番号が自動的に消えるわけではありません。
-一方で、フォーク関数直後は同じ「ひらいているファイル」を参照するため、ファイルポジションなどを共有する場合があります。
+ただし、おやと、子は、別々のプロセスです。
+片方が fdを、close関数で閉じても、もう片方の、fdひょうから、同じfd番号が、自動的に消えるわけではありません。
+一方で、フォーク関数直後は。同じ、「ひらいているファイル」を参照するため、ファイルポジションなどを共有する場合があります。
 
 ここは少し混乱しやすいです。
 最初は、次のように考えると分かりやすいです。
 
 ```text
-fdひょう
-    プロセスごとにある
+fdひょう。
+    プロセスごとにある。
 
-ひらいているファイルの状態
-    フォーク関数後におや子で共有されることがある
+ひらいているファイルの状態。
+    フォーク関数した直後に、おやこで、共有されることがある。
 
-close(fd)
-    そのプロセスのfdひょうからfdを外す
+close、fd。
+    そのプロセスの、fdひょうから、fdを、はずす。
 ```
 
-スレッドの場合は、同じプロセス内で動くため、基本的にfdひょうを共有します。
-そのため、あるスレッドが close(fd) すると、同じプロセス内の別スレッドにも影響します。
+スレッドの場合は、同じプロセス内で動くため、基本的にfdひょうを、共有します。
+そのため、あるスレッドが close、fd、 すると、同じプロセス内の別スレッドにも影響します。
 
-#### ２章の１の３　標準入力・標準出力・標準エラー出力
+#### ２章の１、の３。　標準入力・標準出力・標準エラー出力。
 
 通常、プロセスは起動時点で少なくとも3つのfdを持っています。
 
 ```text
-fd 0
-    標準入力
-    stdin
-    STDIN_ファイルNO
+fd、 0。
+    標準入力。
+    STDイン。
+    STDインファイルナンバー
 
-fd 1
-    標準出力
-    stdout
-    STDOUT_ファイルNO
+fd、 1。
+    標準出力。
+    STDアウト。
+    STDアウトファイルナンバー。
 
-fd 2
-    標準エラー出力
-    stderr
-    STDERR_ファイルNO
+fd、 2。
+    標準エラー出力。
+    STDエラー。
+    STDエラーファイルナンバー。
 ```
+。。
 
-C言語では、直接 `0`、`1`、`2` と書くこともできます。
-しかし、意味が分かりやすいので、低レベルあいおーでは `STDIN_ファイルNO`、`STDOUT_ファイルNO`、`STDERR_ファイルNO` を使う方が読みやすいです。
-これらは `<unistd.h>` で定義されています。
+C言語では、直接、ゼロ、いち、に、 と書くこともできます。
+しかし、意味が分かりやすいので、低レベルあいおーでは `STDインファイルナンバー`。`STDアウトファイルナンバー`。`STDエラーファイルナンバー`。
+ を使う方が読みやすいです。
+これらは 、ヘッダファイルの。ユニストディードットエイチ。 で定義されています。
 
 ここで、標準出力へ文字列を書く処理を、音声用に言葉で追ってみます。。
 
-標準出力へ直接文字を出す場合、低レベルあいおーでは、printfではなく、write関数を使います。。
-write関数は、どこへ書くのか、何を書き込むのか、何バイト書き込むのか、という3つの情報を受け取ります。。
-標準出力へ書きたい場合、書き込み先のfdには、STDOUT_ファイルNOを指定します。。
-これは、標準出力をひょうすファイルディスクリプタで、中身としては1番に対応します。。
-ただし、コードを読む人間にとっては、1と直接書くよりも、STDOUT_ファイルNOと書いたほうが、標準出力へ書いているのだと分かりやすくなります。。
+標準出力へ、直接文字を出す場合、低レベルあいおーでは、プリントエフ関数、ではなく、write関数を使います。。
+write関数は、どこへ書くのか。何を書き込むのか。何バイト書き込むのか。という3つの情報を受け取ります。。
+標準出力へ書きたい場合、書き込み先の、fdには、STDアウトファイルナンバーを指定します。。
+これは、標準出力を表す、ファイルディスクリプタで、中身としては1番に対応します。。
+ただし、コードを読む人間にとっては、1と直接書くよりも、STDアウトファイルナンバー、と書いたほうが、標準出力へ書いているのだと分かりやすくなります。。
 
 次に、書き込みたい文字列を用意します。。
-たとえば、helloという文字列に改行を付けて出したい場合、実際に書き込むデータは、h、e、l、l、o、改行、という6バイトになります。。
+たとえば、hello、という文字列に改行を付けて出したい場合。実際に書き込むデータは、h、e、l、l、o、改行、という6バイトになります。。
 write関数は、C言語の文字列を、文字列として特別扱いするわけではありません。。
 write関数から見ると、それは単なるバイト列です。。
 そのため、どこから始まるバイト列を、何バイトぶん書くのかを、プログラム側が明示する必要があります。。
 
-ここがprintfとの大きな違いです。。
-printfは、文字列や書式指定を解釈して、人間向けのひょう示を作ってくれます。。
+ここがプリントエフとの大きな違いです。。
+プリントエフは、文字列や書式指定を解釈して、人間向けのひょう示を作ってくれます。。
 一方、writeは、指定されたfdへ、指定されたメモリ上のデータを、指定されたバイト数だけ送る、かなり素朴な関数です。。
 だからこそ、システムコールやファイルディスクリプタの動きを観察するときには、writeのほうが仕組みを見やすいです。。
 
@@ -250,7 +252,7 @@ close関数
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int オープン(const char *path, int flags);
 int オープン(const char *path, int flags, mode_t mode);
@@ -277,7 +279,7 @@ int オープン(const char *path, int flags, mode_t mode);
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -324,7 +326,7 @@ O_RDWR
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -434,7 +436,7 @@ fd = オープン("memo.txt", O_WRONLY | O_CREAT | O_EXCL | おークローズ�
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -503,7 +505,7 @@ fd = オープン("some_fifo", O_RDONLY | おーノンブロック | おーク�
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void)
 {
@@ -535,14 +537,14 @@ int main(void)
     n = read(パイプfd[0], buf, sizeof(buf));
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            printf("データがないので、待たずに戻りました\n");
+            プリントエフ("データがないので、待たずに戻りました\n");
         } else {
             perror("read");
         }
     } else if (n == 0) {
-        printf("EOFです\n");
+        プリントエフ("EOFです\n");
     } else {
-        printf("%zdバイト読みました: %.*s\n", n, (int)n, buf);
+        プリントエフ("%zdバイト読みました: %.*s\n", n, (int)n, buf);
     }
 
     close(パイプfd[0]);
@@ -797,7 +799,7 @@ S_IROTH
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -1052,7 +1054,7 @@ ENファイル
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -1083,7 +1085,7 @@ Linuxの `errno` は、そのための代ひょう的な設計です。
 Linuxで低レベルにファイルを読み取る基本のシステムコールが `read関数` です。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t read(int fd, void *buf, size_t count);
 ```
@@ -1127,7 +1129,7 @@ read(fd, buf, 100)
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     char buf[128];
@@ -1150,7 +1152,7 @@ int main(void) {
     }
 
     if (n > 0) {
-        if (write(STDOUT_ファイルNO, buf, n) < 0) {
+        if (write(STDアウトファイルナンバー, buf, n) < 0) {
             perror("write");
             close(fd);
             exit(1);
@@ -1304,7 +1306,7 @@ for (;;) {
 ```c
 #include <errno.h>
 #include <stddef.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t read_full(int fd, void *buf, size_t len) {
     char *p;
@@ -1368,7 +1370,7 @@ Cでは `void *` のままではバイト単位のポインタ演算をしにく
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     char header[16];
@@ -1391,7 +1393,7 @@ int main(void) {
     }
 
     if ((size_t)n != sizeof(header)) {
-        エフプリントエフ(stderr, "short read: expected %zu bytes, got %zd bytes\n",
+        エフプリントエフ(STDエラー, "short read: expected %zu bytes, got %zd bytes\n",
                 sizeof(header), n);
         close(fd);
         exit(1);
@@ -1417,7 +1419,7 @@ EOFで16バイト未満しか読めなかった場合は、短い読み取りと
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     char buf[4096];
@@ -1448,7 +1450,7 @@ int main(void) {
             break;
         }
 
-        if (write(STDOUT_ファイルNO, buf, n) < 0) {
+        if (write(STDアウトファイルナンバー, buf, n) < 0) {
             perror("write");
             close(fd);
             exit(1);
@@ -1501,7 +1503,7 @@ EAGAIN / EWOULDBLOCK
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     char buf[1024];
@@ -1519,18 +1521,18 @@ int main(void) {
 
     if (n < 0) {
         if (errno == EINTR) {
-            エフプリントエフ(stderr, "read was interrupted; try again\n");
+            エフプリントエフ(STDエラー, "read was interrupted; try again\n");
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            エフプリントエフ(stderr, "no data available now; try again later\n");
+            エフプリントエフ(STDエラー, "no data available now; try again later\n");
         } else {
             perror("read");
             close(fd);
             exit(1);
         }
     } else if (n == 0) {
-        printf("EOF\n");
+        プリントエフ("EOF\n");
     } else {
-        printf("read %zd bytes\n", n);
+        プリントエフ("read %zd bytes\n", n);
     }
 
     close(fd);
@@ -1675,7 +1677,7 @@ UmuOSの視点では、`read関数` は単に「ファイルから読む関数�
 宣言は次のようになります。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t write(int fd, const void *buf, size_t count);
 ```
@@ -1724,13 +1726,13 @@ write(fd, buf, 100)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     const char *message = "My ship is solid!\n";
     ssize_t n;
 
-    n = write(STDOUT_ファイルNO, message, strlen(message));
+    n = write(STDアウトファイルナンバー, message, strlen(message));
 
     if (n < 0) {
         perror("write");
@@ -1827,7 +1829,7 @@ if (n < 0) {
 ```c
 #include <errno.h>
 #include <stddef.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t write_full(int fd, const void *buf, size_t len) {
     const char *p;
@@ -1892,7 +1894,7 @@ left
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     const char *message = "hello from write_full\n";
@@ -1915,7 +1917,7 @@ int main(void) {
     }
 
     if ((size_t)n != strlen(message)) {
-        エフプリントエフ(stderr, "short write: expected %zu bytes, wrote %zd bytes\n",
+        エフプリントエフ(STDエラー, "short write: expected %zu bytes, wrote %zd bytes\n",
                 strlen(message), n);
         close(fd);
         exit(1);
@@ -2258,7 +2260,7 @@ UmuOSの視点では、`write関数` は単に「文字を出す関数」では�
 宣言は次のようになります。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int fsync(int fd);
 ```
@@ -2329,7 +2331,7 @@ fsync関数
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     const char *message = "important data\n";
@@ -2393,7 +2395,7 @@ int main(void) {
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int dirfd;
@@ -2430,7 +2432,7 @@ int main(void) {
 宣言は次のようになります。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int fdatasync(int fd);
 ```
@@ -2515,7 +2517,7 @@ if (ret < 0) {
 ```c
 #include <errno.h>
 #include <stdio.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 if (fsync(fd) < 0) {
     if (errno == EINVAL) {
@@ -2555,7 +2557,7 @@ OSとして扱いやすくなります。
 宣言は次のようになります。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 void sync(void);
 ```
@@ -2603,7 +2605,7 @@ Linuxには `syncfs関数` もあります。
 
 ```c
 #define _GNU_SOURCE
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int syncfs(int fd);
 ```
@@ -2626,7 +2628,7 @@ fd = オープン("important.log", O_WRONLY | O_CREAT | おーアペンド | O_S
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -2960,7 +2962,7 @@ O_DIRECTで制約を受けやすいもの
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     void *buf;
@@ -2976,7 +2978,7 @@ int main(void) {
     ret = posix_memalign(&buf, alignment, size);
 
     if (ret != 0) {
-        エフプリントエフ(stderr, "posix_memalign: %s\n", strerror(ret));
+        エフプリントエフ(STDエラー, "posix_memalign: %s\n", strerror(ret));
         exit(1);
     }
 
@@ -3074,7 +3076,7 @@ UmuOSの視点では、ダイレクトあいおーはすぐに実装する必要
 宣言は次のようになります。
 
 ```c
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int close(int fd);
 ```
@@ -3293,7 +3295,7 @@ fdひょうから番号を外すだけでなく、参照数、アイノード、
 
 ```c
 #include <sys/types.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 off_t lseek(int fd, off_t offset, int whence);
 ```
@@ -3337,7 +3339,7 @@ SEEK_END
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     off_t pos;
@@ -3358,7 +3360,7 @@ int main(void) {
         exit(1);
     }
 
-    printf("new position: %jd\n", (intmax_t)pos);
+    プリントエフ("new position: %jd\n", (intmax_t)pos);
 
     if (close(fd) < 0) {
         perror("close");
@@ -3391,7 +3393,7 @@ pos = lseek(fd, 0, SEEK_CUR);
 if (pos == (off_t)-1) {
     perror("lseek");
 } else {
-    printf("current position: %jd\n", (intmax_t)pos);
+    プリントエフ("current position: %jd\n", (intmax_t)pos);
 }
 ```
 
@@ -3451,7 +3453,7 @@ sparse ファイル
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -3639,7 +3641,7 @@ pread関数 / pwrite関数
 
 ```c
 #define _Xオープン_SOURCE 500
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ```
@@ -3683,7 +3685,7 @@ offset
 
 ```c
 #define _Xオープン_SOURCE 500
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 ```
@@ -3748,7 +3750,7 @@ pread関数
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     char buf[16];
@@ -3770,7 +3772,7 @@ int main(void) {
         exit(1);
     }
 
-    if (n > 0 && write(STDOUT_ファイルNO, buf, (size_t)n) < 0) {
+    if (n > 0 && write(STDアウトファイルナンバー, buf, (size_t)n) < 0) {
         perror("write");
         close(fd);
         exit(1);
@@ -3829,7 +3831,7 @@ Linuxでは、パス名で指定する `truncate関数` と、fdで指定する 
 
 ```c
 #include <sys/types.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int truncate(const char *path, off_t length);
 int ftruncate(int fd, off_t length);
@@ -3868,7 +3870,7 @@ truncate(path, 40)
 ```c
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     if (truncate("pirate.txt", 45) < 0) {
@@ -3922,7 +3924,7 @@ ftruncate(fd, length)
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int fd;
@@ -4079,7 +4081,7 @@ fdは1つだけなので本当の意味での多重化ではありませんが�
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/select.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 #define TIMEOUT_SEC 5
 #define BUF_LEN 1024
@@ -4092,16 +4094,16 @@ int main(void) {
     ssize_t n;
 
     FD_ZERO(&readfds);
-    FD_SET(STDIN_ファイルNO, &readfds);
+    FD_SET(STDイン_ファイルNO, &readfds);
 
     timeout.tv_sec = TIMEOUT_SEC;
     timeout.tv_usec = 0;
 
-    ret = select(STDIN_ファイルNO + 1, &readfds, NULL, NULL, &timeout);
+    ret = select(STDイン_ファイルNO + 1, &readfds, NULL, NULL, &timeout);
 
     if (ret < 0) {
         if (errno == EINTR) {
-            エフプリントエフ(stderr, "select was interrupted\n");
+            エフプリントエフ(STDエラー, "select was interrupted\n");
             return 1;
         }
 
@@ -4110,12 +4112,12 @@ int main(void) {
     }
 
     if (ret == 0) {
-        printf("timeout\n");
+        プリントエフ("timeout\n");
         return 0;
     }
 
-    if (FD_ISSET(STDIN_ファイルNO, &readfds)) {
-        n = read(STDIN_ファイルNO, buf, BUF_LEN);
+    if (FD_ISSET(STDイン_ファイルNO, &readfds)) {
+        n = read(STDイン_ファイルNO, buf, BUF_LEN);
 
         if (n < 0) {
             perror("read");
@@ -4123,7 +4125,7 @@ int main(void) {
         }
 
         buf[n] = '\0';
-        printf("read: %s", buf);
+        プリントエフ("read: %s", buf);
     }
 
     return 0;
@@ -4131,7 +4133,7 @@ int main(void) {
 ```
 
 `select関数` が正の値を返したら、少なくとも1つのfdがあいおー可能です。
-この例では `FD_ISSET(STDIN_ファイルNO, &readfds)` で、標準入力が読み取り可能として返されたかを確認しています。
+この例では `FD_ISSET(STDイン_ファイルNO, &readfds)` で、標準入力が読み取り可能として返されたかを確認しています。
 
 注意点として、`select関数` が「読める」と返しても、その後の `read関数` が絶対に永久にブロックしないと雑に考えすぎない方がよいです。
 実用コードでは、対象や設計によってノンブロッキングあいおーと組み合わせることがあります。
@@ -4325,7 +4327,7 @@ timeout > 0
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 #define TIMEOUT_MS 5000
 
@@ -4333,11 +4335,11 @@ int main(void) {
     struct pollfd fds[2];
     int ret;
 
-    fds[0].fd = STDIN_ファイルNO;
+    fds[0].fd = STDイン_ファイルNO;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
 
-    fds[1].fd = STDOUT_ファイルNO;
+    fds[1].fd = STDアウトファイルナンバー;
     fds[1].events = POLLOUT;
     fds[1].revents = 0;
 
@@ -4349,27 +4351,27 @@ int main(void) {
     }
 
     if (ret == 0) {
-        printf("timeout\n");
+        プリントエフ("timeout\n");
         return 0;
     }
 
     if (fds[0].revents & POLLIN) {
-        printf("stdin is readable\n");
+        プリントエフ("STDイン is readable\n");
     }
 
     if (fds[1].revents & POLLOUT) {
-        printf("stdout is writable\n");
+        プリントエフ("STDアウト is writable\n");
     }
 
     if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        printf("stdin has an error-like event: 0x%x\n", fds[0].revents);
+        プリントエフ("STDイン has an error-like event: 0x%x\n", fds[0].revents);
     }
 
     return 0;
 }
 ```
 
-多くの環境では、標準出力はすぐ書き込み可能なので、`stdout is writable` がひょう示されやすいです。
+多くの環境では、標準出力はすぐ書き込み可能なので、`STDアウト is writable` がひょう示されやすいです。
 標準入力をファイルからリダイレクトした場合は、標準入力も読み取り可能として返ることがあります。
 
 #### ２章の１１の８　poll関数 の戻り値と errno
@@ -4975,7 +4977,7 @@ pdflウーシュ
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int オープンat(int dirfd, const char *path, int flags);
 int オープンat(int dirfd, const char *path, int flags, mode_t mode);
@@ -5005,7 +5007,7 @@ int オープンat(int dirfd, const char *path, int flags, mode_t mode);
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include ユニストディードットエイチ。
 
 int main(void) {
     int dirfd;
