@@ -4271,7 +4271,7 @@ EINTR
     シグナルで割り込まれた
 
 EINVAL
-    nfdsが負数、またはtimeoutが不正
+    nfdsが負数、またはtimeoutが不正。不正な引数ということです。
 
 ENOMEM
     内部処理に必要なメモリが不足した
