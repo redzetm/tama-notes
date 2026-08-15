@@ -4231,7 +4231,8 @@ tv_usec
 `tv_sec` と `tv_usec` を両方0にすると、待たずに状態だけ確認して戻ります。
 
 古いコードでは、fdを何も渡さず、`select(0, NULL, NULL, NULL, &timeout)` として短時間スリープに使う例があります。
-これは歴史的にはよく使われましたが、現代Linuxでは `nanosleep()`、`clock_nanosleep()` など、時間用のAPIを使う方が意図が明確です。
+これは歴史的にはよく使われましたが、現代Linuxでは `nanosleep()`、`clock_nanosleep()` など、
+時間用のAPIを使う方が意図が明確です。
 
 `select()` には `FD_SETSIZE` の制限もあります。
 Linux/glibcでは典型的に1024です。
