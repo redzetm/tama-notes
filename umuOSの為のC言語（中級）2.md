@@ -3224,6 +3224,61 @@ close()
 ただし、`close()` の戻り値も無視してよいわけではありません。
 遅延書き込みに関係するエラーが、`close()` のタイミングで見えることがあるからです。
 
+簡単な例を示します。
+
+```c
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+    int fd;
+    const char *msg = "important data\n";
+    ssize_t written;
+
+    fd = open("save.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        perror("open");
+        return 1;
+    }
+
+    written = write(fd, msg, strlen(msg));
+    if (written < 0) {
+        perror("write");
+        close(fd);
+        return 1;
+    }
+
+    if ((size_t)written != strlen(msg)) {
+        fprintf(stderr, "short write\n");
+        close(fd);
+        return 1;
+    }
+
+    /*
+     * ここで同期を要求しておくと、
+     * close() の前に保存処理の失敗を検出しやすくなります。
+     */
+    if (fsync(fd) < 0) {
+        perror("fsync");
+        close(fd);
+        return 1;
+    }
+
+    if (close(fd) < 0) {
+        perror("close");
+        return 1;
+    }
+
+    return 0;
+}
+```
+
+この順番なら、少なくとも「書いたつもりのデータを同期せずにfdだけ閉じた」という状態を避けやすくなります。
+
 #### ２章の７の５　close() の errno
 
 `close()` が `-1` を返した場合、`errno` に理由が入ります。
