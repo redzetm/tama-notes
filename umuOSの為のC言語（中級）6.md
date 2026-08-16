@@ -1608,5 +1608,316 @@ UmuOSで最初から完全なリアルタイムOSを目指す必要はありま�
 まずは通常スケジューラを作り、その上で「特定の高優先度タスクは通常タスクより常に先に走る」という仕組みを追加すると、リアルタイムクラスの感覚を掴みやすいです。
 その後、FIFO型、RR型、期限ベース型へ段階的に進めると、Linuxの設計も理解しやすくなると思います。
 
+#### ６章の６　リソースリミット
+
+Linuxカーネルは、各プロセスに対してリソースリミットを設けています。
+これは、プロセスが使えるカーネル資源の上限を表す仕組みで、オープンファイル数、coreファイルサイズ、CPU時間、スタックサイズなどを制御できます。
+
+たとえば、開けるファイルディスクリプタ数の上限を超えると、`open()` は失敗し、通常は `errno` に `EMFILE` が入ります。
+つまり、リソースリミットは単なる目安ではなく、カーネルが実際に適用する制約です。
+
+Linuxでは、リソースリミットの参照と変更に次のAPIを使います。
+
+```c
+#include <sys/resource.h>
+
+struct rlimit {
+	 rlim_t rlim_cur; /* soft limit */
+	 rlim_t rlim_max; /* hard limit */
+};
+
+int getrlimit(int resource, struct rlimit *rlim);
+int setrlimit(int resource, const struct rlimit *rlim);
+```
+
+`resource` には `RLIMIT_NOFILE` や `RLIMIT_CORE` などの定数を指定します。
+`struct rlimit` には、ソフトリミットとハードリミットの2種類の上限が入ります。
+
+```text
+ソフトリミット:
+	現在そのプロセスに適用される上限
+	一般ユーザでも、許される範囲なら変更できる
+
+ハードリミット:
+	ソフトリミットが上げられる上限
+	通常は権限なしでは上げられない
+```
+
+一般ユーザのプロセスは、ソフトリミットを 0 からハードリミットまでの範囲で変更できます。
+一方、ハードリミットを上げるには通常 `CAP_SYS_RESOURCE` が必要です。
+そのため、権限のないプロセスがハードリミットを下げると、あとで元に戻せない場合があります。
+
+各リミットには、実質的に2つの特別な値があります。
+
+```text
+0:
+	その資源を使わせない
+
+RLIM_INFINITY:
+	上限なし
+```
+
+たとえば `RLIMIT_CORE` が 0 なら core ファイルは作られません。
+逆に `RLIM_INFINITY` なら、そのリミットでは core サイズを制限しません。
+
+なお、古い資料では `RLIM_INFINITY` を `-1` と説明していることがありますが、実際には実装依存の定数として扱うべきです。
+表示時にたまたま `-1` に見えることはありますが、その表現を前提にコードを書くべきではありません。
+
+`getrlimit()` は現在値を取得し、`setrlimit()` は上限値を変更します。
+どちらも成功時は 0、失敗時は -1 を返して `errno` を設定します。
+
+現在のLinuxでは、プロセス自身だけでなく別PIDに対して取得・変更できる `prlimit()` もよく使われます。
+ただし、基本の考え方は `getrlimit()` と `setrlimit()` を理解すれば十分です。
+
+#### ６章の６の１　上限値
+
+Linuxには複数のリソースリミットがあります。
+古い本では「15種類」と書かれていることがありますが、実際にはカーネル世代やCライブラリ、公開されている定数の違いで見え方が少し変わります。
+ここでは、今でも実用上よく意識するものを中心に整理します。
+
+```text
+RLIMIT_AS:
+	プロセスの仮想アドレス空間の上限
+	mmap() や brk() に影響し、超えると ENOMEM になり得る
+
+RLIMIT_CORE:
+	coreファイルの最大サイズ
+	0 なら core を出さない
+
+RLIMIT_CPU:
+	CPU時間の上限
+	超過時に SIGXCPU、さらに継続すると最終的に強制終了されることがある
+
+RLIMIT_DATA:
+	データ領域やヒープの上限
+	古い brk() ベースの説明でよく出るが、現代では mmap() を多用する処理では RLIMIT_AS の方が効き方を意識しやすい
+
+RLIMIT_FSIZE:
+	作成・拡張できるファイルサイズの上限
+	超えると SIGXFSZ や EFBIG の原因になる
+
+RLIMIT_MEMLOCK:
+	mlock() や mlockall() で固定できるメモリ量の上限
+	リアルタイム処理では特に重要
+
+RLIMIT_MSGQUEUE:
+	POSIXメッセージキューに使える総量の上限
+
+RLIMIT_NICE:
+	権限のないプロセスがどこまで nice 値を下げられるかの上限
+
+RLIMIT_NOFILE:
+	開いたままにできるファイルディスクリプタ数の上限
+	ソケットを多用するプログラムでは特に重要
+
+RLIMIT_NPROC:
+	そのユーザが同時に持てるプロセスやスレッド数の上限
+	fork() やスレッド生成失敗の原因になることがある
+
+RLIMIT_RTPRIO:
+	権限のないプロセスが要求できるリアルタイム優先度の上限
+
+RLIMIT_SIGPENDING:
+	そのユーザがキューに保持できる保留シグナル数の上限
+
+RLIMIT_STACK:
+	スタックサイズの上限
+	超えると通常は SIGSEGV の原因になる
+```
+
+一方で、古い資料に出てくる `RLIMIT_LOCKS` や `RLIMIT_RSS` は、現在のLinuxでは実質的に意味が薄い、または効果を期待しにくい項目です。
+こうした値は「定数が存在すること」と「今のカーネルで実効性が高いこと」を分けて理解した方が混乱しません。
+
+特に実運用で重要になりやすいのは次の4つです。
+
+```text
+RLIMIT_NOFILE:
+	サーバやネットワークプログラムで不足しやすい
+
+RLIMIT_STACK:
+	深い再帰や大きい自動変数で問題になりやすい
+
+RLIMIT_CORE:
+	障害解析のしやすさに直結する
+
+RLIMIT_MEMLOCK:
+	リアルタイム処理や低レイテンシ処理で重要
+```
+
+カーネルはこれらの値をプロセス単位で管理します。
+子プロセスは `fork()` 時に親の値を引き継ぎ、`exec()` しても基本的に保持されます。
+そのため、シェルやサービスマネージャで設定した値が、そのまま起動先プログラムの実行条件になります。
+
+##### ６章の６の１の１　デフォルトの上限値
+
+古い解説書では、リソースごとのデフォルト値一覧が表で載っていることがあります。
+ただし、現在のLinuxでは、その値は「カーネル標準」だけで決まるとは限りません。
+
+実際には次の要素が重なって決まります。
+
+```text
+ログインシェルの設定:
+	bash の ulimit など
+
+PAMの設定:
+	/etc/security/limits.conf など
+
+systemdの設定:
+	LimitNOFILE=、LimitCORE= など
+
+コンテナやcgroupの制約:
+	実行環境ごとに別の上限が付くことがある
+```
+
+つまり、「デフォルト値は常にこの表どおり」と覚えるのは危険です。
+いま動いている環境での実値を `ulimit -a`、`prlimit`、`/proc/<pid>/limits` などで確認する方が実践的です。
+
+また、通常の運用では、root権限のプログラム本体が起動後にハードリミットをいじるより、起動前にシェルや systemd で適切な値を与える方が安全です。
+特に `RLIMIT_NOFILE`、`RLIMIT_CORE`、`RLIMIT_MEMLOCK` は、起動環境側で設計しておくことが多いです。
+
+#### ６章の６の２　上限値の参照/変更
+
+参照は単純です。
+まず `getrlimit()` で現在の値を読みます。
+
+```c
+#include <errno.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+
+static void print_limit_value(rlim_t value)
+{
+	if (value == RLIM_INFINITY) {
+		puts("unlimited");
+		return;
+	}
+
+	printf("%" PRIuMAX "\n", (uintmax_t)value);
+}
+
+int main(void)
+{
+	struct rlimit limit;
+
+	if (getrlimit(RLIMIT_CORE, &limit) == -1) {
+		perror("getrlimit");
+		return EXIT_FAILURE;
+	}
+
+	printf("RLIMIT_CORE soft=");
+	print_limit_value(limit.rlim_cur);
+	printf("RLIMIT_CORE hard=");
+	print_limit_value(limit.rlim_max);
+
+	return EXIT_SUCCESS;
+}
+```
+
+古いサンプルでは `%ld` で `rlim_t` を表示していることがありますが、`rlim_t` の型は環境依存です。
+そのため、教材としては `uintmax_t` に寄せて表示する方が安全です。
+
+次に、`setrlimit()` で上限を変更します。
+たとえば core ファイルのソフトリミットだけを 32 MiB にしたいなら次のように書けます。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+
+int main(void)
+{
+	struct rlimit limit;
+
+	if (getrlimit(RLIMIT_CORE, &limit) == -1) {
+		perror("getrlimit");
+		return EXIT_FAILURE;
+	}
+
+	limit.rlim_cur = 32ULL * 1024ULL * 1024ULL;
+
+	if (setrlimit(RLIMIT_CORE, &limit) == -1) {
+		perror("setrlimit");
+		return EXIT_FAILURE;
+	}
+
+	puts("RLIMIT_CORE soft limit updated.");
+	return EXIT_SUCCESS;
+}
+```
+
+ここではハードリミットは変えていません。
+一般ユーザのプロセスが安全に触るなら、まず現在値を読み、その範囲でソフトリミットだけを調整する、という流れが分かりやすいです。
+
+`RLIMIT_NOFILE` を上げて大量接続へ備える、`RLIMIT_CORE` を有効にして障害解析しやすくする、といった使い方は実際によくあります。
+
+##### ６章の６の２の１　errno
+
+`getrlimit()` と `setrlimit()` の代表的なエラーは次の通りです。
+
+```text
+EFAULT:
+	渡したポインタが無効
+
+EINVAL:
+	無効な resource を指定した
+	または setrlimit() で soft > hard にした
+
+EPERM:
+	権限なしでハードリミットを上げようとした
+```
+
+実際には、API呼び出しそのものより「設定したつもりの上限が本当に効いているか」を確認することの方が重要です。
+特に systemd やコンテナ経由で起動している場合、想定より低い `RLIMIT_NOFILE` や `RLIMIT_MEMLOCK` が入っていることがあります。
+
+そのため、問題調査では次の観点が有効です。
+
+```text
+プログラム内:
+	getrlimit() で現在値をログに出す
+
+シェル:
+	ulimit -a で確認する
+
+/proc:
+	/proc/<pid>/limits を確認する
+```
+
+#### ６章の６の３　UmuOSでどう考えるか
+
+UmuOSの観点では、リソースリミットは「高級な周辺機能」ではなく、カーネルが暴走や独占を抑える基本機構として理解するとよいです。
+
+たとえば、自作OSで次のような問題を考えると、rlimit の意義が見えやすくなります。
+
+```text
+1つのプロセスがファイルを開きっぱなしにして、他のプロセスが開けなくなる
+
+異常ループがメモリを取り続け、全体が不安定になる
+
+デバッグ用のcore出力が巨大化し、ストレージを圧迫する
+```
+
+Linuxの rlimit は、こうした「1プロセスの振る舞いがシステム全体へ与える悪影響」を境界で抑える仕組みです。
+
+UmuOSで最初からLinuxと同じ数の制限を実装する必要はありません。
+まずは次の3つから始めると、設計意図が掴みやすいです。
+
+```text
+ファイルディスクリプタ数の上限
+	開きっぱなし対策
+
+プロセスごとのメモリ上限
+	単一プロセスの暴走抑止
+
+プロセスごとのCPU時間または実行回数の監視
+	異常ループの早期検出
+```
+
+そのうえで、「現在の値」と「絶対に超えられない上限」を分ける設計にすると、Linuxのソフトリミット/ハードリミットの発想に自然につながります。
+
+さらに学習上は、スケジューラ、仮想メモリ、ファイル管理が別々の機能ではなく、「プロセスごとに資源使用量を数え、境界を超えたら止める」という共通の管理思想でつながっていることが重要です。
+この視点を持つと、UmuOSでも「安全に複数のプログラムを共存させるには何を数えるべきか」という設計課題が見えやすくなります。
+
 
 
