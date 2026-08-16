@@ -927,6 +927,576 @@ int main(int argc, char *argv[])
 拡張属性は便利ですが、ファイルシステム移動やアーカイブ方法によっては失われることがあります。
 そのため、重要な永続データを xattr だけに頼る設計は慎重に考えるべきです。
 
+### ７章の２　ディレクトリ
+
+Unix系OSでディレクトリとは、概念的には「名前と inode を対応付ける表」です。
+ファイルそのものの中身を持つというより、どの名前がどの実体を指しているかを管理する役割を持ちます。
+
+```text
+ディレクトリが持つもの:
+	ファイル名
+	対応する inode への参照
+```
+
+そのため、ディレクトリの内容とは、要するにその下にある名前の一覧です。
+`ls` の出力は、まさにこの一覧を人間向けに整形して見せているものと考えられます。
+
+プロセスがファイルを開くとき、カーネルはパスをたどりながら、各ディレクトリ内の名前を引いて次の inode を見つけます。
+最終的に目的の inode に到達して、そこでファイルシステム実装が実データへ結び付けます。
+
+ディレクトリの中には、通常ファイルだけでなく、別のディレクトリも含まれます。
+この関係が階層構造、つまりディレクトリツリーを作ります。
+
+```text
+親ディレクトリ:
+	あるディレクトリを含んでいる側
+
+子ディレクトリ:
+	その中に含まれている側
+```
+
+ツリーの最上位にある `/` をルートディレクトリと呼びます。
+これは root ユーザのホームディレクトリである `/root` とは別物です。
+
+パス名は、このディレクトリ階層をたどるための表現です。
+
+```text
+絶対パス:
+	/ から始まる
+	例: /usr/bin/ls
+
+相対パス:
+	現在位置を基準に解決する
+	例: bin/ls
+```
+
+相対パスを解決する基準が、カレントディレクトリです。
+
+ファイル名やディレクトリ名に使えない文字として、Unixでは基本的に `/` と NUL があります。
+`/` は区切り文字、NUL はC文字列終端として使われるためです。
+それ以外のバイト列は理論上かなり自由ですが、実務では可搬性や表示崩れを避けるため、扱いやすい文字集合に寄せることが多いです。
+
+また、すべてのディレクトリには `.` と `..` があります。
+
+```text
+. :
+	そのディレクトリ自身
+
+.. :
+	親ディレクトリ
+```
+
+たとえば `/home/tama/work/..` は `/home/tama` を指します。
+ルートディレクトリでは `.` も `..` も自分自身を指します。
+
+#### ７章の２の１　カレントディレクトリ
+
+すべてのプロセスは、カレントワーキングディレクトリ、つまり cwd を持ちます。
+相対パスはこの cwd を基準に解決されます。
+
+たとえば cwd が `/home/blackbeard` のときに `parrot.jpg` を開けば、実際には `/home/blackbeard/parrot.jpg` が対象になります。
+一方、`/usr/bin/mast` のように `/` で始まる絶対パスなら、cwd には影響されません。
+
+cwd は親プロセスから引き継がれます。
+そのため、シェルから起動したプログラムは、通常、シェルのいるディレクトリを引き継いで開始します。
+
+##### ７章の２の１の１　カレントディレクトリの参照
+
+cwd を調べる代表的な API は `getcwd()` です。
+
+```c
+#include <unistd.h>
+
+char *getcwd(char *buf, size_t size);
+```
+
+成功すると、cwd の絶対パスを `buf` に書いて、そのポインタを返します。
+失敗時は `NULL` を返し、`errno` を設定します。
+
+代表的なエラーは次の通りです。
+
+```text
+EFAULT:
+	buf が無効
+
+EINVAL:
+	size が不正
+
+ENOENT:
+	現在のディレクトリが既に削除されているなどで無効になっている
+
+ERANGE:
+	buf が小さすぎる
+```
+
+固定長バッファを自前で用意して使う形は、もっとも移植性の高い書き方です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	char buffer[4096];
+
+	if (getcwd(buffer, sizeof(buffer)) == NULL) {
+		perror("getcwd");
+		return EXIT_FAILURE;
+	}
+
+	printf("cwd = %s\n", buffer);
+	return EXIT_SUCCESS;
+}
+```
+
+Linux の glibc では、`getcwd(NULL, 0)` によって必要サイズのバッファを内部確保して返す使い方もできます。
+これは便利ですが、厳密には POSIX の必須動作だけに頼る書き方ではありません。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	char *cwd = getcwd(NULL, 0);
+	if (cwd == NULL) {
+		perror("getcwd");
+		return EXIT_FAILURE;
+	}
+
+	printf("cwd = %s\n", cwd);
+	free(cwd);
+	return EXIT_SUCCESS;
+}
+```
+
+さらに glibc には GNU 拡張として `get_current_dir_name()` もあります。
+
+```c
+#define _GNU_SOURCE
+#include <unistd.h>
+
+char *get_current_dir_name(void);
+```
+
+これは便利ですが GNU 拡張です。
+教材としては、まず `getcwd()` を理解しておく方が基本になります。
+
+古い資料では `getwd()` が出てくることがありますが、これは現在では使うべきではありません。
+固定長前提で危険があり、非推奨と考えてよいです。
+
+##### ７章の２の１の２　カレントディレクトリの移動
+
+カレントディレクトリを変更するには、次の API を使います。
+
+```c
+#include <unistd.h>
+
+int chdir(const char *path);
+int fchdir(int fd);
+```
+
+`chdir()` はパスで、`fchdir()` はディレクトリを指すファイルディスクリプタで cwd を変更します。
+
+成功時は 0、失敗時は -1 を返します。
+
+`chdir()` の代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	検索権限がない
+
+EFAULT:
+	ポインタが無効
+
+EIO:
+	内部I/Oエラー
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	対象ディレクトリが存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOTDIR:
+	途中または末尾がディレクトリではない
+```
+
+`fchdir()` では主に次を意識します。
+
+```text
+EACCES:
+	そのディレクトリへ移動する権限がない
+
+EBADF:
+	fd が無効、またはディレクトリではない
+```
+
+重要なのは、cwd の変更はそのプロセス自身にしか効かないという点です。
+そのため、シェルの `cd` は外部コマンドではなく、シェル自身が `chdir()` する内部コマンドとして実装されます。
+
+まずは `chdir()` の単純な例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	if (chdir("/tmp") == -1) {
+		perror("chdir");
+		return EXIT_FAILURE;
+	}
+
+	puts("changed cwd to /tmp");
+	return EXIT_SUCCESS;
+}
+```
+
+元のディレクトリへ戻したいなら、パス文字列を保存するより、ディレクトリを open して `fchdir()` で戻す方が堅実です。
+
+```c
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	int saved_cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
+	if (saved_cwd_fd == -1) {
+		perror("open");
+		return EXIT_FAILURE;
+	}
+
+	if (chdir("/tmp") == -1) {
+		perror("chdir");
+		close(saved_cwd_fd);
+		return EXIT_FAILURE;
+	}
+
+	/* /tmp で何か処理する */
+
+	if (fchdir(saved_cwd_fd) == -1) {
+		perror("fchdir");
+		close(saved_cwd_fd);
+		return EXIT_FAILURE;
+	}
+
+	if (close(saved_cwd_fd) == -1) {
+		perror("close");
+		return EXIT_FAILURE;
+	}
+
+	puts("restored original cwd");
+	return EXIT_SUCCESS;
+}
+```
+
+この方法は、途中でディレクトリ名が変わった場合にも比較的強い、という利点があります。
+
+デーモンでは `chdir("/")` しておく設計がよく使われます。
+一方、対話的なツールでは、ユーザのホームディレクトリや作業ディレクトリを基準にすることが多いです。
+
+#### ７章の２の２　ディレクトリの作成
+
+ディレクトリの新規作成には `mkdir()` を使います。
+
+```c
+#include <sys/stat.h>
+#include <sys/types.h>
+
+int mkdir(const char *path, mode_t mode);
+int mkdirat(int dirfd, const char *pathname, mode_t mode);
+```
+
+成功時は 0、失敗時は -1 を返します。
+`mode` はそのまま適用されるのではなく、現在の `umask` で制限されたうえで使われます。
+
+つまり、たとえば `0777` を指定しても、実際の結果は `umask` によって削られます。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	親ディレクトリへの書き込み権限または探索権限がない
+
+EEXIST:
+	同名のものが既に存在する
+
+EFAULT:
+	ポインタが無効
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	親ディレクトリが存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOSPC:
+	空き容量不足
+
+ENOTDIR:
+	途中要素にディレクトリでないものがある
+
+EPERM:
+	ファイルシステムやポリシー上、作成できない
+
+EROFS:
+	読み取り専用ファイルシステムである
+```
+
+単純な例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+int main(void)
+{
+	if (mkdir("./logs", 0755) == -1) {
+		perror("mkdir");
+		return EXIT_FAILURE;
+	}
+
+	puts("created ./logs");
+	return EXIT_SUCCESS;
+}
+```
+
+現代のLinuxでは、相対パスの基準を明示したい場面で `mkdirat()` が便利です。
+`openat()` 系と同じ流れで理解するとよいです。
+
+#### ７章の２の３　ディレクトリの削除
+
+空のディレクトリを削除するには `rmdir()` を使います。
+
+```c
+#include <unistd.h>
+
+int rmdir(const char *path);
+```
+
+成功時は 0、失敗時は -1 を返します。
+削除対象は空でなければなりません。
+
+`rm -r` のような再帰削除に対応する単一システムコールはありません。
+再帰削除は、アプリケーション側が下位要素を順にたどって消していく処理です。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	親ディレクトリへの書き込み権限または探索権限がない
+
+EBUSY:
+	マウントポイントなどで使用中
+
+EFAULT:
+	ポインタが無効
+
+EINVAL:
+	不正なパス
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	対象が存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOTDIR:
+	ディレクトリではない
+
+ENOTEMPTY:
+	空ではない
+
+EPERM:
+	sticky bit や権限の都合で削除できない
+
+EROFS:
+	読み取り専用ファイルシステムである
+```
+
+使用自体は単純です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	if (rmdir("./logs") == -1) {
+		perror("rmdir");
+		return EXIT_FAILURE;
+	}
+
+	puts("removed ./logs");
+	return EXIT_SUCCESS;
+}
+```
+
+#### ７章の２の４　ディレクトリの読み取り
+
+ディレクトリ下のエントリ一覧を読むには、POSIX の `DIR *` ベースの API を使います。
+これは `ls`、ファイルダイアログ、再帰処理、ファイル検索などの基礎になります。
+
+まず `opendir()` でディレクトリストリームを開きます。
+
+```c
+#include <dirent.h>
+#include <sys/types.h>
+
+DIR *opendir(const char *name);
+```
+
+`DIR *` は、内部でディレクトリ読み取り位置やバッファなどを保持するオブジェクトです。
+
+現在のPOSIXでは、対応するファイルディスクリプタを得る `dirfd()` も定義されています。
+
+```c
+#include <dirent.h>
+
+int dirfd(DIR *dir);
+```
+
+ただし、`dirfd()` で取り出した fd に対して、勝手にファイル位置を動かすような操作を混ぜるのは避けるべきです。
+`DIR *` の内部状態と食い違うおそれがあります。
+
+##### ７章の２の４の１　ディレクトリストリームからの読み取り
+
+エントリを1つずつ読むには `readdir()` を使います。
+
+```c
+#include <dirent.h>
+#include <sys/types.h>
+
+struct dirent *readdir(DIR *dir);
+```
+
+Linux では `struct dirent` に複数のメンバがありますが、移植性を考えるなら、まず `d_name` を中心に使うのが基本です。
+
+```c
+struct dirent {
+	ino_t          d_ino;
+	off_t          d_off;
+	unsigned short d_reclen;
+	unsigned char  d_type;
+	char           d_name[256];
+};
+```
+
+ただし、`d_type` は常に信頼できるとは限りません。
+ファイルシステムによっては `DT_UNKNOWN` になることがあります。
+そのため、型を厳密に知りたいなら `stat()` や `fstatat()` で確認する方が安全です。
+
+`readdir()` は、次のエントリが取れたときはそのポインタを返し、終端またはエラー時は `NULL` を返します。
+終端とエラーを区別したいなら、呼ぶ前に `errno = 0` にしておき、`NULL` が返ったあと `errno` を確認します。
+
+次の例は、指定ディレクトリ内に特定ファイル名があるか調べます。
+
+```c
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+int find_file_in_dir(const char *path, const char *file)
+{
+	DIR *dir;
+	struct dirent *entry;
+	int found = 0;
+
+	dir = opendir(path);
+	if (dir == NULL) {
+		perror("opendir");
+		return -1;
+	}
+
+	errno = 0;
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, file) == 0) {
+			found = 1;
+			break;
+		}
+	}
+
+	if (entry == NULL && errno != 0) {
+		perror("readdir");
+		closedir(dir);
+		return -1;
+	}
+
+	if (closedir(dir) == -1) {
+		perror("closedir");
+		return -1;
+	}
+
+	return found ? 0 : 1;
+}
+```
+
+##### ７章の２の４の２　ディレクトリストリームのクローズ
+
+`opendir()` で開いたディレクトリストリームは、`closedir()` で閉じます。
+
+```c
+#include <dirent.h>
+#include <sys/types.h>
+
+int closedir(DIR *dir);
+```
+
+成功時は 0、失敗時は -1 を返します。
+エラーとしては `EBADF` が代表的で、無効なディレクトリストリームを渡したことを表します。
+
+ファイルと同様、開いたら閉じる、という基本は変わりません。
+
+##### ７章の２の４の３　ディレクトリを読む低レベルの仕組み
+
+ユーザ空間の通常のアプリケーションでは、ディレクトリ読み取りに `opendir()` / `readdir()` / `closedir()` を使えば十分です。
+
+内部では Linux 固有の低レベル仕組みとして `getdents64` 系が使われています。
+古い資料では `getdents()` や `_syscall3()` マクロが出てくることがありますが、これをアプリケーションから直接使う前提で学ぶ必要はありません。
+
+重要なのは次の整理です。
+
+```text
+普段のアプリケーション:
+	Cライブラリの opendir()/readdir()/closedir() を使う
+
+Linux固有の低レベル実装:
+	getdents64 系が下で使われることがある
+
+結論:
+	直接 syscall を叩く理由がない限り、高水準APIを使う
+```
+
+移植性、保守性、安全性のどれを取っても、通常は高水準 API を使う方がよいです。
+
 
 
 
