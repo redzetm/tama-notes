@@ -4526,6 +4526,99 @@ UmuOSやUshの視点では、I/O多重化は将来的にかなり重要です。
 対話シェル、ジョブ制御、パイプ、疑似端末、複数プロセスとの通信を扱うとき、1つのfdで止まって全体が固まる設計は避けたいからです。
 最初はブロッキングI/Oで十分でも、Ushを本格的な対話シェルへ育てるなら、`poll()` や `epoll()` 的な待ち合わせ機構が必要になります。
 
+#### ２章の１１の１１　epoll() の入口
+
+`epoll()` は、現代Linuxで大量のfdを長く監視するときに重要な仕組みです。
+ただし、名前は `epoll()` でも、実際には 1 個の関数だけで完結するわけではありません。
+次の 3 段階で使います。
+
+```text
+1.	epoll_create1()
+    監視のための epoll インスタンスを作る
+
+2.	epoll_ctl()
+    監視したい fd を追加・変更・削除する
+
+3.	epoll_wait()
+    イベントが来るまで待ち、結果を受け取る
+```
+
+宣言の雰囲気は次のようになります。
+
+```c
+#include <sys/epoll.h>
+
+int epoll_create1(int flags);
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
+```
+
+`poll()` との一番大きな違いは、毎回「このfd配列を見てください」と渡すのではなく、
+先にカーネル側へ監視対象を登録しておくことです。
+
+```text
+poll()
+    待つたびに pollfd 配列を渡す
+
+epoll()
+    最初に監視対象を登録する
+    待つときは、発生したイベントだけ受け取る
+```
+
+最小の流れは次のようになります。
+
+```c
+#include <sys/epoll.h>
+#include <unistd.h>
+
+int epfd = epoll_create1(0);
+if (epfd == -1) {
+    /* エラー処理 */
+}
+
+struct epoll_event event;
+event.events = EPOLLIN;
+event.data.fd = STDIN_FILENO;
+
+if (epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &event) == -1) {
+    /* エラー処理 */
+}
+
+struct epoll_event ready[8];
+int count = epoll_wait(epfd, ready, 8, 5000);
+if (count > 0) {
+    /* ready[0] から ready[count - 1] に結果が入る */
+}
+
+close(epfd);
+```
+
+ここで重要なのは、`epoll_wait()` の戻り値は「イベントが発生した件数」であり、
+実際に何が起きたかは `ready[i].events` を見て判断することです。
+
+よく使うイベントは次のようなものです。
+
+```text
+EPOLLIN
+    読み込み可能
+
+EPOLLOUT
+    書き込み可能
+
+EPOLLERR
+    エラー発生
+
+EPOLLHUP
+    ハングアップ
+```
+
+なお、`epoll()` には level-triggered と edge-triggered というモード差があります。
+これは重要ですが、最初の段階では深入りしなくて大丈夫です。
+まずは「大量のfd監視を効率よく行うLinux専用機構」と押さえれば十分です。
+
+UmuOSやUshの観点では、`epoll()` の価値は、対話シェル、疑似端末、ソケット、パイプをまとめて待てることにあります。
+最初のUmuOSでは不要でも、将来「複数入力源を同時に扱う」段階へ進むなら、`poll()` の次に検討する代表候補になります。
+
 ### ２章の１２　カーネル内の動作
 
 ここまで、ユーザープログラムから見える `open()`、`read()`、`write()`、`close()`、`lseek()` などを見てきました。
