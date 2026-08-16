@@ -2145,6 +2145,527 @@ Linux には乱数取得用として `/dev/random` と `/dev/urandom` があり�
 
 もし乱数API自体を章の後半で使うなら、サンプルコードは `/dev/random` を直接読むより、`getrandom()` を中心にした方が現代的です。
 
+### ７章の６　ioctl()：帯域外通信
+
+Unix のファイルモデルは、`read()` と `write()` で多くの対象を統一的に扱えるのが強みです。
+しかし実際には、単なるデータの読み書きだけでは足りない場面があります。
+
+たとえば、端末サイズを知りたい、シリアルポートの設定を変えたい、デバイス固有の制御命令を送りたい、といった場面です。
+こうした「通常の読み書きとは別の制御」を行うための代表的な仕組みが `ioctl()` です。
+
+```c
+#include <sys/ioctl.h>
+
+int ioctl(int fd, unsigned long request, ...);
+```
+
+最低限必要なのは次の2つです。
+
+```text
+fd:
+	対象のファイルディスクリプタ
+
+request:
+	何を要求するかを表す定数
+```
+
+さらに多くの場合、3番目以降の追加引数を渡します。
+これは整数値だったり、構造体へのポインタだったりします。
+
+重要なのは、`ioctl()` は「どの fd に対して、どの request を投げるか」で意味が決まることです。
+つまり、`read()` や `write()` よりずっと対象依存です。
+
+```text
+通常ファイル:
+	ほとんど ioctl を使わないことが多い
+
+端末:
+	端末属性や画面サイズ取得などに使う
+
+デバイスノード:
+	そのドライバ固有の制御に使う
+```
+
+古い説明では CD-ROM のイジェクト例がよく出ます。
+考え方は今でも同じですが、最近の環境では光学ドライブが無いことも多いです。
+そのため、ここでは再現しやすい端末サイズ取得の例を先に示します。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+int main(void)
+{
+	struct winsize window_size;
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1) {
+		perror("ioctl");
+		return EXIT_FAILURE;
+	}
+
+	printf("rows=%u cols=%u\n",
+	       window_size.ws_row,
+	       window_size.ws_col);
+	return EXIT_SUCCESS;
+}
+```
+
+この例では、標準出力が接続されている端末に対して `TIOCGWINSZ` という要求を送り、行数と列数を取得しています。
+
+デバイスノードへの `ioctl()` という意味では、CD-ROM イジェクトのような例も歴史的には典型です。
+ただし、これはかなり対象依存で、環境に光学ドライブや対応デバイスがなければ再現できません。
+
+つまり、`ioctl()` を学ぶときは次のように考えると整理しやすいです。
+
+```text
+本質:
+	read/write では表現しにくい制御要求を送る仕組み
+
+注意点:
+	request は対象ごとに固有で移植性が低いことが多い
+
+実務:
+	man ページやヘッダを見て、そのfdに対して有効な request を使う
+```
+
+Linux では、端末制御、ブロックデバイス制御、ネットワーク関連、各種ドライバ固有制御で今でも広く使われています。
+一方で、対象によっては `fcntl()`、`sysfs`、`netlink`、専用システムコールなど、より整理された別APIが後から導入されていることもあります。
+
+### ７章の７　ファイルイベントの監視
+
+Linux では、ファイルやディレクトリに起きた変化を通知で受け取る仕組みとして `inotify` を使えます。
+ファイルが作られた、消えた、書き換えられた、移動された、といったイベントを監視できます。
+
+ポーリングで定期的にディレクトリを総なめする方法でも変化検出は可能ですが、無駄が多く、競合も起こしやすいです。
+`inotify` を使うと、カーネル側で起きたイベントを通知として受け取れます。
+
+```text
+ポーリング:
+	定期的に見に行く
+	無駄が出やすい
+
+inotify:
+	変化が起きたときに通知される
+	イベント駆動で扱える
+```
+
+ファイルマネージャ、バックアップツール、インデクサ、開発サーバ、ホットリロードなどで特に有用です。
+
+なお、Linux には `dnotify` や `fanotify` もありますが、通常のアプリケーションが「このファイルやディレクトリを監視したい」と考えるとき、まず `inotify` が基礎になります。
+
+`inotify` には制限もあります。
+たとえば、監視が再帰的ではないこと、すべてのメタデータ変化が期待どおり細かく取れるとは限らないこと、大量イベント時にはキューあふれが起きうること、などです。
+
+#### ７章の７の１　inotifyの初期化
+
+まず `inotify` インスタンスを作ります。
+
+```c
+#include <sys/inotify.h>
+
+int inotify_init(void);
+int inotify_init1(int flags);
+```
+
+古い資料では `inotify_init()` だけが出てきますが、現在は `inotify_init1()` もよく使われます。
+たとえば `IN_NONBLOCK` や `IN_CLOEXEC` を最初から付けられます。
+
+代表的なエラーは次の通りです。
+
+```text
+EMFILE:
+	プロセスごとの fd 上限や inotify 関連上限に達した
+
+ENFILE:
+	システム全体の fd 上限に達した
+
+ENOMEM:
+	必要メモリ不足
+```
+
+単純な初期化例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+int main(void)
+{
+	int inotify_fd = inotify_init1(IN_CLOEXEC);
+	if (inotify_fd == -1) {
+		perror("inotify_init1");
+		return EXIT_FAILURE;
+	}
+
+	if (close(inotify_fd) == -1) {
+		perror("close");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+#### ７章の７の２　inotifyウォッチ
+
+`inotify` 本体を初期化したら、次は何を監視するかを登録します。
+この監視対象がウォッチです。
+
+ウォッチにはウォッチディスクリプタとイベントマスクが対応します。
+
+```text
+ウォッチディスクリプタ:
+	登録済み監視対象を表す整数
+
+ウォッチマスク:
+	何のイベントを監視するかを表すビット集合
+```
+
+ファイルもディレクトリも監視できます。
+ただし、ディレクトリ監視は基本的に再帰ではありません。
+サブディレクトリの下まで自動で全部追うわけではないので注意が必要です。
+
+##### ７章の７の２の１　inotifyウォッチの追加
+
+ウォッチの追加には `inotify_add_watch()` を使います。
+
+```c
+#include <stdint.h>
+#include <sys/inotify.h>
+
+int inotify_add_watch(int fd, const char *path, uint32_t mask);
+```
+
+成功時はウォッチディスクリプタを返し、失敗時は -1 を返します。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	対象パスへの権限がない
+
+EBADF:
+	fd が有効な inotify インスタンスではない
+
+EFAULT:
+	ポインタが無効
+
+EINVAL:
+	mask が不正
+
+ENOMEM:
+	必要メモリ不足
+
+ENOSPC:
+	ユーザごとの watch 上限に達した
+```
+
+単純な追加例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+int main(void)
+{
+	int fd = inotify_init1(IN_CLOEXEC);
+	int wd;
+
+	if (fd == -1) {
+		perror("inotify_init1");
+		return EXIT_FAILURE;
+	}
+
+	wd = inotify_add_watch(fd, "/etc", IN_ACCESS | IN_MODIFY);
+	if (wd == -1) {
+		perror("inotify_add_watch");
+		close(fd);
+		return EXIT_FAILURE;
+	}
+
+	printf("watch descriptor = %d\n", wd);
+	close(fd);
+	return EXIT_SUCCESS;
+}
+```
+
+##### ７章の７の２の２　ウォッチマスク
+
+`mask` には、監視したいイベントをビット OR で組み合わせて指定します。
+
+```text
+IN_ACCESS:
+	読み取りが行われた
+
+IN_MODIFY:
+	内容が書き換えられた
+
+IN_ATTRIB:
+	メタデータが変わった
+
+IN_CLOSE_WRITE:
+	書き込み用で開かれていたものが閉じられた
+
+IN_CLOSE_NOWRITE:
+	書き込みなしで閉じられた
+
+IN_OPEN:
+	開かれた
+
+IN_MOVED_FROM:
+	監視ディレクトリから移動された
+
+IN_MOVED_TO:
+	監視ディレクトリへ移動された
+
+IN_CREATE:
+	新規作成された
+
+IN_DELETE:
+	削除された
+
+IN_DELETE_SELF:
+	監視対象自身が削除された
+
+IN_MOVE_SELF:
+	監視対象自身が移動された
+```
+
+まとめイベントもあります。
+
+```text
+IN_ALL_EVENTS:
+	代表的イベント一式
+
+IN_CLOSE:
+	close 関連イベントまとめ
+
+IN_MOVE:
+	move 関連イベントまとめ
+```
+
+#### ７章の７の３　inotifyイベント
+
+イベント通知は、`inotify` 用ファイルディスクリプタに対する `read()` で受け取ります。
+つまり、`inotify` は「通知用 fd を読む」モデルです。
+
+イベント構造は次の通りです。
+
+```c
+#include <sys/inotify.h>
+
+struct inotify_event {
+	int      wd;
+	uint32_t mask;
+	uint32_t cookie;
+	uint32_t len;
+	char     name[];
+};
+```
+
+各メンバの意味は次の通りです。
+
+```text
+wd:
+	どのウォッチで起きたか
+
+mask:
+	どんなイベントか
+
+cookie:
+	移動イベントどうしの対応付け用
+
+len:
+	name 領域の長さ
+
+name:
+	ディレクトリ監視時に、その配下で起きた対象名
+```
+
+`len` は文字列長そのものとは限りません。
+次のイベントへ進むときは `strlen()` ではなく `len` を使う必要があります。
+
+##### ７章の７の３の１　inotifyイベントの読み取り
+
+もっとも基本的な受信は、`read()` でバッファへまとめて読み、その中を順にたどる方法です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+enum { EVENT_BUFFER_SIZE = 4096 };
+
+int main(void)
+{
+	char buffer[EVENT_BUFFER_SIZE]
+		__attribute__((aligned(__alignof__(struct inotify_event))));
+	ssize_t length;
+	ssize_t offset = 0;
+	int fd;
+	int wd;
+
+	fd = inotify_init1(IN_CLOEXEC);
+	if (fd == -1) {
+		perror("inotify_init1");
+		return EXIT_FAILURE;
+	}
+
+	wd = inotify_add_watch(fd, ".", IN_CREATE | IN_DELETE | IN_MODIFY);
+	if (wd == -1) {
+		perror("inotify_add_watch");
+		close(fd);
+		return EXIT_FAILURE;
+	}
+
+	length = read(fd, buffer, sizeof(buffer));
+	if (length == -1) {
+		perror("read");
+		close(fd);
+		return EXIT_FAILURE;
+	}
+
+	while (offset < length) {
+		const struct inotify_event *event =
+			(const struct inotify_event *)&buffer[offset];
+
+		printf("wd=%d mask=0x%x cookie=%u len=%u\n",
+		       event->wd,
+		       event->mask,
+		       event->cookie,
+		       event->len);
+
+		if (event->len > 0U) {
+			printf("name=%s\n", event->name);
+		}
+
+		offset += (ssize_t)sizeof(struct inotify_event) + event->len;
+	}
+
+	close(fd);
+	return EXIT_SUCCESS;
+}
+```
+
+`inotify` の fd は普通の fd と同じように `select()`、`poll()`、`epoll()` で監視できます。
+そのため、ソケットやパイプと一緒に同じイベントループへ組み込めます。
+
+高度なイベントとしては次も重要です。
+
+```text
+IN_IGNORED:
+	watch が削除された
+
+IN_ISDIR:
+	イベント対象がディレクトリ
+
+IN_Q_OVERFLOW:
+	イベントキューがあふれた
+
+IN_UNMOUNT:
+	監視対象の背後デバイスがアンマウントされた
+```
+
+これらは通常、明示的に監視対象へ追加しなくても返ってきます。
+
+ここで重要なのは、`mask` を整数値として完全一致比較しないことです。
+複数ビットが同時に立つことがあるため、必ずビット演算で判定します。
+
+```c
+if (event->mask & IN_MODIFY) {
+	puts("modified");
+}
+
+if (event->mask & IN_Q_OVERFLOW) {
+	puts("queue overflow");
+}
+
+if (event->mask & IN_ISDIR) {
+	puts("target is directory");
+}
+```
+
+##### ７章の７の３の２　複数イベントの対応付け
+
+移動イベントは、しばしば 2 つの通知に分かれます。
+
+```text
+IN_MOVED_FROM:
+	元の場所から消えた
+
+IN_MOVED_TO:
+	新しい場所へ現れた
+```
+
+この 2 つを結び付けるのが `cookie` です。
+同じ移動に属する `IN_MOVED_FROM` と `IN_MOVED_TO` は、通常同じ `cookie` を持ちます。
+
+ただし、移動元か移動先のどちらかが監視対象外なら、片方しか見えないことがあります。
+そのため、常に完全なペアが来る前提で設計してはいけません。
+
+#### ７章の７の４　高度なウォッチオプション
+
+ウォッチマスクには、単なるイベント種別以外の制御フラグもあります。
+
+```text
+IN_DONT_FOLLOW:
+	シンボリックリンクをたどらない
+
+IN_MASK_ADD:
+	既存 watch の mask に追加する
+
+IN_ONESHOT:
+	最初のイベント後に自動削除する
+
+IN_ONLYDIR:
+	対象がディレクトリのときだけ watch を張る
+```
+
+次の例では、`/etc/init.d` がディレクトリであり、かつパス中にシンボリックリンクが含まれない場合だけ監視を追加します。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+int main(void)
+{
+	int fd = inotify_init1(IN_CLOEXEC);
+	int wd;
+
+	if (fd == -1) {
+		perror("inotify_init1");
+		return EXIT_FAILURE;
+	}
+
+	wd = inotify_add_watch(fd,
+			       "/etc/init.d",
+			       IN_MOVE_SELF |
+			       IN_ONLYDIR |
+			       IN_DONT_FOLLOW);
+	if (wd == -1) {
+		perror("inotify_add_watch");
+		close(fd);
+		return EXIT_FAILURE;
+	}
+
+	printf("watch descriptor = %d\n", wd);
+	close(fd);
+	return EXIT_SUCCESS;
+}
+```
+
+実務上の注意として、`inotify` は「便利だが万能ではない」ことを忘れない方がよいです。
+再帰監視、大量イベント、コンテナ境界、ネットワークファイルシステム、監視対象の置き換えなどでは、設計時に補助ロジックが必要になることがあります。
+
 
 
 
