@@ -1836,6 +1836,315 @@ int remove(const char *path);
 
 ただし、挙動の本質を理解するには、まず `unlink()` と `rmdir()` を別物として捉える方が分かりやすいです。
 
+### ７章の４　ファイルのコピーと移動
+
+日常的なファイル操作として最も基本的なのが、コピーと移動です。
+シェルでは普通 `cp` と `mv` を使いますが、内部で何をしているかはかなり違います。
+
+```text
+コピー:
+	内容を読み出して別の新規ファイルへ書き込む
+	結果は別 inode になる
+
+移動:
+	多くの場合は名前の付け替え
+	同一ファイルシステム内なら内容コピーは不要
+```
+
+つまり、コピーは「似た内容の別ファイルを作る」ことであり、ハードリンクのように実体を共有するわけではありません。
+そのため、コピー後は片方を書き換えても、もう片方には影響しません。
+
+一方、移動は多くの場合ディレクトリエントリの更新です。
+同じファイルシステム内なら、inode 自体はそのままで、名前や親ディレクトリだけが変わると考えると分かりやすいです。
+
+#### ７章の４の１　ファイルコピー
+
+Unix には、伝統的に「ファイル全体を丸ごとコピーする専用システムコール」はありません。
+そのため、`cp` などのツールは、基本的には次の流れを組み立てます。
+
+```text
+1. コピー元を open する
+2. コピー先を open または create する
+3. コピー元から読む
+4. コピー先へ書く
+5. 終端まで繰り返す
+6. 閉じる
+```
+
+ディレクトリコピーも、結局は各ディレクトリを作り、下のファイルを順に複写する再帰処理です。
+
+古い説明としてはこれで本質を押さえられますが、現在のLinuxには補足があります。
+現代の `cp` 実装は、状況に応じて `copy_file_range()`、`sendfile()`、`splice()`、あるいは CoW reflink などの最適化を使うことがあります。
+ただし、学習の基本としては「読む/書くの繰り返し」で理解して問題ありません。
+
+もっとも単純なコピーの例を示します。
+
+```c
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+enum { COPY_BUFFER_SIZE = 8192 };
+
+int main(int argc, char *argv[])
+{
+	char buffer[COPY_BUFFER_SIZE];
+	int src_fd;
+	int dst_fd;
+	ssize_t bytes_read;
+
+	if (argc != 3) {
+		fprintf(stderr, "usage: %s <src> <dst>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	src_fd = open(argv[1], O_RDONLY);
+	if (src_fd == -1) {
+		perror("open src");
+		return EXIT_FAILURE;
+	}
+
+	dst_fd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (dst_fd == -1) {
+		perror("open dst");
+		close(src_fd);
+		return EXIT_FAILURE;
+	}
+
+	while ((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
+		ssize_t total_written = 0;
+		while (total_written < bytes_read) {
+			ssize_t bytes_written = write(dst_fd,
+					      buffer + total_written,
+					      (size_t)(bytes_read - total_written));
+			if (bytes_written == -1) {
+				perror("write");
+				close(dst_fd);
+				close(src_fd);
+				return EXIT_FAILURE;
+			}
+			total_written += bytes_written;
+		}
+	}
+
+	if (bytes_read == -1) {
+		perror("read");
+		close(dst_fd);
+		close(src_fd);
+		return EXIT_FAILURE;
+	}
+
+	if (close(dst_fd) == -1) {
+		perror("close dst");
+		close(src_fd);
+		return EXIT_FAILURE;
+	}
+
+	if (close(src_fd) == -1) {
+		perror("close src");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+ここでは短い書き込み、つまり 1 回の `write()` で全部書けない場合にも対応しています。
+教材としては、この形を基本にしておく方が安全です。
+
+#### ７章の４の２　ファイル移動
+
+移動には `rename()` を使います。
+
+```c
+#include <stdio.h>
+
+int rename(const char *oldpath, const char *newpath);
+int renameat(int olddirfd, const char *oldpath,
+	     int newdirfd, const char *newpath);
+```
+
+同じファイルシステム内なら、`rename()` は本質的に名前の付け替えです。
+内容のコピーは発生せず、inode も変わりません。
+
+ただし、別ファイルシステムをまたぐ移動はできません。
+その場合 `rename()` は `EXDEV` で失敗し、`mv` などのツールは「コピーして元を消す」処理へ切り替えます。
+
+成功時は 0、失敗時は -1 を返します。
+失敗した場合、基本的には oldpath と newpath の状態を中途半端に壊さないよう扱われます。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	親ディレクトリへの権限や探索権限がない
+
+EBUSY:
+	マウントポイントなどで使用中
+
+EFAULT:
+	ポインタが無効
+
+EINVAL:
+	自分自身の下へ移動しようとするなど不正な指定
+
+EISDIR:
+	種類不一致で上書きできない
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+EMLINK:
+	リンク数上限などに達している
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	対象または親が存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOSPC:
+	必要な領域が不足
+
+ENOTDIR:
+	ディレクトリと非ディレクトリの不整合
+
+ENOTEMPTY:
+	対象ディレクトリが空でない
+
+EPERM:
+	sticky bit や権限の都合で許可されない
+
+EROFS:
+	読み取り専用ファイルシステム
+
+EXDEV:
+	別ファイルシステムをまたいでいる
+```
+
+単純な例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	if (rename("./draft.txt", "./final.txt") == -1) {
+		perror("rename");
+		return EXIT_FAILURE;
+	}
+
+	puts("renamed ./draft.txt to ./final.txt");
+	return EXIT_SUCCESS;
+}
+```
+
+現在のLinuxでは `renameat2()` もあり、`RENAME_NOREPLACE` や `RENAME_EXCHANGE` などのフラグを使えます。
+ただし、まずは `rename()` の「同一ファイルシステム内での原子的な名前変更」という性質を押さえる方が重要です。
+
+### ７章の５　デバイスノード
+
+デバイスノードは、ユーザ空間からデバイスドライバへアクセスするための特殊ファイルです。
+見た目はファイルパスですが、普通のファイルのようにディスク上の内容を読むとは限りません。
+
+アプリケーションがデバイスノードに対して `open()`、`read()`、`write()` などを行うと、カーネルは通常ファイルI/Oではなく、対応するデバイスドライバへ要求を渡します。
+
+```text
+通常ファイル:
+	ファイルシステム上の内容を読む/書く
+
+デバイスノード:
+	対応デバイスやドライバに処理を渡す
+```
+
+この仕組みによって、Unix系OSでは多くのデバイスを「ファイルのように扱う」統一的な設計が成り立っています。
+
+ただし、現代のLinuxでは、すべてのハードウェアが単純に `/dev/*` だけで完結するわけではありません。
+ネットワークはソケットや netlink、sysfs、ioctl、`/proc`、`/sys` など、複数のインタフェースと組み合わせて扱うことが多いです。
+
+デバイスノードには、どのドライバへ結び付けるかを示す番号が入っています。
+これがメジャー番号とマイナー番号です。
+
+```text
+メジャー番号:
+	どの種類のドライバか
+
+マイナー番号:
+	その中のどの個体・どの機能か
+```
+
+対応するドライバやデバイスが使えない場合、`open()` が `ENODEV` などで失敗することがあります。
+
+#### ７章の５の１　特殊なデバイスノード
+
+Linux には、学習や運用でよく使う特別なデバイスノードがあります。
+
+```text
+/dev/null:
+	書いたデータを捨てる
+	読むと EOF
+
+/dev/zero:
+	読むと 0x00 バイト列が続く
+	書き込みは通常無視される
+
+/dev/full:
+	読むと 0x00 バイト列が続く
+	書くと常に ENOSPC
+```
+
+`/dev/null` は不要な出力の捨て先として非常によく使われます。
+`/dev/zero` はゼロ初期化されたデータ源として使えますが、現在はメモリ確保や初期化の別手段も多く、昔ほど前面には出ません。
+`/dev/full` は「容量不足時の失敗」を試したいときに便利です。
+
+これらはアプリケーションの異常系テストでも役立ちます。
+たとえば「書き込み先が必ず失敗する状況」を作りたいなら `/dev/full` が使えます。
+
+#### ７章の５の２　乱数ジェネレータ
+
+Linux には乱数取得用として `/dev/random` と `/dev/urandom` があります。
+
+```text
+/dev/random:
+	条件によってはブロックすることがある
+
+/dev/urandom:
+	通常はこちらが使われる
+```
+
+古い資料では、「暗号用途では `/dev/random`、それ以外では `/dev/urandom`」のように強く分けて説明されることがあります。
+しかし、現在のLinuxではこの理解を少し更新した方がよいです。
+
+現在は、多くの用途で `/dev/urandom`、あるいはそれより直接的に `getrandom()` を使うのが一般的です。
+通常の暗号用途でも、起動直後の初期化が完了したシステムでは `/dev/urandom` や `getrandom()` で十分と考えられることが多いです。
+
+`/dev/random` を特別視しすぎると、必要以上にブロックしてアプリケーションが止まる原因になります。
+特にヘッドレス環境、組み込み環境、仮想環境ではその影響が見えやすいです。
+
+そのため、今の実務感覚では次の整理が分かりやすいです。
+
+```text
+推奨の第一候補:
+	getrandom()
+
+次点:
+	/dev/urandom
+
+/dev/random:
+	特殊な要件を理解したうえで使うもの
+```
+
+歴史的には `/dev/random` はエントロピー見積もりに応じてブロックし、`/dev/urandom` はブロックしないという違いが強調されてきました。
+この違い自体は理解しておいてよいですが、「高品質な乱数が欲しいなら常に `/dev/random`」と覚えるのは今では適切ではありません。
+
+もし乱数API自体を章の後半で使うなら、サンプルコードは `/dev/random` を直接読むより、`getrandom()` を中心にした方が現代的です。
+
 
 
 
