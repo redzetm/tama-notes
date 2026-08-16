@@ -1215,6 +1215,433 @@ select(0, NULL, NULL, NULL, &tv);
 イベント待機は、できる限りカーネルへ任せる方が効率も正確さもよくなります。
 ビジーウェイトに近いポーリングへ短いスリープを散りばめる設計は、だいたい後で苦しくなります。
 
+### １０章の８　タイマ
+
+タイマは「指定した時刻または指定した間隔に達したら通知してほしい」という要求を表す仕組みです。
+単なるスリープと違い、処理の停止そのものが目的ではなく、期限到達の通知が目的です。
+
+```text
+スリープ:
+	自分が一定時間休む
+
+タイマ:
+	一定時間後に通知を受ける
+```
+
+実際の用途はかなり多いです。
+
+```text
+周期処理:
+	1 秒間に 60 回画面を更新する
+
+タイムアウト:
+	500 ミリ秒以内に応答がなければ中止する
+
+監視:
+	一定時間ごとに状態確認する
+```
+
+Linux には複数のタイマ API がありますが、古いものほどシグナルに寄り、より新しいものほど柔軟で高機能です。
+
+#### １０章の８の１　単純なアラーム
+
+もっとも単純なのは `alarm()` です。
+
+```c
+#include <unistd.h>
+
+unsigned int alarm(unsigned int seconds);
+```
+
+これは、指定秒数後に `SIGALRM` を送る予約を 1 つだけ持てる、非常に単純なタイマです。
+
+```text
+seconds > 0:
+	その秒数後に SIGALRM を送る
+
+seconds == 0:
+	既存のアラームを取り消す
+```
+
+ただし、いまの観点では用途はかなり限定的です。
+
+```text
+弱点:
+	秒単位で粗い
+	通知が SIGALRM 固定
+	1 プロセスあたり 1 本の単純な予約しか扱いにくい
+```
+
+説明用の最小例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_fired = 0;
+
+static void alarm_handler(int signo)
+{
+	(void)signo;
+	g_fired = 1;
+}
+
+int main(void)
+{
+	if (signal(SIGALRM, alarm_handler) == SIG_ERR) {
+		fputs("signal failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	alarm(5);
+	while (!g_fired) {
+		pause();
+	}
+
+	puts("Five seconds passed");
+	return EXIT_SUCCESS;
+}
+```
+
+古いサンプルではハンドラ内で `printf()` を呼ぶことがありますが、前章の通り、今は避けた方が安全です。
+
+#### １０章の８の２　インターバルタイマ
+
+`alarm()` を拡張した古典的 API が `getitimer()` / `setitimer()` です。
+
+```c
+#include <sys/time.h>
+
+int getitimer(int which, struct itimerval *value);
+int setitimer(int which, const struct itimerval *value, struct itimerval *ovalue);
+```
+
+タイマ種別は次の 3 つです。
+
+```text
+ITIMER_REAL:
+	実時間ベース
+	満了で SIGALRM
+
+ITIMER_VIRTUAL:
+	ユーザ空間 CPU 時間ベース
+	満了で SIGVTALRM
+
+ITIMER_PROF:
+	ユーザ空間 + カーネル空間 CPU 時間ベース
+	満了で SIGPROF
+```
+
+設定値は `struct itimerval` で与えます。
+
+```c
+struct itimerval {
+	struct timeval it_interval;
+	struct timeval it_value;
+};
+```
+
+意味は次の通りです。
+
+```text
+it_value:
+	最初の満了までの残り時間
+
+it_interval:
+	満了後に自動再装填する周期
+```
+
+つまり、`it_interval` を 0 にすればワンショット、非 0 にすれば周期タイマになります。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_hits = 0;
+
+static void alarm_handler(int signo)
+{
+	(void)signo;
+	++g_hits;
+}
+
+int main(void)
+{
+	struct itimerval delay = {
+		.it_interval = { .tv_sec = 1, .tv_usec = 0 },
+		.it_value = { .tv_sec = 5, .tv_usec = 0 },
+	};
+
+	if (signal(SIGALRM, alarm_handler) == SIG_ERR) {
+		fputs("signal failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	if (setitimer(ITIMER_REAL, &delay, NULL) == -1) {
+		perror("setitimer");
+		return EXIT_FAILURE;
+	}
+
+	while (g_hits == 0) {
+		pause();
+	}
+
+	puts("Timer hit");
+	return EXIT_SUCCESS;
+}
+```
+
+ただし、これも通知がシグナル中心なので、イベントループ主体の新規コードでは第一選択にならないことが多いです。
+
+#### １０章の８の３　高度なタイマ
+
+POSIX timer API は、より柔軟なタイマ機構です。
+作成、設定、参照、削除が分離されています。
+
+```text
+timer_create():
+	タイマを作る
+
+timer_settime():
+	時間を設定して動かす
+
+timer_gettime():
+	現在値を読む
+
+timer_getoverrun():
+	超過回数を読む
+
+timer_delete():
+	削除する
+```
+
+##### １０章の８の３の１　タイマの作成
+
+```c
+#include <signal.h>
+#include <time.h>
+
+int timer_create(clockid_t clockid, struct sigevent *evp, timer_t *timerid);
+```
+
+これは、指定したクロックを使うタイマオブジェクトを作るだけで、まだ動きません。
+
+`evp` で通知方法を指定できます。
+
+```text
+SIGEV_NONE:
+	何も通知しない
+
+SIGEV_SIGNAL:
+	指定シグナルを送る
+
+SIGEV_THREAD:
+	ライブラリが新しいスレッドで関数を呼ぶ
+```
+
+ここで重要なのは、`SIGEV_THREAD` は「カーネルが直接スレッドを作る」単純像で理解しないことです。
+実際には libc 実装も関与するため、学習上は「タイマ満了時に関数コールバック風に処理できる高水準通知」と考える方が安全です。
+
+簡単な例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	timer_t timer;
+
+	if (timer_create(CLOCK_REALTIME, NULL, &timer) == -1) {
+		perror("timer_create");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+##### １０章の８の３の２　タイマの設定
+
+```c
+#include <time.h>
+
+int timer_settime(timer_t timerid,
+		      int flags,
+		      const struct itimerspec *value,
+		      struct itimerspec *ovalue);
+```
+
+設定構造は `struct itimerspec` です。
+
+```c
+struct itimerspec {
+	struct timespec it_interval;
+	struct timespec it_value;
+};
+```
+
+意味は `setitimer()` とほぼ同じですが、分解能は `timespec` なのでナノ秒単位です。
+
+```text
+it_value:
+	最初の満了までの時間
+
+it_interval:
+	周期再装填間隔
+```
+
+`flags` に `TIMER_ABSTIME` を渡すと、相対値ではなく絶対時刻として扱います。
+周期処理のドリフト抑制に有効です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+int main(void)
+{
+	timer_t timer;
+	struct itimerspec ts = {
+		.it_interval = { .tv_sec = 1, .tv_nsec = 0 },
+		.it_value = { .tv_sec = 1, .tv_nsec = 0 },
+	};
+
+	if (timer_create(CLOCK_REALTIME, NULL, &timer) == -1) {
+		perror("timer_create");
+		return EXIT_FAILURE;
+	}
+
+	if (timer_settime(timer, 0, &ts, NULL) == -1) {
+		perror("timer_settime");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+##### １０章の８の３の３　タイマ時間の参照
+
+```c
+#include <time.h>
+
+int timer_gettime(timer_t timerid, struct itimerspec *value);
+```
+
+これにより、タイマを再設定せずに残り時間や周期設定を読めます。
+
+```c
+struct itimerspec ts;
+
+if (timer_gettime(timer, &ts) == -1) {
+	perror("timer_gettime");
+}
+```
+
+##### １０章の８の３の４　タイマ超過の参照
+
+```c
+#include <time.h>
+
+int timer_getoverrun(timer_t timerid);
+```
+
+通知を処理しきれないうちに満了が重なった回数を調べられます。
+
+ただし、ここで重要なのは「すべての満了を完全に数え上げる高信頼キュー」と思い込まないことです。
+通知方法やシグナル配送の性質も絡むため、用途に応じた解釈が必要です。
+
+##### １０章の８の３の５　タイマの削除
+
+```c
+#include <time.h>
+
+int timer_delete(timer_t timerid);
+```
+
+使い終わったタイマは削除します。
+プロセス終了時にまとめて片付く場合もありますが、長寿命プロセスでは明示的に管理した方が分かりやすいです。
+
+#### １０章の８の４　今の Linux での見方
+
+本の時代背景では、シグナル通知型タイマがかなり前面に出ています。
+今でも API 自体は有効ですが、現代の Linux アプリケーションでは、イベントループと相性のよい `timerfd` を選ぶ場面も多いです。
+
+```text
+シグナル通知型タイマ:
+	既存の signal 設計に乗せやすい
+
+timerfd:
+	fd として epoll/select/poll に載せやすい
+	イベントループと相性がよい
+```
+
+つまり、現代的な設計では「タイマ満了をシグナルで受けるか、fd で受けるか」という選択肢があります。
+この章では POSIX / 古典 Unix の流れに沿ってシグナル系タイマを中心に学びつつ、実装時には `timerfd` も候補に入れる、という整理が実践的です。
+
+### １０章の９　UmuOSでどう考えるか
+
+UmuOS の観点では、この章の核は「時刻そのもの」よりも、「時間をどの基準で測り、どの単位で通知し、どの API で見せるか」です。
+
+特に重要なのは、次の 3 つを分離して考えることです。
+
+```text
+実時間:
+	人に見せる日付と時刻
+
+単調時間:
+	経過時間やタイムアウトの基準
+
+CPU 時間:
+	処理量や負荷の観測
+```
+
+この分離ができていないと、タイムアウトに壁時計を使ってしまったり、NTP 補正で周期処理がずれたり、プロファイル計測に不適切な時計を使ったりします。
+
+UmuOS を発展させるなら、最初から Linux ほど多機能である必要はありませんが、少なくとも段階的には次の順で実装すると理解しやすいです。
+
+```text
+第1段階:
+	tick カウンタまたは単純な単調時間
+	sleep 相当
+
+第2段階:
+	実時間の保持
+	ファイル時刻やログ時刻の管理
+
+第3段階:
+	タイマ割り込み
+	プロセスやタスクへの通知
+
+第4段階:
+	複数クロック
+	高分解能タイマ
+	絶対時刻タイマ
+```
+
+また、UmuOS のシェルやサーバや監視ツールを考えると、次の感覚が重要です。
+
+```text
+待つだけなら sleep ではなく待ち合わせ機構を使う
+
+周期処理は相対時間の繰り返しより絶対時刻基準で組む
+
+表示用の時刻と制御用の時刻を混同しない
+```
+
+この章を学ぶ意味は、時刻 API の名前を覚えることではありません。
+OS が時間をどうモデル化し、プログラムへどのように渡し、どこで誤差や競合が入り得るかを理解することにあります。
+
 
 
 
