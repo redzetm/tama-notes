@@ -714,6 +714,507 @@ int main(void)
 ただし実運用では、時刻を「ジャンプさせる」だけでなく、徐々に補正する仕組みも重要です。
 NTP 系ツールや `adjtime()` 系の考え方が関係してきますが、それは時刻管理をさらに深く扱う場面で考えれば十分です。
 
+### １０章の５　さまざまな時間表現
+
+Unix 系 OS と C ライブラリには、時間を次の形で相互変換する関数群があります。
+
+```text
+time_t:
+	epoch からの秒数
+
+struct tm:
+	人が読みやすい日付時刻の分解表現
+
+文字列:
+	画面表示やログ出力向けのテキスト表現
+```
+
+古い API も多く、今では `strftime()` を中心に考える方が扱いやすい場面が多いのですが、既存コードとの遭遇率が高いので一通り知っておく価値はあります。
+
+#### １０章の５の１　tm から文字列へ
+
+古典的には `asctime()` があります。
+
+```c
+#include <time.h>
+
+char *asctime(const struct tm *tm);
+char *asctime_r(const struct tm *tm, char *buf);
+```
+
+`asctime()` は `struct tm` を固定形式の ASCII 文字列へ変換します。
+ただし戻り値は内部静的領域を指すため、スレッドセーフではありません。
+
+`asctime_r()` は呼び出し側が用意したバッファへ書き込む版です。
+古い仕様では 26 バイト以上必要とされます。
+
+とはいえ、新規コードで積極的に `asctime()` / `asctime_r()` を使う理由はあまりありません。
+出力形式を制御しにくく、ロケールや可読性の面でも `strftime()` の方が普通は適しています。
+
+#### １０章の５の２　tm から time_t へ
+
+`struct tm` を epoch 秒へ戻すには `mktime()` を使います。
+
+```c
+#include <time.h>
+
+time_t mktime(struct tm *tm);
+```
+
+これは `tm` の内容を、ローカルタイムとして解釈して `time_t` へ変換します。
+また、各フィールドの正規化も行います。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	struct tm broken_down = {
+		.tm_year = 2026 - 1900,
+		.tm_mon = 8 - 1,
+		.tm_mday = 16,
+		.tm_hour = 12,
+		.tm_min = 34,
+		.tm_sec = 56,
+		.tm_isdst = -1,
+	};
+	time_t value;
+
+	value = mktime(&broken_down);
+	if (value == (time_t)-1) {
+		fputs("mktime failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	printf("epoch seconds: %lld\n", (long long)value);
+	return EXIT_SUCCESS;
+}
+```
+
+古い説明では「内部で `tzset()` を呼ぶ」といった実装寄りの話が出ますが、利用者として重要なのは、`mktime()` がローカルタイムの解釈に依存することです。
+
+#### １０章の５の３　time_t から文字列へ
+
+`time_t` を直接文字列化する古典的 API が `ctime()` です。
+
+```c
+#include <time.h>
+
+char *ctime(const time_t *timep);
+char *ctime_r(const time_t *timep, char *buf);
+```
+
+`ctime()` も内部静的領域を返すため、スレッドセーフではありません。
+また、返す文字列末尾に改行が含まれる点も癖があります。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	time_t now = time(NULL);
+
+	if (now == (time_t)-1) {
+		perror("time");
+		return EXIT_FAILURE;
+	}
+
+	printf("the time a mere line ago: %s", ctime(&now));
+	return EXIT_SUCCESS;
+}
+```
+
+ただし、今のコードなら多くの場合 `localtime_r()` と `strftime()` を組み合わせる方が安全で柔軟です。
+
+#### １０章の５の４　time_t から tm へ
+
+UTC へ分解するなら `gmtime()`、ローカルタイムへ分解するなら `localtime()` を使います。
+
+```c
+#include <time.h>
+
+struct tm *gmtime(const time_t *timep);
+struct tm *gmtime_r(const time_t *timep, struct tm *result);
+
+struct tm *localtime(const time_t *timep);
+struct tm *localtime_r(const time_t *timep, struct tm *result);
+```
+
+`gmtime()` と `localtime()` は静的領域を返すため、スレッドセーフではありません。
+新規コードでは、基本的に `_r` 版を優先してよいです。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	time_t now;
+	struct tm local_result;
+
+	now = time(NULL);
+	if (now == (time_t)-1) {
+		perror("time");
+		return EXIT_FAILURE;
+	}
+
+	if (localtime_r(&now, &local_result) == NULL) {
+		fputs("localtime_r failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	printf("year=%d month=%d mday=%d\n",
+	       local_result.tm_year + 1900,
+	       local_result.tm_mon + 1,
+	       local_result.tm_mday);
+	return EXIT_SUCCESS;
+}
+```
+
+`gmtime()` は UTC 固定で扱いたいログ処理やプロトコル処理で便利です。
+`localtime()` は人が読む日時表示に向いています。
+
+#### １０章の５の５　時間差の計算
+
+`time_t` 同士の差を秒で求めるには `difftime()` があります。
+
+```c
+#include <time.h>
+
+double difftime(time_t time1, time_t time0);
+```
+
+戻り値が `double` なのは、標準上 `time_t` の表現が単純整数に固定されていない歴史的事情もあるためです。
+Linux では多くの場合、単純な減算と見なして差し支えないことが多いですが、可搬性を意識するなら `difftime()` を使う方が筋が通ります。
+
+### １０章の６　システムの時計を合わせる
+
+実時間を急に大きく飛ばすと、時刻に依存するアプリケーションは混乱します。
+ビルドツール、キャッシュ、証明書検証、ログ解析、ジョブスケジューラなど、時刻順序に意味を持つ処理が壊れやすくなります。
+
+そのため、単純な時刻ジャンプではなく、徐々に補正する仕組みが重要になります。
+
+#### １０章の６の１　緩やかな補正
+
+古典的には `adjtime()` があります。
+
+```c
+#include <sys/time.h>
+
+int adjtime(const struct timeval *delta, struct timeval *olddelta);
+```
+
+これはシステム時計を即座に飛ばすのではなく、少し速く進めたり少し遅く進めたりして、徐々にずれを補正します。
+
+```text
+delta が正:
+	時計を少し速める
+
+delta が負:
+	時計を少し遅くする
+```
+
+重要なのは、負方向でも通常は時計を巻き戻すのではなく、進み方を遅くして追い付かせるという発想です。
+この性質により、`make` のような時刻依存ツールへの破壊的影響を少し抑えられます。
+
+ただし、これは通常アプリケーション向けというより、NTP 系や時刻同期系の仕組み向けです。
+一般アプリケーションが勝手に触るべきものではありません。
+
+#### １０章の６の２　より高度な補正
+
+Linux 固有には `adjtimex()` があります。
+
+```c
+#include <sys/timex.h>
+
+int adjtimex(struct timex *adj);
+```
+
+これは `adjtime()` よりはるかに多くのパラメータを扱えます。
+オフセット、周波数誤差、許容誤差、状態などを調整・参照できます。
+
+```text
+用途:
+	NTP 実装や時刻同期デーモン向け
+
+性質:
+	Linux 固有
+	通常アプリケーションには過剰
+```
+
+古い本では RFC 1305 との関連が前面に出ますが、学習上は「Linux が高機能な時計補正インタフェースを持っている」と理解すればまず十分です。
+日常的なシステムプログラミングでは、これを直接扱うより、既存の時刻同期サービスの存在を前提に設計する方が自然です。
+
+### １０章の７　スリープ
+
+指定時間だけ処理を止める方法はいくつもあります。
+ただし、今の Linux で新規コードを書くなら、基本は `nanosleep()` または `clock_nanosleep()` を考える方がよいです。
+
+#### １０章の７の１　秒単位のスリープ
+
+もっとも単純なのが `sleep()` です。
+
+```c
+#include <unistd.h>
+
+unsigned int sleep(unsigned int seconds);
+```
+
+指定秒数だけ眠りますが、シグナルで割り込まれることがあります。
+戻り値は「眠れなかった残り秒数」です。
+
+```c
+#include <unistd.h>
+
+int main(void)
+{
+	sleep(7);
+	return 0;
+}
+```
+
+厳密に指定秒数だけ眠りたいなら、残り秒数が 0 になるまで繰り返す方法があります。
+
+```c
+unsigned int remaining = 5;
+
+while ((remaining = sleep(remaining)) != 0) {
+	/* interrupted by signal, continue sleeping */
+}
+```
+
+ただし、秒単位は粒度が粗く、現代のプログラムでは用途がかなり限られます。
+
+#### １０章の７の２　マイクロ秒単位のスリープ
+
+古典的には `usleep()` があります。
+
+```c
+#include <unistd.h>
+
+int usleep(useconds_t usec);
+```
+
+しかし、これは今では第一選択ではありません。
+
+```text
+理由:
+	歴史的経緯で仕様の揺れがある
+	POSIX 的には古い立場
+	より明確な nanosleep() がある
+```
+
+そのため、新規コードでは `usleep()` を積極的に選ぶ理由はあまりありません。
+既存コードを読むために知っておく API という位置づけが妥当です。
+
+#### １０章の７の３　ナノ秒単位のスリープ
+
+現代の基本は `nanosleep()` です。
+
+```c
+#include <time.h>
+
+int nanosleep(const struct timespec *req, struct timespec *rem);
+```
+
+これにより、より細かい相対時間スリープができます。
+シグナルで割り込まれた場合、`rem` を使って残り時間を再試行できます。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	struct timespec req = {
+		.tv_sec = 0,
+		.tv_nsec = 200000,
+	};
+
+	if (nanosleep(&req, NULL) == -1) {
+		perror("nanosleep");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+割り込まれても最後まで眠る例です。
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	struct timespec req = {
+		.tv_sec = 0,
+		.tv_nsec = 1369,
+	};
+	struct timespec rem;
+
+	while (nanosleep(&req, &rem) == -1) {
+		if (errno != EINTR) {
+			perror("nanosleep");
+			return EXIT_FAILURE;
+		}
+
+		req = rem;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+#### １０章の７の４　高度なスリープ
+
+より実用的なのが `clock_nanosleep()` です。
+
+```c
+#include <time.h>
+
+int clock_nanosleep(clockid_t clock_id,
+			    int flags,
+			    const struct timespec *req,
+			    struct timespec *rem);
+```
+
+これが重要なのは、使用する時計を選べることと、絶対時刻指定のスリープができることです。
+
+```text
+相対スリープ:
+	今からどれだけ待つか
+
+絶対スリープ:
+	どの時点まで待つか
+```
+
+相対スリープでは、「現在時刻を読む」「目標時刻との差を計算する」「その差で眠る」の間に競合が入ります。
+絶対スリープなら目標時刻そのものを渡せるため、この種のずれを減らせます。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	struct timespec ts = {
+		.tv_sec = 1,
+		.tv_nsec = 500000000,
+	};
+
+	if (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL) != 0) {
+		perror("clock_nanosleep");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+絶対時刻まで眠る例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+int main(void)
+{
+	struct timespec deadline;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) == -1) {
+		perror("clock_gettime");
+		return EXIT_FAILURE;
+	}
+
+	deadline.tv_sec += 1;
+
+	if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL) != 0) {
+		perror("clock_nanosleep");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+なお、`clock_nanosleep()` は `nanosleep()` と違って、エラー時に `-1` ではなくエラー番号自体を返す実装仕様です。
+この点は古い説明で省略されがちなので注意が必要です。
+
+#### １０章の７の５　移植性のあるスリープ
+
+非常に古い移植コードでは、`select()` をスリープ代わりに使う流儀があります。
+
+```c
+#include <sys/select.h>
+
+int select(int nfds,
+	   fd_set *readfds,
+	   fd_set *writefds,
+	   fd_set *exceptfds,
+	   struct timeval *timeout);
+```
+
+ファイル記述子集合を全部 `NULL` にして、`timeout` だけ渡せば、一定時間待てます。
+
+```c
+struct timeval tv = {
+	.tv_sec = 0,
+	.tv_usec = 757,
+};
+
+select(0, NULL, NULL, NULL, &tv);
+```
+
+これは歴史的には有用でしたが、今の Linux 新規コードでスリープ目的だけに `select()` を使う理由はほぼありません。
+本当に待ちたいのが時間だけなら `nanosleep()` 系の方が明確です。
+
+#### １０章の７の６　時間の超過と設計上の注意
+
+どのスリープ API でも、指定時間ぴったりに再開するとは限りません。
+保証されるのは、多くの場合「少なくともそのくらいは眠る」ことです。
+
+長引く理由は次のようなものです。
+
+```text
+スケジューリング遅延:
+	起床可能になってもすぐ CPU をもらえない
+
+タイマ分解能:
+	要求時間が内部粒度より細かい
+
+システム負荷:
+	他の処理で起床が後ろへずれる
+```
+
+そのため、周期実行を組むときに「毎回相対時間で眠る」だけだと、ずれが蓄積しやすいです。
+一定周期を維持したいなら、`CLOCK_MONOTONIC` と `TIMER_ABSTIME` を組み合わせた絶対時刻スリープの方が安定します。
+
+また、設計論としては「スリープでごまかす」コードを増やしすぎないことが重要です。
+
+```text
+避けたい例:
+	while 文で状態を見ながら sleep を繰り返す
+
+望ましい例:
+	ファイル記述子、イベント通知、タイマ fd、シグナル、待ち合わせ API でブロックする
+```
+
+イベント待機は、できる限りカーネルへ任せる方が効率も正確さもよくなります。
+ビジーウェイトに近いポーリングへ短いスリープを散りばめる設計は、だいたい後で苦しくなります。
+
 
 
 
