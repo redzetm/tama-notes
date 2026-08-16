@@ -537,6 +537,345 @@ memcpy(&value, cursor, sizeof(value));
 
 もちろん、エンディアンやサイズ差の問題は別途考える必要がありますが、少なくともアラインメント違反は避けやすくなります。
 
+### ８章の３　データセグメントの管理
+
+Unix 系システムには、古くからデータセグメントを直接伸縮させるためのインタフェースがあります。
+ただし、現在の一般的なアプリケーションでこれを直接使う場面はほとんどありません。
+
+理由は単純で、`malloc()` 系の方がはるかに使いやすく、安全で、実装依存の詳細を隠してくれるからです。
+それでも、メモリ割り当ての下層で何が起きているかを理解するには、この古い層を知っておく価値があります。
+
+```c
+#include <unistd.h>
+
+int brk(void *addr);
+void *sbrk(intptr_t increment);
+```
+
+これらの名前は、ヒープとスタックが近い形で管理されていた古い Unix の歴史に由来します。
+ヒープが下から上へ、スタックが上から下へ伸び、その境界を break point と呼んでいました。
+
+現在の Linux でも、`brk()` / `sbrk()` は「プロセスのデータセグメント末尾を調整する」ための歴史的インタフェースとして残っています。
+
+```text
+brk():
+	データセグメント末尾を指定アドレスへ動かす
+
+sbrk():
+	現在位置から相対的に増減させる
+```
+
+`sbrk(0)` で現在の break point を確認する、という古典的な使い方もあります。
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void)
+{
+	printf("current break point = %p\n", sbrk(0));
+	return 0;
+}
+```
+
+ただし、これはあくまで観察用・学習用と考えた方がよいです。
+現代の Linux / glibc 環境では、`malloc()` が内部で `brk()` 領域だけを使うとは限らず、`mmap()` も組み合わせます。
+そのため、アプリケーション側が `sbrk()` を直接使って glibc の割り当て器と共存しようとすると、設計を壊しやすいです。
+
+結論としては次の通りです。
+
+```text
+学習用:
+	brk()/sbrk() を知っていてよい
+
+実用コード:
+	通常は使わない
+	malloc() 系と混ぜない
+```
+
+### ８章の４　無名メモリマッピング
+
+glibc のメモリ割り当ては、歴史的にはデータセグメントを強く利用してきました。
+しかし、現在の実装はそれだけではなく、大きな割り当てや状況に応じて `mmap()` も併用します。
+
+古い資料では、ヒープ管理アルゴリズムとして単純なバディシステムを中心に説明することがあります。
+考え方の導入としては悪くありませんが、現在の glibc はもっと複雑で、アリーナやキャッシュを含む洗練された割り当て戦略を使います。
+
+それでも、なぜ `mmap()` ベースの割り当てが必要になるのか、という点は重要です。
+
+```text
+大きな領域をヒープ上で扱うと:
+	断片化しやすい
+	返却しづらい場合がある
+
+独立した mmap 領域で扱うと:
+	不要時に切り離して返しやすい
+	他のヒープ領域へ影響しにくい
+```
+
+このため、大きなメモリ要求では、独立した無名メモリマッピングが使われることがあります。
+
+#### ８章の４の１　無名メモリマッピングの特徴
+
+無名メモリマッピングは、ファイルを伴わない `mmap()` です。
+ファイルの代わりに、カーネルがゼロ初期化されたページを提供します。
+
+主な長所は次の通りです。
+
+```text
+独立した領域として確保できる
+
+不要になれば munmap() で領域ごと返しやすい
+
+保護属性変更やアドバイスがしやすい
+
+ゼロ初期化済みページを効率よく得られる
+```
+
+一方で短所もあります。
+
+```text
+ページ単位での管理になる
+	小さい要求には無駄が出やすい
+
+毎回カーネルとのやり取りが発生しやすい
+	小粒な確保ではヒープより重いことがある
+```
+
+したがって、「すべて `mmap()` にすればよい」わけではありません。
+小さな確保は通常の割り当て器、大きな確保は `mmap()` 側、という使い分けに合理性があります。
+
+古い資料では「128KB を超えると mmap()」のような固定値が説明されることがあります。
+しかし、この閾値は glibc バージョンや実装方針で変わり得ます。
+値を前提にコード設計するのではなく、「大きい割り当てでは `mmap()` 由来になることがある」と理解する方が安全です。
+
+#### ８章の４の２　無名メモリマッピングの作成
+
+無名メモリマッピングは `mmap()` と `munmap()` で扱います。
+
+```c
+#include <sys/mman.h>
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+int munmap(void *addr, size_t length);
+```
+
+無名マッピングでは通常、次のように使います。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+
+int main(void)
+{
+	void *mapping = mmap(NULL,
+			    512 * 1024,
+			    PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS,
+			    -1,
+			    0);
+	if (mapping == MAP_FAILED) {
+		perror("mmap");
+		return EXIT_FAILURE;
+	}
+
+	if (munmap(mapping, 512 * 1024) == -1) {
+		perror("munmap");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+各引数の意味は次のように整理できます。
+
+```text
+addr:
+	通常は NULL を渡して配置場所をカーネルに任せる
+
+length:
+	必要サイズ
+
+prot:
+	通常は PROT_READ | PROT_WRITE
+
+flags:
+	MAP_ANONYMOUS | MAP_PRIVATE が基本
+
+fd と offset:
+	匿名マッピングでは実質無視される
+```
+
+無名マッピングの内容は、最初からゼロ初期化されたように見えます。
+これは、カーネルがゼロページや COW を活用して効率よく実現しているためです。
+
+そのため、巨大なゼロ初期化領域が必要な場面では、`malloc()` と `memset()` を組み合わせるより、状況によっては `mmap()` や `calloc()` の方が理にかなっています。
+
+#### ８章の４の３　/dev/zero のマッピング
+
+古い Unix 系では `MAP_ANONYMOUS` がない環境もあり、その代わりに `/dev/zero` を `mmap()` して同様の効果を得る方法が使われてきました。
+
+Linux でも歴史的にはこの方法が使われていました。
+現在でも互換性目的で理解しておく価値はありますが、新規コードでは通常 `MAP_ANONYMOUS` を使います。
+
+```c
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int main(void)
+{
+	int fd = open("/dev/zero", O_RDWR);
+	void *mapping;
+
+	if (fd == -1) {
+		perror("open");
+		return EXIT_FAILURE;
+	}
+
+	mapping = mmap(NULL,
+		       (size_t)sysconf(_SC_PAGESIZE),
+		       PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE,
+		       fd,
+		       0);
+	if (mapping == MAP_FAILED) {
+		perror("mmap");
+		close(fd);
+		return EXIT_FAILURE;
+	}
+
+	if (close(fd) == -1) {
+		perror("close");
+		munmap(mapping, (size_t)sysconf(_SC_PAGESIZE));
+		return EXIT_FAILURE;
+	}
+
+	if (munmap(mapping, (size_t)sysconf(_SC_PAGESIZE)) == -1) {
+		perror("munmap");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+この方法は追加の `open()` / `close()` が必要なので、`MAP_ANONYMOUS` より素直さでも性能でも劣ることが多いです。
+
+### ８章の５　高度なメモリ割り当て
+
+glibc には、内部割り当て器の挙動をある程度調整する仕組みがあります。
+歴史的によく知られているのが `mallopt()` です。
+
+```c
+#include <malloc.h>
+
+int mallopt(int param, int value);
+```
+
+古い資料では `M_MMAP_THRESHOLD`、`M_TRIM_THRESHOLD`、`M_TOP_PAD` などが一覧で紹介されます。
+考え方としては「ヒープと `mmap()` の使い分け」や「未使用領域をどれだけ抱えるか」を調整するものです。
+
+ただし、ここはかなり glibc 実装依存です。
+現在の glibc は昔より内部構造が複雑で、tcache なども入っています。
+そのため、古い本のパラメータ説明をそのまま性能チューニング指針として信じるのは危険です。
+
+学習上の位置づけとしては次のように考えるとよいです。
+
+```text
+mallopt():
+	glibc 固有の割り当て器チューニング入口
+
+利点:
+	挙動観察や実験に使える
+
+注意:
+	移植性が低い
+	glibc の版差の影響を受ける
+	実運用ではまず計測が先
+```
+
+例えば、しきい値を変える例は次のようになります。
+
+```c
+#include <malloc.h>
+#include <stdio.h>
+
+int main(void)
+{
+	if (mallopt(M_MMAP_THRESHOLD, 64 * 1024) == 0) {
+		fprintf(stderr, "mallopt failed\n");
+		return 1;
+	}
+
+	return 0;
+}
+```
+
+ただし、こうした調整は「とりあえず速そうだから」で入れるものではありません。
+ワークロードと計測結果をもとに、必要なときだけ検討すべきです。
+
+#### ８章の５の１　malloc_usable_size() と malloc_trim()
+
+glibc には、さらに内部寄りの補助関数もあります。
+
+```c
+#include <malloc.h>
+
+size_t malloc_usable_size(void *ptr);
+int malloc_trim(size_t pad);
+```
+
+`malloc_usable_size()` は、そのポインタに対して実際に確保されている利用可能サイズを返します。
+割り当て器の都合で、要求サイズより大きい領域が取られている場合があるためです。
+
+```c
+#include <malloc.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	char *buffer = malloc(21);
+	if (buffer == NULL) {
+		perror("malloc");
+		return EXIT_FAILURE;
+	}
+
+	printf("usable size = %zu\n", malloc_usable_size(buffer));
+	free(buffer);
+	return EXIT_SUCCESS;
+}
+```
+
+ただし、ここで返る「余ったサイズ」を前提に書き込む設計は推奨されません。
+プログラムが使ってよいサイズは、原則として自分が要求したサイズだけと考えるべきです。
+
+`malloc_trim()` は、返却可能な未使用ヒープ領域を可能な限りカーネルへ戻そうとします。
+
+```c
+#include <malloc.h>
+
+int malloc_trim(size_t pad);
+```
+
+`pad` バイトだけ余裕を残し、それ以外を返しにいくイメージです。
+ただし、これも glibc 内部の状態に大きく依存します。
+
+```text
+教育・観察用途:
+	有用
+
+本番コードの常用:
+	かなり慎重に考えるべき
+```
+
+移植性も低いため、一般的なアプリケーション設計では、これらへ依存しない方が扱いやすいです。
+
 
 
 
