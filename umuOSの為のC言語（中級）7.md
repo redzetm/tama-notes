@@ -565,7 +565,7 @@ int make_root_owner(int fd)
 たとえば、ラベル、補助的な識別情報、セキュリティ関連情報などをファイルに結び付けられます。
 SELinux のラベルや ACL 関連情報も、この仕組みに関連して扱われます。
 
-古い本では ext3 を前提に内部実装が説明されることがありますが、学習の主眼はそこではありません。
+古い本では ext3 を前提に内部実装が説明されることがありますが、研究の主眼はそこではありません。
 重要なのは、アプリケーション側からは「ファイルシステムごとの差をある程度隠した API で扱える」ことです。
 
 ただし、注意点もあります。
@@ -1875,7 +1875,7 @@ Unix には、伝統的に「ファイル全体を丸ごとコピーする専用
 
 古い説明としてはこれで本質を押さえられますが、現在のLinuxには補足があります。
 現代の `cp` 実装は、状況に応じて `copy_file_range()`、`sendfile()`、`splice()`、あるいは CoW reflink などの最適化を使うことがあります。
-ただし、学習の基本としては「読む/書くの繰り返し」で理解して問題ありません。
+ただし、研究の基本としては「読む/書くの繰り返し」で理解して問題ありません。
 
 もっとも単純なコピーの例を示します。
 
@@ -2083,7 +2083,7 @@ int main(void)
 
 #### ７章の５の１　特殊なデバイスノード
 
-Linux には、学習や運用でよく使う特別なデバイスノードがあります。
+Linux には、研究や運用でよく使う特別なデバイスノードがあります。
 
 ```text
 /dev/null:
@@ -2395,240 +2395,98 @@ int main(void)
 }
 ```
 
-##### ７章の７の２の２　ウォッチマスク
+#### ７章の７の５　inotifyウォッチの削除
 
-`mask` には、監視したいイベントをビット OR で組み合わせて指定します。
-
-```text
-IN_ACCESS:
-	読み取りが行われた
-
-IN_MODIFY:
-	内容が書き換えられた
-
-IN_ATTRIB:
-	メタデータが変わった
-
-IN_CLOSE_WRITE:
-	書き込み用で開かれていたものが閉じられた
-
-IN_CLOSE_NOWRITE:
-	書き込みなしで閉じられた
-
-IN_OPEN:
-	開かれた
-
-IN_MOVED_FROM:
-	監視ディレクトリから移動された
-
-IN_MOVED_TO:
-	監視ディレクトリへ移動された
-
-IN_CREATE:
-	新規作成された
-
-IN_DELETE:
-	削除された
-
-IN_DELETE_SELF:
-	監視対象自身が削除された
-
-IN_MOVE_SELF:
-	監視対象自身が移動された
-```
-
-まとめイベントもあります。
-
-```text
-IN_ALL_EVENTS:
-	代表的イベント一式
-
-IN_CLOSE:
-	close 関連イベントまとめ
-
-IN_MOVE:
-	move 関連イベントまとめ
-```
-
-#### ７章の７の３　inotifyイベント
-
-イベント通知は、`inotify` 用ファイルディスクリプタに対する `read()` で受け取ります。
-つまり、`inotify` は「通知用 fd を読む」モデルです。
-
-イベント構造は次の通りです。
+追加したウォッチは、明示的に削除することもできます。
 
 ```c
+#include <stdint.h>
 #include <sys/inotify.h>
 
-struct inotify_event {
-	int      wd;
-	uint32_t mask;
-	uint32_t cookie;
-	uint32_t len;
-	char     name[];
-};
+int inotify_rm_watch(int fd, int wd);
 ```
 
-各メンバの意味は次の通りです。
+成功時は 0、失敗時は -1 を返します。
+代表的なエラーは次の通りです。
 
 ```text
-wd:
-	どのウォッチで起きたか
+EBADF:
+	fd が無効な inotify インスタンスである
 
-mask:
-	どんなイベントか
-
-cookie:
-	移動イベントどうしの対応付け用
-
-len:
-	name 領域の長さ
-
-name:
-	ディレクトリ監視時に、その配下で起きた対象名
+EINVAL:
+	wd がその inotify インスタンスに対して無効である
 ```
 
-`len` は文字列長そのものとは限りません。
-次のイベントへ進むときは `strlen()` ではなく `len` を使う必要があります。
-
-##### ７章の７の３の１　inotifyイベントの読み取り
-
-もっとも基本的な受信は、`read()` でバッファへまとめて読み、その中を順にたどる方法です。
+単純な例です。
 
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/inotify.h>
-#include <unistd.h>
 
-enum { EVENT_BUFFER_SIZE = 4096 };
+int remove_watch(int fd, int wd)
+{
+	if (inotify_rm_watch(fd, wd) == -1) {
+		perror("inotify_rm_watch");
+		return -1;
+	}
+
+	return 0;
+}
+```
+
+ウォッチが削除されると、カーネルは `IN_IGNORED` イベントを生成します。
+これはアプリケーションが `inotify_rm_watch()` を明示的に呼んだ場合だけではありません。
+
+```text
+ユーザが明示的に watch を削除した
+
+監視対象が削除された
+
+アンマウントなどで監視継続できなくなった
+```
+
+このような場合でも、watch が消えたことを `IN_IGNORED` で受け取れます。
+そのため、監視対象と自前の管理テーブルを結び付けているプログラムでは、このイベントを契機に後始末を一元化できます。
+
+#### ７章の７の６　イベントキューサイズ
+
+`inotify` のファイルディスクリプタに対して `ioctl()` の `FIONREAD` を使うと、保留中イベントの総バイト数を取得できます。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <sys/ioctl.h>
 
 int main(void)
 {
-	char buffer[EVENT_BUFFER_SIZE]
-		__attribute__((aligned(__alignof__(struct inotify_event))));
-	ssize_t length;
-	ssize_t offset = 0;
-	int fd;
-	int wd;
+	unsigned int queue_size;
+	int fd = inotify_init1(IN_CLOEXEC);
 
-	fd = inotify_init1(IN_CLOEXEC);
 	if (fd == -1) {
 		perror("inotify_init1");
 		return EXIT_FAILURE;
 	}
 
-	wd = inotify_add_watch(fd, ".", IN_CREATE | IN_DELETE | IN_MODIFY);
-	if (wd == -1) {
-		perror("inotify_add_watch");
-		close(fd);
+	if (ioctl(fd, FIONREAD, &queue_size) == -1) {
+		perror("ioctl");
 		return EXIT_FAILURE;
 	}
 
-	length = read(fd, buffer, sizeof(buffer));
-	if (length == -1) {
-		perror("read");
-		close(fd);
-		return EXIT_FAILURE;
-	}
-
-	while (offset < length) {
-		const struct inotify_event *event =
-			(const struct inotify_event *)&buffer[offset];
-
-		printf("wd=%d mask=0x%x cookie=%u len=%u\n",
-		       event->wd,
-		       event->mask,
-		       event->cookie,
-		       event->len);
-
-		if (event->len > 0U) {
-			printf("name=%s\n", event->name);
-		}
-
-		offset += (ssize_t)sizeof(struct inotify_event) + event->len;
-	}
-
-	close(fd);
+	printf("%u bytes pending in queue\n", queue_size);
 	return EXIT_SUCCESS;
 }
 ```
 
-`inotify` の fd は普通の fd と同じように `select()`、`poll()`、`epoll()` で監視できます。
-そのため、ソケットやパイプと一緒に同じイベントループへ組み込めます。
+ここで得られるのはイベント数ではなく、読み取り可能な総バイト数です。
+つまり「次の `read()` でどれくらい回収できるか」の目安になります。
 
-高度なイベントとしては次も重要です。
+イベント数を正確に知りたいなら、実際に `read()` して `struct inotify_event` を順に数える必要があります。
 
-```text
-IN_IGNORED:
-	watch が削除された
+#### ７章の７の７　inotifyインスタンスの破棄
 
-IN_ISDIR:
-	イベント対象がディレクトリ
-
-IN_Q_OVERFLOW:
-	イベントキューがあふれた
-
-IN_UNMOUNT:
-	監視対象の背後デバイスがアンマウントされた
-```
-
-これらは通常、明示的に監視対象へ追加しなくても返ってきます。
-
-ここで重要なのは、`mask` を整数値として完全一致比較しないことです。
-複数ビットが同時に立つことがあるため、必ずビット演算で判定します。
-
-```c
-if (event->mask & IN_MODIFY) {
-	puts("modified");
-}
-
-if (event->mask & IN_Q_OVERFLOW) {
-	puts("queue overflow");
-}
-
-if (event->mask & IN_ISDIR) {
-	puts("target is directory");
-}
-```
-
-##### ７章の７の３の２　複数イベントの対応付け
-
-移動イベントは、しばしば 2 つの通知に分かれます。
-
-```text
-IN_MOVED_FROM:
-	元の場所から消えた
-
-IN_MOVED_TO:
-	新しい場所へ現れた
-```
-
-この 2 つを結び付けるのが `cookie` です。
-同じ移動に属する `IN_MOVED_FROM` と `IN_MOVED_TO` は、通常同じ `cookie` を持ちます。
-
-ただし、移動元か移動先のどちらかが監視対象外なら、片方しか見えないことがあります。
-そのため、常に完全なペアが来る前提で設計してはいけません。
-
-#### ７章の７の４　高度なウォッチオプション
-
-ウォッチマスクには、単なるイベント種別以外の制御フラグもあります。
-
-```text
-IN_DONT_FOLLOW:
-	シンボリックリンクをたどらない
-
-IN_MASK_ADD:
-	既存 watch の mask に追加する
-
-IN_ONESHOT:
-	最初のイベント後に自動削除する
-
-IN_ONLYDIR:
-	対象がディレクトリのときだけ watch を張る
-```
-
-次の例では、`/etc/init.d` がディレクトリであり、かつパス中にシンボリックリンクが含まれない場合だけ監視を追加します。
+`inotify` インスタンスは、普通のファイルディスクリプタと同様に `close()` で閉じます。
 
 ```c
 #include <stdio.h>
@@ -2639,32 +2497,89 @@ IN_ONLYDIR:
 int main(void)
 {
 	int fd = inotify_init1(IN_CLOEXEC);
-	int wd;
-
 	if (fd == -1) {
 		perror("inotify_init1");
 		return EXIT_FAILURE;
 	}
 
-	wd = inotify_add_watch(fd,
-			       "/etc/init.d",
-			       IN_MOVE_SELF |
-			       IN_ONLYDIR |
-			       IN_DONT_FOLLOW);
-	if (wd == -1) {
-		perror("inotify_add_watch");
-		close(fd);
+	if (close(fd) == -1) {
+		perror("close");
 		return EXIT_FAILURE;
 	}
 
-	printf("watch descriptor = %d\n", wd);
-	close(fd);
 	return EXIT_SUCCESS;
 }
 ```
 
-実務上の注意として、`inotify` は「便利だが万能ではない」ことを忘れない方がよいです。
-再帰監視、大量イベント、コンテナ境界、ネットワークファイルシステム、監視対象の置き換えなどでは、設計時に補助ロジックが必要になることがあります。
+インスタンスを閉じると、そのインスタンスに属していたウォッチもまとめて破棄されます。
+もちろん、プロセス終了時にはカーネルが自動的に後始末します。
+
+### ７章の８　UmuOSでどう考えるか
+
+この章は、一見すると Linux のファイル管理 API を並べているだけに見えるかもしれません。
+しかし、UmuOS の観点では、ここで扱った内容は「ファイルシステムの見た目」と「カーネル内部の管理構造」がどう結び付くかを学ぶ章です。
+
+特に重要なのは、ファイル名そのものが本体ではない、という感覚です。
+
+```text
+ファイル名:
+	人間やアプリケーションが使う入口
+
+inode やメタデータ:
+	カーネルが実体を管理する中心
+
+ディレクトリ:
+	名前と実体の対応表
+```
+
+この見方が定着すると、次のことが自然に理解しやすくなります。
+
+```text
+なぜハードリンクは同じ実体を共有できるのか
+
+なぜ unlink() は「削除」ではなく「名前を外す」と考えるべきなのか
+
+なぜ rename() が同一ファイルシステム内では強力なのか
+```
+
+UmuOS を発展させるとき、最初から Linux と同等の xattr、inotify、デバイスノード体系まで全部を実装する必要はありません。
+しかし、段階的に考えるなら優先順位は見えます。
+
+```text
+第1段階:
+	inode 的な実体管理
+	ディレクトリによる名前解決
+	基本メタデータ
+
+第2段階:
+	ハードリンク、シンボリックリンク
+	rename、unlink、mkdir、rmdir の整合した意味づけ
+
+第3段階:
+	デバイスノード
+	イベント通知
+	拡張属性のような付加メタデータ
+```
+
+特に `rename()`、`unlink()`、`link()` の関係は、自作OSでも非常に教材価値が高いです。
+これらを実装すると、「ファイルの実体」と「名前」と「オープン中の参照」が別々に管理されるべき理由が、かなりはっきり見えてきます。
+
+また、`inotify` のような仕組みは、将来的に UmuOS でシェル、ファイルマネージャ、ログ監視、ビルド補助などを育てる際のヒントになります。
+単なるポーリングではなく、「カーネルが変化を通知する」という発想は、OS全体の応答性と効率を大きく改善します。
+
+この章を UmuOS へ還元して言い換えるなら、次の問いが重要です。
+
+```text
+ファイル名はどこで管理するのか
+
+実体への参照数はどう数えるのか
+
+オープン中のファイルをどう生かし続けるのか
+
+ディレクトリ変更や名前変更を、どこまで原子的に扱うのか
+```
+
+この問いに答えられるようになると、UmuOS のファイルシステムは「ただ読み書きできる」段階から、「複数プロセスが安全に共有できる」段階へ進めるはずです。
 
 
 
