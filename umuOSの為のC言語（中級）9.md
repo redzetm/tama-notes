@@ -834,7 +834,7 @@ sigandset():
 ```
 
 ライブラリ依存を増やしたくない場合は、標準 API だけで十分なことが多いです。
-特に学習段階では、まず `sigemptyset()`、`sigaddset()`、`sigprocmask()`、`sigsuspend()` の連携を確実に理解する方が重要です。
+特に研究段階では、まず `sigemptyset()`、`sigaddset()`、`sigprocmask()`、`sigsuspend()` の連携を確実に理解する方が重要です。
 
 ここまでがシグナル処理の最初の入口です。
 次に進むと、`signal()` より実用的な `sigaction()`、シグナルマスク、保留シグナル、同期的待機といった、実務で本当に使う論点が出てきます。
