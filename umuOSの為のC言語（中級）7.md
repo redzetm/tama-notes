@@ -409,6 +409,524 @@ int main(void)
 現代のLinuxでは、`openat()` や `fstatat()` と同様に、ディレクトリ基準を明示して race を減らす設計が重要になることがあります。
 その流れの中で `fchmodat()` も理解すると、より実践的です。
 
+#### ７章の１の３　ファイルオーナ
+
+ファイルの所有者と所有グループは、`struct stat` の `st_uid` と `st_gid` で確認できます。
+これらを変更する API として、Linux では次のものを使います。
+
+```c
+#include <sys/types.h>
+#include <unistd.h>
+
+int chown(const char *path, uid_t owner, gid_t group);
+int lchown(const char *path, uid_t owner, gid_t group);
+int fchown(int fd, uid_t owner, gid_t group);
+int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags);
+```
+
+基本的な違いは、対象をどう指定し、シンボリックリンクをどう扱うかです。
+
+```text
+chown():
+	パスで指定し、通常はシンボリックリンクをたどる
+
+lchown():
+	パスで指定し、シンボリックリンク自身を対象にする
+
+fchown():
+	ファイルディスクリプタで指定する
+
+fchownat():
+	dirfd 基準やフラグ付きで扱える拡張版
+```
+
+`owner` または `group` に「変更しない」ことを表す特別値を渡すと、その項目だけ据え置けます。
+古い本では `-1` をそのまま書いていますが、教材としては「未変更を意味する特別値」と理解しておく方が安全です。
+
+権限の考え方は、現在のLinuxでも概ね次の通りです。
+
+```text
+所有者の変更:
+	通常は強い権限が必要
+	多くの場合 root 相当、または CAP_CHOWN が必要
+
+グループの変更:
+	ファイル所有者が、自分の所属グループへ変更できる場合がある
+	それ以外は通常は強い権限が必要
+```
+
+処理が成功すると 0、失敗すると -1 を返して `errno` を設定します。
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	パス探索権限がない
+
+EBADF:
+	fchown() の fd が無効
+
+EFAULT:
+	ポインタが無効
+
+EIO:
+	ファイルシステム側のI/Oエラー
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	対象が存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOTDIR:
+	パス途中にディレクトリでない要素がある
+
+EPERM:
+	指定した所有者やグループへ変更する権限がない
+
+EROFS:
+	読み取り専用ファイルシステムで変更しようとした
+```
+
+次の例は、`manifest.txt` の所有グループを `officers` に変更します。
+
+```c
+#include <errno.h>
+#include <grp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int main(void)
+{
+	struct group *group_entry = getgrnam("officers");
+	if (group_entry == NULL) {
+		if (errno != 0) {
+			perror("getgrnam");
+		} else {
+			fprintf(stderr, "group not found: officers\n");
+		}
+		return EXIT_FAILURE;
+	}
+
+	if (chown("./manifest.txt", (uid_t)-1, group_entry->gr_gid) == -1) {
+		perror("chown");
+		return EXIT_FAILURE;
+	}
+
+	puts("updated group of ./manifest.txt");
+	return EXIT_SUCCESS;
+}
+```
+
+ここでは所有者は変えず、グループだけを変更しています。
+そのため、第2引数には「所有者を変更しない」値を渡しています。
+
+次の例は、開いているファイルディスクリプタに対して `fchown()` を使う形です。
+
+```c
+#include <stdio.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int make_root_owner(int fd)
+{
+	if (fchown(fd, 0, 0) == -1) {
+		perror("fchown");
+		return -1;
+	}
+
+	return 0;
+}
+```
+
+ただし、これは通常ユーザが気軽に使える処理ではありません。
+現実には root 権限や `CAP_CHOWN` が必要になる場面がほとんどです。
+
+#### ７章の１の４　拡張属性
+
+ファイルには、通常のメタデータとは別に拡張属性、つまり xattr を付けられることがあります。
+これは「キーと値」の組で追加情報を持たせる仕組みです。
+
+```text
+通常のメタデータ:
+	サイズ、所有者、パーミション、時刻など
+
+拡張属性:
+	アプリケーションやセキュリティ機構が独自に持たせる追加情報
+```
+
+たとえば、ラベル、補助的な識別情報、セキュリティ関連情報などをファイルに結び付けられます。
+SELinux のラベルや ACL 関連情報も、この仕組みに関連して扱われます。
+
+古い本では ext3 を前提に内部実装が説明されることがありますが、学習の主眼はそこではありません。
+重要なのは、アプリケーション側からは「ファイルシステムごとの差をある程度隠した API で扱える」ことです。
+
+ただし、注意点もあります。
+
+```text
+xattr のAPIは Linux や各Unix系で使われているが、POSIX本体の標準APIではない
+
+ファイルシステムによって対応状況や上限が異なる
+
+すべてのファイル種別・名前空間で自由に使えるわけではない
+```
+
+つまり、使い方の抽象化はされていても、完全にどこでも同じとは限りません。
+
+##### ７章の１の４の１　キーと値
+
+拡張属性は、完全修飾名のキーと、それに対応する値で表されます。
+
+```text
+例:
+	user.mime_type
+	user.checksum
+	security.selinux
+```
+
+キーは一般に `namespace.name` という形を取ります。
+値は単なる文字列に限らず、任意のバイト列です。
+そのため、NULL 終端文字列である保証はなく、読み書きでは常にサイズを意識する必要があります。
+
+ここで重要なのは、次の2つが別物だという点です。
+
+```text
+キーが存在しない
+
+キーは存在するが、値が空である
+```
+
+後者は「長さ 0 の値を持つ定義済み属性」です。
+削除とは意味が異なります。
+
+Linux では、キー数や値サイズの理論上の説明よりも、実際にはファイルシステムごとの制約が効きます。
+ext4、XFS、btrfs などで挙動や上限感は異なるため、大量データの保存場所として安易に使うものではありません。
+通常は短いメタ情報を付ける用途に向いています。
+
+##### ７章の１の４の２　拡張属性の名前空間
+
+Linux では、拡張属性に名前空間という区切りがあります。
+これは単なる名前の分類ではなく、アクセス制御にも関わります。
+
+```text
+system:
+	ACL など、カーネルや周辺機能の実装で使われることがある
+
+security:
+	SELinux などのセキュリティ関連で使われる
+
+trusted:
+	強い権限を持つプロセス向け
+
+user:
+	一般アプリケーションが通常使う名前空間
+```
+
+ユーザ空間のアプリケーションが独自情報を付けるなら、まず `user.*` を使うと考えてよいです。
+ただし、シンボリックリンクなどでは `user` 名前空間を期待どおり使えないことがあります。
+
+##### ７章の１の４の３　拡張属性の操作
+
+拡張属性で行う基本操作は次の4つです。
+
+```text
+値を読む
+
+値を設定する
+
+キー一覧を得る
+
+キーを削除する
+```
+
+Linux では、それぞれに「パスをたどる版」「シンボリックリンク自身を扱う l 版」「ファイルディスクリプタで扱う f 版」があります。
+
+拡張属性 API のヘッダは、現在のLinuxでは次の形で使うのが一般的です。
+
+```c
+#include <sys/xattr.h>
+```
+
+古い資料やディストリビューションでは `attr/xattr.h` が出てくることがありますが、今はまず `sys/xattr.h` を押さえる方が実践的です。
+
+###### ７章の１の４の３の１　拡張属性の参照
+
+値の読み取りには次を使います。
+
+```c
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+ssize_t getxattr(const char *path, const char *key, void *value, size_t size);
+ssize_t lgetxattr(const char *path, const char *key, void *value, size_t size);
+ssize_t fgetxattr(int fd, const char *key, void *value, size_t size);
+```
+
+成功時の戻り値は、実際の値のサイズです。
+`size` に 0 を渡せば、値そのものは受け取らず、必要サイズだけを調べられます。
+この2段階取得は xattr では基本パターンです。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES, EBADF, EFAULT, ELOOP, ENAMETOOLONG, ENOENT, ENOMEM, ENOTDIR:
+	通常のパス解決やメモリエラー
+
+ENODATA:
+	指定した属性が存在しない
+	古い資料では ENOATTR と書かれることがある
+
+ENOTSUP または EOPNOTSUPP:
+	ファイルシステムが拡張属性に対応していない
+
+ERANGE:
+	バッファが小さすぎる
+```
+
+`ENOATTR` は環境によっては別名として見えることがありますが、Linux では `ENODATA` と説明されることが多いです。
+
+次の例は `user.mime_type` を読む最小例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int main(int argc, char *argv[])
+{
+	ssize_t size;
+	char *value;
+
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <file>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	size = getxattr(argv[1], "user.mime_type", NULL, 0);
+	if (size == -1) {
+		perror("getxattr(size)");
+		return EXIT_FAILURE;
+	}
+
+	value = malloc((size_t)size + 1U);
+	if (value == NULL) {
+		perror("malloc");
+		return EXIT_FAILURE;
+	}
+
+	if (getxattr(argv[1], "user.mime_type", value, (size_t)size) == -1) {
+		perror("getxattr(value)");
+		free(value);
+		return EXIT_FAILURE;
+	}
+
+	value[size] = '\0';
+	printf("user.mime_type=%s\n", value);
+	free(value);
+	return EXIT_SUCCESS;
+}
+```
+
+なお、値は本来バイナリかもしれません。
+ここでは「文字列で入っている」と分かっている属性を読む例として終端文字を足しています。
+
+###### ７章の１の４の３の２　拡張属性の設定
+
+値の設定には次を使います。
+
+```c
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int setxattr(const char *path, const char *key,
+	     const void *value, size_t size, int flags);
+int lsetxattr(const char *path, const char *key,
+	      const void *value, size_t size, int flags);
+int fsetxattr(int fd, const char *key,
+	      const void *value, size_t size, int flags);
+```
+
+`flags` によって、作成のみ許すか、既存値の置換だけ許すかを制御できます。
+
+```text
+0:
+	作成も更新も許す
+
+XATTR_CREATE:
+	新規作成のみ許す
+
+XATTR_REPLACE:
+	既存値の置換のみ許す
+```
+
+代表的なエラーは、読み取り側に加えて次のものがあります。
+
+```text
+EEXIST:
+	XATTR_CREATE を指定したが既に存在する
+
+EINVAL:
+	flags が不正
+
+ENOSPC:
+	保存領域不足
+
+EDQUOT:
+	クォータ制限に達した
+```
+
+次の例は `user.mime_type` を設定します。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int main(int argc, char *argv[])
+{
+	const char *mime_type = "text/plain";
+
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <file>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	if (setxattr(argv[1],
+		     "user.mime_type",
+		     mime_type,
+		     strlen(mime_type),
+		     0) == -1) {
+		perror("setxattr");
+		return EXIT_FAILURE;
+	}
+
+	puts("updated user.mime_type");
+	return EXIT_SUCCESS;
+}
+```
+
+###### ７章の１の４の３の３　拡張属性の一覧
+
+キー一覧を得るには次を使います。
+
+```c
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+ssize_t listxattr(const char *path, char *list, size_t size);
+ssize_t llistxattr(const char *path, char *list, size_t size);
+ssize_t flistxattr(int fd, char *list, size_t size);
+```
+
+返ってくるデータは、NULL 終端文字列が連続した塊です。
+
+```text
+user.mime_type\0user.checksum\0security.selinux\0
+```
+
+そのため、1個ずつは通常のC文字列として読めますが、全体の終端は戻り値の総サイズで判断する必要があります。
+
+次の例は一覧を表示します。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int main(int argc, char *argv[])
+{
+	char *list;
+	char *cursor;
+	ssize_t size;
+
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <file>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	size = listxattr(argv[1], NULL, 0);
+	if (size == -1) {
+		perror("listxattr(size)");
+		return EXIT_FAILURE;
+	}
+
+	list = malloc((size_t)size);
+	if (list == NULL) {
+		perror("malloc");
+		return EXIT_FAILURE;
+	}
+
+	if (listxattr(argv[1], list, (size_t)size) == -1) {
+		perror("listxattr(value)");
+		free(list);
+		return EXIT_FAILURE;
+	}
+
+	for (cursor = list; cursor < list + size; cursor += strlen(cursor) + 1U) {
+		puts(cursor);
+	}
+
+	free(list);
+	return EXIT_SUCCESS;
+}
+```
+
+###### ７章の１の４の３の４　拡張属性の削除
+
+最後に、キーを削除する API です。
+
+```c
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int removexattr(const char *path, const char *key);
+int lremovexattr(const char *path, const char *key);
+int fremovexattr(int fd, const char *key);
+```
+
+これは「空文字列を設定する」のとは違い、属性そのものを未定義に戻します。
+
+代表的なエラーは読み取りや設定とほぼ同様で、属性が存在しないときは `ENODATA` が返ることがあります。
+
+短い例を載せます。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+int main(int argc, char *argv[])
+{
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <file>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	if (removexattr(argv[1], "user.mime_type") == -1) {
+		perror("removexattr");
+		return EXIT_FAILURE;
+	}
+
+	puts("removed user.mime_type");
+	return EXIT_SUCCESS;
+}
+```
+
+拡張属性は便利ですが、ファイルシステム移動やアーカイブ方法によっては失われることがあります。
+そのため、重要な永続データを xattr だけに頼る設計は慎重に考えるべきです。
+
 
 
 
