@@ -839,5 +839,445 @@ sigandset():
 ここまでがシグナル処理の最初の入口です。
 次に進むと、`signal()` より実用的な `sigaction()`、シグナルマスク、保留シグナル、同期的待機といった、実務で本当に使う論点が出てきます。
 
+### ９章の６　シグナルのブロック
+
+シグナルハンドラと通常処理が同じデータを触る場合や、途中で割り込まれると困る処理区間がある場合は、シグナルを一時的にブロックします。
+この保護対象の区間が、いわゆるクリティカルセクションです。
+
+重要なのは、ブロックされたシグナルは消えるのではなく、配送が保留されるという点です。
+ブロックを解除したあとで、配送可能になれば改めて処理されます。
+
+Linux と POSIX の実務では、ここは「プロセスのシグナルマスク」というより、正確には各スレッドのシグナルマスクとして理解する方が安全です。
+シングルスレッドならほぼ同じに見えますが、マルチスレッドでは `sigprocmask()` より `pthread_sigmask()` を使うのが一般的です。
+
+```c
+#include <signal.h>
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+```
+
+`how` には次のいずれかを渡します。
+
+```text
+SIG_SETMASK:
+	現在のシグナルマスクを set に置き換える
+
+SIG_BLOCK:
+	set に含まれるシグナルを追加でブロックする
+
+SIG_UNBLOCK:
+	set に含まれるシグナルのブロックを解除する
+```
+
+`oldset` が `NULL` でなければ、変更前のマスクを受け取れます。
+また `set == NULL` なら、通常は現在マスクの取得用途として使えます。
+
+`SIGKILL` と `SIGSTOP` はブロックできません。
+マスクへ追加しようとしても無視され、通常はエラーにもなりません。
+
+基本例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	sigset_t block_set;
+
+	if (sigemptyset(&block_set) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaddset(&block_set, SIGINT) == -1) {
+		perror("sigaddset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigprocmask(SIG_BLOCK, &block_set, NULL) == -1) {
+		perror("sigprocmask");
+		return EXIT_FAILURE;
+	}
+
+	puts("SIGINT is temporarily blocked");
+
+	if (sigprocmask(SIG_UNBLOCK, &block_set, NULL) == -1) {
+		perror("sigprocmask");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+#### ９章の６の１　保留中のシグナルの参照
+
+ブロック中に発生したシグナルは pending 状態になります。
+これを参照するのが `sigpending()` です。
+
+```c
+#include <signal.h>
+
+int sigpending(sigset_t *set);
+```
+
+たとえば `SIGINT` をブロック中に Ctrl-C を押した場合、その場ではハンドラは動かず、pending 集合へ入ります。
+後でブロック解除すれば配送されます。
+
+注意点として、通常シグナルは同種のものが複数回届いても 1 個に畳み込まれることがあります。
+つまり pending 集合を見ても「何回来たか」は分かりません。
+
+#### ９章の６の２　指定したシグナルを待つ
+
+ブロック解除と待機を安全に組み合わせたいときは `sigsuspend()` を使います。
+
+```c
+#include <signal.h>
+
+int sigsuspend(const sigset_t *set);
+```
+
+これは、一時的に指定マスクへ切り替えてシグナルを待ち、ハンドラ実行後に `-1` と `EINTR` で戻る、という動作です。
+
+`pause()` との違いは、マスク切替と待機を原子的に扱える点です。
+これが非常に重要で、競合を避けるための定番パターンになります。
+
+```c
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static volatile sig_atomic_t g_got_usr1 = 0;
+
+static void usr1_handler(int signo)
+{
+	(void)signo;
+	g_got_usr1 = 1;
+}
+
+int main(void)
+{
+	sigset_t block_set;
+	sigset_t old_set;
+
+	if (signal(SIGUSR1, usr1_handler) == SIG_ERR) {
+		fputs("signal failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	if (sigemptyset(&block_set) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaddset(&block_set, SIGUSR1) == -1) {
+		perror("sigaddset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigprocmask(SIG_BLOCK, &block_set, &old_set) == -1) {
+		perror("sigprocmask");
+		return EXIT_FAILURE;
+	}
+
+	while (!g_got_usr1) {
+		sigsuspend(&old_set);
+	}
+
+	if (sigprocmask(SIG_SETMASK, &old_set, NULL) == -1) {
+		perror("sigprocmask");
+		return EXIT_FAILURE;
+	}
+
+	puts("SIGUSR1 received");
+	return EXIT_SUCCESS;
+}
+```
+
+この形は「フラグ確認」と「待機」の間にシグナルが滑り込む race を避ける基本形です。
+
+### ９章の７　高度なシグナル処理
+
+`signal()` は最小限の入口としては分かりやすいですが、実用コードでは `sigaction()` を使う方が適切です。
+ハンドラ実行中に追加でブロックするシグナル、再開動作、詳細情報付きハンドラなどを明示的に制御できます。
+
+```c
+#include <signal.h>
+
+int sigaction(int signo, const struct sigaction *act, struct sigaction *oldact);
+```
+
+Linux で一般的に見る構造は次のようなものです。
+
+```c
+struct sigaction {
+	void     (*sa_handler)(int);
+	void     (*sa_sigaction)(int, siginfo_t *, void *);
+	sigset_t   sa_mask;
+	int        sa_flags;
+	void     (*sa_restorer)(void);
+};
+```
+
+ただし、これは説明用の見え方であり、実際の宣言や内部実装は ABI や libc に依存します。
+特に `sa_restorer` はアプリケーションが直接触るものではありません。
+
+使うときの要点は次の通りです。
+
+```text
+sa_handler:
+	通常の 1 引数ハンドラを使うときに設定する
+
+sa_sigaction:
+	詳細情報付き 3 引数ハンドラを使うときに設定する
+
+sa_mask:
+	このハンドラ実行中に追加でブロックしたいシグナル集合
+
+sa_flags:
+	挙動を細かく制御するフラグ
+```
+
+`SA_SIGINFO` を立てると、`sa_handler` ではなく `sa_sigaction` を使います。
+移植性のためにも、両方を同時に使う前提では書かない方が無難です。
+
+最小例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_last_signal = 0;
+
+static void term_handler(int signo)
+{
+	g_last_signal = signo;
+}
+
+int main(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = term_handler;
+	if (sigemptyset(&action.sa_mask) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+	action.sa_flags = SA_RESTART;
+
+	if (sigaction(SIGTERM, &action, NULL) == -1) {
+		perror("sigaction");
+		return EXIT_FAILURE;
+	}
+
+	while (g_last_signal == 0) {
+		pause();
+	}
+
+	puts("SIGTERM received");
+	return EXIT_SUCCESS;
+}
+```
+
+#### ９章の７の１　主要なフラグ
+
+実際によく目にするものを先に押さえると整理しやすいです。
+
+```text
+SA_SIGINFO:
+	3 引数ハンドラを使う
+
+SA_RESTART:
+	割り込まれた一部のシステムコールを自動再開しやすくする
+
+SA_NODEFER:
+	処理中の同種シグナルを自動ブロックしない
+
+SA_RESETHAND:
+	1 回処理したらデフォルト動作へ戻す
+
+SA_NOCLDSTOP:
+	SIGCHLD で子停止や再開の通知を抑える
+
+SA_NOCLDWAIT:
+	SIGCHLD で子のゾンビ化を抑える方向の挙動を取る
+
+SA_ONSTACK:
+	代替シグナルスタックを使う
+```
+
+古い名前の `SA_NOMASK` や `SA_ONESHOT` を資料で見かけることがありますが、今のコードでは通常使いません。
+
+また `SA_RESTART` は万能ではありません。
+すべてのブロッキング syscall が必ず透過的に再開されるわけではないので、`EINTR` を考えなくてよいとは限りません。
+
+#### ９章の７の２　siginfo_t 構造体
+
+`SA_SIGINFO` を使うと、ハンドラは追加情報を受け取れます。
+
+```c
+static void info_handler(int signo, siginfo_t *si, void *ucontext)
+{
+	(void)ucontext;
+	(void)signo;
+	(void)si;
+}
+```
+
+ここで重要なのは、`siginfo_t` の全メンバをいつでも参照してよいわけではないことです。
+まず確実に見てよいのは、多くの場合次の基本情報です。
+
+```text
+si_signo:
+	受け取ったシグナル番号
+
+si_errno:
+	関連 errno 情報
+	ただし 0 のことも多く、常に意味があるとは限らない
+
+si_code:
+	どのように発生したか、どんな種類の事象か
+```
+
+シグナル種類によって、追加で意味を持つメンバが変わります。
+
+```text
+SIGCHLD:
+	si_pid, si_uid, si_status, si_utime, si_stime など
+
+SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGTRAP:
+	si_addr など
+
+sigqueue() 系:
+	si_value, si_int, si_ptr
+
+SIGPOLL 系:
+	si_fd, si_band
+```
+
+つまり、`si_fd` や `si_addr` を無条件に読むのは危険です。
+必ずシグナル種類と文脈に応じて参照します。
+
+#### ９章の７の３　si_code の読み方
+
+`si_code` はビットフラグ集合ではなく、原因を表す列挙値のようなものです。
+複数要因が OR されるわけではありません。
+
+まず、かなり汎用的に見かけるものがあります。
+
+```text
+SI_USER:
+	kill() や raise() などユーザ起点の送信
+
+SI_QUEUE:
+	sigqueue() による送信
+
+SI_TIMER:
+	POSIX タイマ起点
+
+SI_ASYNCIO:
+	非同期 I/O 関連
+
+SI_KERNEL:
+	カーネル起点
+
+SI_TKILL:
+	特定スレッド向け送信系
+```
+
+さらに、シグナル固有の原因コードがあります。
+
+```text
+SIGCHLD:
+	CLD_EXITED, CLD_KILLED, CLD_STOPPED, CLD_CONTINUED など
+
+SIGSEGV:
+	SEGV_MAPERR, SEGV_ACCERR
+
+SIGBUS:
+	BUS_ADRALN, BUS_ADRERR, BUS_OBJERR
+
+SIGFPE:
+	FPE_INTDIV, FPE_INTOVF, FPE_FLTDIV など
+
+SIGILL:
+	ILL_ILLOPC, ILL_PRVOPC など
+
+SIGTRAP:
+	TRAP_BRKPT, TRAP_TRACE
+```
+
+ただし、細かい原因コードはアーキテクチャ依存の差や、実際にはほとんど見ないものもあります。
+全部を暗記する必要はありません。
+
+まず大事なのは次の 2 点です。
+
+```text
+1:
+	si_code を見れば「誰が送ったか」「なぜ起きたか」の一次情報が取れる
+
+2:
+	有効な追加情報はシグナル種類ごとに異なる
+```
+
+簡単な例です。
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_done = 0;
+
+static void info_handler(int signo, siginfo_t *si, void *ucontext)
+{
+	(void)ucontext;
+	(void)signo;
+
+	if (si != NULL && si->si_code == SI_USER) {
+		g_done = 1;
+	}
+}
+
+int main(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = info_handler;
+	action.sa_flags = SA_SIGINFO;
+	if (sigemptyset(&action.sa_mask) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaction(SIGUSR1, &action, NULL) == -1) {
+		perror("sigaction");
+		return EXIT_FAILURE;
+	}
+
+	if (raise(SIGUSR1) != 0) {
+		fputs("raise failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	puts(g_done ? "received a user-generated SIGUSR1" : "signal not observed");
+	return EXIT_SUCCESS;
+}
+```
+
+この例でも、ハンドラ内では最低限の判定だけに留めています。
+詳細表示は通常文脈へ戻してから行う方が安全です。
+
 
 
