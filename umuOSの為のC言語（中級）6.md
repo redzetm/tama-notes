@@ -1236,7 +1236,136 @@ int main(void)
 そのため、一般ユーザーでは失敗することが多いです。
 現在のLinuxでは、`RLIMIT_RTPRIO` により、一般ユーザーへ許可するリアルタイム優先度の上限を設定する運用もあります。
 
-#### ６章の５の６　優先度範囲の確認
+#### ６章の５の６　スケジューリングパラメータの参照と変更
+
+POSIX では、スケジューリングポリシーそのものとは別に、スケジューリングパラメータだけを参照・変更するための API も定義されています。
+それが `sched_getparam()` と `sched_setparam()` です。
+
+```c
+#include <sched.h>
+
+struct sched_param {
+	int sched_priority;
+};
+
+int sched_getparam(pid_t pid, struct sched_param *param);
+int sched_setparam(pid_t pid, const struct sched_param *param);
+```
+
+`sched_getscheduler()` はポリシーだけを返しますが、`sched_getparam()` はパラメータを返します。
+現在のLinuxで `SCHED_FIFO` や `SCHED_RR` を扱うとき、もっとも重要なパラメータは通常 `sched_priority` です。
+
+現在のプロセスのスケジューリングパラメータを読む簡単な例です。
+
+```c
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	struct sched_param param;
+
+	if (sched_getparam(0, &param) == -1) {
+		perror("sched_getparam");
+		return EXIT_FAILURE;
+	}
+
+	printf("priority = %d\n", param.sched_priority);
+	return EXIT_SUCCESS;
+}
+```
+
+`pid` に `0` を渡すと、呼び出し元自身を対象にします。
+
+一方、ポリシーはそのままで、優先度パラメータだけを変更したいなら `sched_setparam()` を使えます。
+
+```c
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	struct sched_param param = { .sched_priority = 1 };
+
+	if (sched_setparam(0, &param) == -1) {
+		perror("sched_setparam");
+		return EXIT_FAILURE;
+	}
+
+	puts("priority changed");
+	return EXIT_SUCCESS;
+}
+```
+
+実用上は、ポリシーと優先度をまとめて変えたいなら `sched_setscheduler()`、ポリシーは維持したまま優先度だけ変えたいなら `sched_setparam()` と使い分けると分かりやすいです。
+
+たとえば、すでに `SCHED_RR` で動いているタスクの優先度だけを調整したい場合には `sched_setparam()` が自然です。
+
+##### ６章の５の６の１　errno
+
+代表的なエラーは次の通りです。
+
+```text
+EFAULT:
+	param が無効なポインタ、またはアクセスできない領域である
+
+EINVAL:
+	param の内容が現在のポリシーに対して不正である
+
+EPERM:
+	必要な権限がない
+
+ESRCH:
+	対象pidが存在しない
+```
+
+古い資料では `EINVAL` の説明がやや揺れることがありますが、実務上は「現在のポリシーに対して、その優先度やパラメータが不正だった」と理解しておけば十分です。
+
+`sched_setparam()` でも、リアルタイム優先度を上げる方向の変更には通常 `CAP_SYS_NICE` などの権限が必要です。
+
+##### ６章の５の６の２　優先度の有効範囲
+
+優先度の具体的な数値は、決め打ちしない方が安全です。
+Linuxでは `SCHED_FIFO` と `SCHED_RR` の優先度範囲は通常 `1` から `99` ですが、移植性を考えるなら API で確認する方がよいです。
+
+特に、アプリケーション内で「4段階だけ高低を持たせたい」といった設計では、OS の実際の範囲へマッピングするのが自然です。
+
+たとえば、現在のポリシーで許される最高優先度へ設定する補助関数は次のように書けます。
+
+```c
+#include <sched.h>
+#include <string.h>
+
+int set_highest_priority(pid_t pid)
+{
+	struct sched_param param;
+	int policy;
+	int max_priority;
+
+	policy = sched_getscheduler(pid);
+	if (policy == -1) {
+		return -1;
+	}
+
+	max_priority = sched_get_priority_max(policy);
+	if (max_priority == -1) {
+		return -1;
+	}
+
+	memset(&param, 0, sizeof(param));
+	param.sched_priority = max_priority;
+
+	return sched_setparam(pid, &param);
+}
+```
+
+この例では、対象タスクの現在ポリシーを調べ、そのポリシーで許される最大優先度を取得し、それを設定しています。
+
+実際の運用では `max`、`max - 1`、`max - 2` のように、最上位から少しずつ下げた値を使い分けることもよくあります。
+
+#### ６章の５の７　優先度範囲の確認
 
 リアルタイム優先度の有効範囲は、移植性を考えるなら決め打ちしない方が安全です。
 Linuxでは通常 `1` から `99` ですが、APIで確認できます。
@@ -1261,7 +1390,7 @@ int main(void)
 
 この確認を入れておくと、コードの意図が分かりやすくなります。
 
-#### ６章の５の７　エラーと実運用上の注意
+#### ６章の５の８　エラーと実運用上の注意
 
 `sched_getscheduler()` や `sched_setscheduler()` の代表的なエラーは次の通りです。
 
@@ -1292,7 +1421,7 @@ ESRCH:
 
 リアルタイム設定を試すときは、別の端末から止められるようにする、CPU時間制限を考える、テスト環境で行う、などの安全策を取った方がよいです。
 
-#### ６章の５の８　UmuOSでどう考えるか
+#### ６章の５の９　UmuOSでどう考えるか
 
 UmuOSで最初から完全なリアルタイムOSを目指す必要はありません。
 しかし、優先度が通常タスクとまったく別枠で扱われるクラスがある、という考え方は非常に重要です。
