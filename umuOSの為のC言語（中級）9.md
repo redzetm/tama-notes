@@ -1279,5 +1279,208 @@ int main(void)
 この例でも、ハンドラ内では最低限の判定だけに留めています。
 詳細表示は通常文脈へ戻してから行う方が安全です。
 
+### ９章の８　シグナルとともにデータを送信する
+
+`SA_SIGINFO` を使うハンドラでは、`siginfo_t` を通して追加情報を受け取れます。
+その追加データをユーザ空間から明示的に送るのが `sigqueue()` です。
+
+```c
+#include <signal.h>
+
+int sigqueue(pid_t pid, int signo, const union sigval value);
+```
+
+渡すデータ型は次の共用体です。
+
+```c
+union sigval {
+	int   sival_int;
+	void *sival_ptr;
+};
+```
+
+基本的な考え方は `kill()` と似ていますが、`sigqueue()` はシグナルに追加ペイロードを持たせられます。
+
+```text
+sival_int:
+	整数値を渡す
+
+sival_ptr:
+	ポインタ値を渡す
+```
+
+ただし、`sival_ptr` は相手プロセスとアドレス空間を共有していない限り、そのまま意味のあるポインタになるとは限りません。
+別プロセス間では「単なるアドレス値」でしかないので、普通は整数や ID を渡す方が安全です。
+
+また、ここは古い説明をそのまま受け取らない方がよい箇所です。
+追加データを確実にキューしたいなら、通常シグナルより POSIX realtime signal を使う方が筋がよいです。
+標準シグナルは同種のものが畳み込まれることがあるため、データ付き通知の運搬路としては弱いです。
+
+#### ９章の８の１　サンプルコード
+
+特定 PID へ `SIGUSR2` と一緒に整数を送る例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	pid_t target = 1722;
+	union sigval value;
+
+	value.sival_int = 404;
+
+	if (sigqueue(target, SIGUSR2, value) == -1) {
+		perror("sigqueue");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+受信側が `SA_SIGINFO` 付き `sigaction()` で `SIGUSR2` を処理していれば、ハンドラでは `si->si_value.sival_int` から値を読めます。
+送信方法の識別には `si->si_code == SI_QUEUE` を使えます。
+
+受信側の最小例です。
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_value = 0;
+
+static void usr2_handler(int signo, siginfo_t *si, void *ucontext)
+{
+	(void)signo;
+	(void)ucontext;
+
+	if (si != NULL && si->si_code == SI_QUEUE) {
+		g_value = si->si_value.sival_int;
+	}
+}
+
+int main(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = usr2_handler;
+	action.sa_flags = SA_SIGINFO;
+	if (sigemptyset(&action.sa_mask) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaction(SIGUSR2, &action, NULL) == -1) {
+		perror("sigaction");
+		return EXIT_FAILURE;
+	}
+
+	puts("waiting for SIGUSR2...");
+	while (g_value == 0) {
+		pause();
+	}
+
+	printf("received value: %d\n", g_value);
+	return EXIT_SUCCESS;
+}
+```
+
+この例は説明用としては十分ですが、値 0 も有効データになり得るため、実運用では「値を受けたかどうか」の別フラグも分けた方が安全です。
+
+### ９章の９　章の結び
+
+シグナルは、今でも Unix 系 OS の基本機構ですが、使いやすい仕組みとは言いにくいです。
+任意タイミングで割り込む、ハンドラ内の制約が厳しい、標準シグナルはキューとして弱い、という難しさがあります。
+
+そのため、現代のアプリケーションでは、何でもシグナルで解決しようとはしません。
+イベントループ中心の設計では、ソケット、パイプ、`eventfd`、`timerfd`、`signalfd`、`epoll` などの方が扱いやすいことも多いです。
+
+それでもシグナルは不要にはなりません。
+理由は単純で、Linux がプロセスへ伝えるべき重要イベントのかなりの部分が、今もシグナル経由だからです。
+
+```text
+終了要求:
+	SIGINT, SIGTERM, SIGKILL
+
+子プロセス状態変化:
+	SIGCHLD
+
+端末操作:
+	SIGTSTP, SIGCONT, SIGWINCH
+
+障害通知:
+	SIGSEGV, SIGBUS, SIGILL, SIGFPE
+```
+
+結局のところ、シグナルの要点は「多機能な IPC として乱用しない」ことです。
+必要最小限の通知経路と考え、ハンドラは短く、共有状態は最小に、重い処理は通常文脈へ逃がす、という原則が重要です。
+
+また、古いコードで `signal()` と `kill()` だけで頑張っている例を見かけても、今は `sigaction()`、必要に応じて `sigqueue()`、さらには `signalfd` のような別手段まで含めて選ぶ方が自然です。
+
+### ９章の１０　UmuOSでどう考えるか
+
+UmuOS の観点では、この章の本質は「割り込み的な非同期イベントを、ユーザプログラムへどう見せるか」です。
+シグナルは Linux の API として学ぶ対象であると同時に、OS 設計上の通知モデルそのものでもあります。
+
+まず重要なのは、シグナルが単なるメッセージではなく、実行中の文脈へ割り込む仕組みだという点です。
+この考え方は、将来 UmuOS に例外処理、タイマ割り込み、端末割り込み、子プロセス終了通知のような機構を入れるとき、そのまま設計課題になります。
+
+```text
+カーネル側の視点:
+	何が起きたかを記録する
+	いつ配送可能かを判断する
+	配送時にユーザ文脈へ割り込む
+
+ユーザ側の視点:
+	割り込み得ることを前提に状態管理する
+	最小限の処理だけを即時実行する
+	重い処理は安全な通常文脈へ戻して行う
+```
+
+UmuOS で最初から Linux 並みの全シグナル機構を作る必要はありません。
+しかし、次の順序で段階実装すると理解しやすいです。
+
+```text
+第1段階:
+	終了通知だけを持つ単純なシグナル
+	親が子の終了を知れる
+
+第2段階:
+	端末からの割り込み通知
+	Ctrl-C や Ctrl-Z 相当を扱える
+
+第3段階:
+	シグナルマスクと保留状態
+	クリティカルセクション保護ができる
+
+第4段階:
+	sigaction() 相当の詳細制御
+	追加情報付き配送
+```
+
+また、UmuOS のシェルやサーバを考えると、特に重要なのは次の3点です。
+
+```text
+ジョブ制御:
+	フォアグラウンドとバックグラウンドへどう配送するか
+
+子プロセス回収:
+	SIGCHLD 相当をどう扱うか
+
+安全な終了処理:
+	割り込み時にリソース解放をどう整えるか
+```
+
+この章を学ぶ意味は、単に `signal()` を覚えることではありません。
+非同期イベントを OS とプログラムの境界でどう扱うべきか、その設計感覚を身につけることにあります。
+
 
 
