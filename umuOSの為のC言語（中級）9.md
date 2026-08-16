@@ -468,6 +468,374 @@ int main(void)
 	strsignal() やログ出力を行う
 ```
 
+### ９章の３　シグナルの送信
+
+シグナル送信の基本は `kill()` です。
+名前のせいで「プロセスを殺す関数」に見えますが、実際には任意のシグナルを送るための一般インタフェースです。
+
+```c
+#include <signal.h>
+#include <sys/types.h>
+
+int kill(pid_t pid, int signo);
+```
+
+`pid` の意味は少し特殊です。
+
+```text
+pid > 0:
+	その PID の 1 プロセスへ送る
+
+pid == 0:
+	自プロセスと同じプロセスグループ全体へ送る
+
+pid == -1:
+	送信権限のある多くのプロセスへ送る
+	通常は管理用途で、乱用しない
+
+pid < -1:
+	-pid のプロセスグループ全体へ送る
+```
+
+エラーとしては、主に次が重要です。
+
+```text
+EINVAL:
+	無効なシグナル番号
+
+EPERM:
+	送信権限がない
+
+ESRCH:
+	対象プロセスまたは対象プロセスグループが見つからない
+```
+
+#### ９章の３の１　パーミッション
+
+他プロセスへシグナルを送るには権限が必要です。
+単純化すると、自分と同じユーザのプロセスへは送れて、他人のプロセスへは通常送れません。
+
+Linux では capability を持つプロセス、典型的には強い権限を持つ管理系プロセスなら広く送信できます。
+一方、通常ユーザでは UID の一致条件が重要です。
+
+ただし、現在の Linux では user namespace や capability の文脈もあるため、「常に root だけが特別」とだけ覚えるのは少し雑です。
+実務上は「自分の所有プロセスへ送るのが基本、他は権限次第」と理解するのがよいです。
+
+`SIGCONT` には job control との関係で少し特別な扱いがありますが、まずは例外として覚えるより、ジョブ制御の文脈で理解した方が混乱しにくいです。
+
+#### ９章の３の２　サンプルコード
+
+特定 PID へ `SIGHUP` を送る最小例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	pid_t target = 1722;
+
+	if (kill(target, SIGHUP) == -1) {
+		perror("kill");
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+これはシェルで次を実行するのと同じ意味です。
+
+```sh
+kill -HUP 1722
+```
+
+ただし、実際には PID を決め打ちするより、設定再読込のような用途では PID ファイルや supervisor 経由で対象を特定する設計の方が安全です。
+
+`signo == 0` は特別で、シグナルは送らず、存在確認や権限確認のために使えます。
+
+```c
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	pid_t target = 1722;
+
+	if (kill(target, 0) == -1) {
+		if (errno == EPERM) {
+			puts("process exists, but permission is denied");
+		} else if (errno == ESRCH) {
+			puts("process does not exist");
+		} else {
+			perror("kill");
+		}
+		return EXIT_FAILURE;
+	}
+
+	puts("process exists and signal permission looks valid");
+	return EXIT_SUCCESS;
+}
+```
+
+ただし、これはあくまでその瞬間の確認です。
+確認直後に対象プロセスが終了する競合は普通に起こるので、`kill(pid, 0)` を絶対的な存在保証だと思ってはいけません。
+
+#### ９章の３の３　自プロセスへシグナルを送信する
+
+自分自身へ送るなら `raise()` が簡潔です。
+
+```c
+#include <signal.h>
+
+int raise(int signo);
+```
+
+概念的には次と同じです。
+
+```c
+kill(getpid(), signo);
+```
+
+簡単な例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static volatile sig_atomic_t g_seen = 0;
+
+static void usr1_handler(int signo)
+{
+	(void)signo;
+	g_seen = 1;
+}
+
+int main(void)
+{
+	if (signal(SIGUSR1, usr1_handler) == SIG_ERR) {
+		fputs("handler registration failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	if (raise(SIGUSR1) != 0) {
+		fputs("raise failed\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	puts(g_seen ? "SIGUSR1 handled" : "SIGUSR1 not yet handled");
+	return EXIT_SUCCESS;
+}
+```
+
+#### ９章の３の４　プロセスグループ全体へシグナルを送信する
+
+プロセスグループ全体へ送る意図を明示したいなら `killpg()` が使えます。
+
+```c
+#include <signal.h>
+
+int killpg(pid_t pgrp, int signo);
+```
+
+意味としては次と同等です。
+
+```c
+kill(-pgrp, signo);
+```
+
+シェル、ジョブ制御、端末制御では、個々の PID ではなくプロセスグループ単位でシグナルを送る設計がとても重要です。
+たとえば Ctrl-C がフォアグラウンドジョブ全体へ届くのは、この考え方とつながっています。
+
+### ９章の４　リエントラント
+
+シグナルハンドラは、プログラムの任意の位置へ割り込んできます。
+メモリ確保の途中、標準入出力の内部状態更新中、共有構造体の更新中などに突然実行される可能性があります。
+
+そのため、シグナルハンドラでは「今どの関数の途中に割り込んだのか分からない」という前提で設計しなければなりません。
+
+古い説明ではリエントラントという言葉が前面に出ますが、実務では async-signal-safe という観点で理解する方が重要です。
+つまり「シグナルハンドラから呼んでも安全と規定されているか」です。
+
+危険な例は次の通りです。
+
+```text
+printf():
+	標準入出力の内部状態に依存する
+
+malloc() / free():
+	割り当て器の内部状態を壊す恐れがある
+
+strsignal():
+	内部静的領域を返す実装がある
+
+pthread mutex の多くの操作:
+	シグナルハンドラ向きではない
+```
+
+したがって、シグナルハンドラでは原則として次の方針が安全です。
+
+```text
+やること:
+	volatile sig_atomic_t のフラグ更新
+	必要最小限の write()
+
+やらないこと:
+	複雑なログ出力
+	動的メモリ確保
+	非同期安全性が不明なライブラリ関数呼び出し
+```
+
+#### ９章の４の１　シグナルセーフなインタフェース
+
+POSIX は、シグナルハンドラから安全に呼べる async-signal-safe な関数群を定義しています。
+古い本では長い表が並びますが、実際にまず覚えるべきものは多くありません。
+
+代表例は次の通りです。
+
+```text
+即時終了系:
+	_Exit(), _exit(), abort()
+
+ファイル記述子 I/O:
+	read(), write(), close()
+
+シグナル操作:
+	sigaction(), sigprocmask(), sigpending(), sigsuspend(), kill(), raise()
+
+プロセス待機系の一部:
+	wait(), waitpid()
+
+時刻や軽量な問い合わせの一部:
+	alarm(), getpid(), getppid()
+```
+
+逆に、日常的によく使う高水準 API の多くはハンドラ向きではありません。
+
+```text
+使わない方がよい代表例:
+	printf(), fprintf(), snprintf()
+	malloc(), calloc(), realloc(), free()
+	strtok(), strerror(), strsignal()
+```
+
+最小限の出力が必要なら、文字列リテラルを `write()` で直接出す方法が現実的です。
+
+```c
+#include <signal.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_stop = 0;
+
+static void term_handler(int signo)
+{
+	(void)signo;
+	g_stop = 1;
+	(void)write(STDERR_FILENO, "SIGTERM received\n", 17);
+}
+```
+
+ただし、この種の直接出力も本当に必要なときだけに留める方がよいです。
+多くの場合はフラグだけ立てて、通常文脈で整った終了処理をする方が設計しやすくなります。
+
+### ９章の５　シグナルセット
+
+複数のシグナルをまとめて扱うために `sigset_t` を使います。
+シグナルマスク、保留シグナル集合、待機対象シグナル集合など、以後の API はほぼこの型と組で登場します。
+
+```c
+#include <signal.h>
+
+int sigemptyset(sigset_t *set);
+int sigfillset(sigset_t *set);
+int sigaddset(sigset_t *set, int signo);
+int sigdelset(sigset_t *set, int signo);
+int sigismember(const sigset_t *set, int signo);
+```
+
+使い方の流れはかなり定型です。
+
+```text
+1:
+	まず空集合または全要素集合で初期化する
+
+2:
+	sigaddset() や sigdelset() で調整する
+
+3:
+	その集合を sigprocmask() や sigsuspend() へ渡す
+```
+
+簡単な例です。
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	sigset_t set;
+
+	if (sigemptyset(&set) == -1) {
+		perror("sigemptyset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaddset(&set, SIGINT) == -1) {
+		perror("sigaddset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigaddset(&set, SIGTERM) == -1) {
+		perror("sigaddset");
+		return EXIT_FAILURE;
+	}
+
+	if (sigismember(&set, SIGINT) == 1) {
+		puts("SIGINT is in the set");
+	}
+
+	return EXIT_SUCCESS;
+}
+```
+
+`sigset_t` の内部表現は実装依存です。
+ビットマスクに見えても直接触らず、必ず専用関数で操作します。
+
+#### ９章の５の１　シグナルセット操作インタフェース（非標準）
+
+glibc には GNU 拡張として補助関数があります。
+
+```c
+#define _GNU_SOURCE
+#include <signal.h>
+
+int sigisemptyset(const sigset_t *set);
+int sigorset(sigset_t *dest, const sigset_t *left, const sigset_t *right);
+int sigandset(sigset_t *dest, const sigset_t *left, const sigset_t *right);
+```
+
+これらは便利ですが、POSIX 専用の可搬コードでは前提にしない方が安全です。
+
+```text
+sigisemptyset():
+	空集合かどうか調べる
+
+sigorset():
+	和集合を作る
+
+sigandset():
+	積集合を作る
+```
+
+ライブラリ依存を増やしたくない場合は、標準 API だけで十分なことが多いです。
+特に学習段階では、まず `sigemptyset()`、`sigaddset()`、`sigprocmask()`、`sigsuspend()` の連携を確実に理解する方が重要です。
+
 ここまでがシグナル処理の最初の入口です。
 次に進むと、`signal()` より実用的な `sigaction()`、シグナルマスク、保留シグナル、同期的待機といった、実務で本当に使う論点が出てきます。
 
