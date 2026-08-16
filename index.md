@@ -50,7 +50,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語６（中級）　6章　高度なプロセス管理]({{ '/umuOSの為のC言語（中級）6.html' | relative_url }})
 - [UmuOSの為のC言語７（中級）　7章　ファイル、ディレクトリの管理]({{ '/umuOSの為のC言語（中級）7.html' | relative_url }})
 - [UmuOSの為のC言語８（中級）　8章　メモリ管理]({{ '/umuOSの為のC言語（中級）8.html' | relative_url }})
-- [UmuOSの為のC言語９（中級）　9章]({{ '/umuOSの為のC言語（中級）9.html' | relative_url }})
+- [UmuOSの為のC言語９（中級）　9章　シグナル]({{ '/umuOSの為のC言語（中級）9.html' | relative_url }})
 - [TCP/IP通信解析の為のC言語]({{ '/tcpip_c_analysis.html' | relative_url }})
 - [UmuOSの為のC言語　Linuxシステムコール、低レベルライブラリ関数１（ファイルI/O）]({{ '/system_call_lib1.html' | relative_url }})
 - [徹底解説！自作シェル ush（うーしゅ）0.0.6解説書]({{ '/ush-0.0.6徹底解説.html' | relative_url }})
