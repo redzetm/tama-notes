@@ -1497,6 +1497,345 @@ Linux固有の低レベル実装:
 
 移植性、保守性、安全性のどれを取っても、通常は高水準 API を使う方がよいです。
 
+### ７章の３　ファイルのリンク
+
+ここまで見てきたように、ディレクトリは「名前」と「inode への参照」を管理しています。
+この対応関係をリンクと呼びます。
+
+1つの inode を、複数の名前から参照できることが、Unix系ファイルシステムの重要な特徴です。
+
+```text
+1つのファイル実体:
+	1つの inode
+
+その inode を指す複数の名前:
+	複数のリンク
+```
+
+たとえば、同じファイルを `/etc/customs` と `/var/run/ledger` の2つの名前で参照できる場合があります。
+ただし、これは同じファイルシステム内に限られます。
+inode 番号はファイルシステムごとに意味を持つため、別ファイルシステムへそのまま張ることはできません。
+
+この種のリンクをハードリンクと呼びます。
+ハードリンクには「元の名前」と「コピー先」のような主従関係はありません。
+どの名前も同じ inode を指しており、立場は対等です。
+
+一方で、もう1種類、シンボリックリンクがあります。
+こちらは inode を直接共有するのではなく、「別のパス名を指す特殊なファイル」です。
+
+#### ７章の３の１　ハードリンク
+
+既存ファイルに対して新しいハードリンクを作るには `link()` を使います。
+
+```c
+#include <unistd.h>
+
+int link(const char *oldpath, const char *newpath);
+int linkat(int olddirfd, const char *oldpath,
+	   int newdirfd, const char *newpath, int flags);
+```
+
+成功すると、`newpath` という新しい名前が `oldpath` と同じ inode を指すようになります。
+結果として、両者は完全に同じ実体を共有します。
+
+```text
+link("a", "b") の後:
+	a と b は同じ inode を指す
+	どちらから書いても同じ内容が見える
+	どちらか一方だけが「本体」ということはない
+```
+
+ただし、ハードリンクには制約があります。
+
+```text
+同じファイルシステム内でしか作れない
+
+通常はディレクトリには作れない
+
+ファイルシステムごとのリンク数上限がある
+```
+
+リンク数は `stat` の `st_nlink` で確認できます。
+通常のファイルは 1 ですが、ハードリンクを追加すると増えます。
+
+リンク数が 0 になっても、まだそのファイルを open しているプロセスがいれば、実体はすぐには消えません。
+Linux では、おおまかには「ディレクトリエントリからの参照」と「オープン中の参照」の両方がなくなったときに、実データが解放されます。
+
+`link()` の代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	oldpath の探索権限、または newpath を作る権限がない
+
+EEXIST:
+	newpath が既に存在する
+
+EFAULT:
+	ポインタが無効
+
+EIO:
+	内部I/Oエラー
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+EMLINK:
+	リンク数上限に達している
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	oldpath が存在しない、または newpath の親が存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOSPC:
+	newpath 側の保存領域不足
+
+ENOTDIR:
+	途中要素にディレクトリでないものがある
+
+EPERM:
+	権限上作成できない、またはディレクトリへのハードリンクを作ろうとした
+
+EROFS:
+	newpath 側が読み取り専用ファイルシステム
+
+EXDEV:
+	別ファイルシステムをまたいでいる
+```
+
+次の例は、既存ファイル `privateer` と同じ inode を指す `pirate` を作成します。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	if (link("/home/kidd/privateer", "/home/kidd/pirate") == -1) {
+		perror("link");
+		return EXIT_FAILURE;
+	}
+
+	puts("created hard link /home/kidd/pirate");
+	return EXIT_SUCCESS;
+}
+```
+
+現在のLinuxでは、`linkat()` に `AT_SYMLINK_FOLLOW` を指定して、シンボリックリンクをたどるかどうかを明示することもできます。
+このあたりは `link()` より `linkat()` の方が意図を表しやすい場合があります。
+
+#### ７章の３の２　シンボリックリンク
+
+シンボリックリンクは、ハードリンクとは異なり、別のパス名を内容として持つ特殊ファイルです。
+参照先の inode を直接共有するわけではありません。
+
+```text
+ハードリンク:
+	同じ inode を共有する
+
+シンボリックリンク:
+	別のパス名を記録しておき、利用時に解決する
+```
+
+そのため、シンボリックリンクには次の特徴があります。
+
+```text
+別ファイルシステムへ張れる
+
+ディレクトリも参照できる
+
+存在しない対象にも作れる
+```
+
+最後の性質は重要です。
+`symlink()` は通常、参照先が本当に存在するかを検証しません。
+単に「このパス名を指すリンク」を作るだけです。
+したがって、参照先が存在しない壊れたシンボリックリンク、いわゆる dangling symlink も作れます。
+
+作成には `symlink()` を使います。
+
+```c
+#include <unistd.h>
+
+int symlink(const char *oldpath, const char *newpath);
+int symlinkat(const char *oldpath, int newdirfd, const char *newpath);
+```
+
+ここでの `oldpath` は「既存ファイルを必ず指していなければならない実体」ではなく、リンク先として保存したいパス文字列です。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	newpath を作る場所への権限がない
+
+EEXIST:
+	newpath が既に存在する
+
+EFAULT:
+	ポインタが無効
+
+EIO:
+	内部I/Oエラー
+
+ELOOP:
+	newpath 側のパス解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	newpath の親ディレクトリが存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOSPC:
+	保存領域不足
+
+ENOTDIR:
+	newpath の途中要素にディレクトリでないものがある
+
+EPERM:
+	作成権限がない
+
+EROFS:
+	newpath 側が読み取り専用ファイルシステム
+```
+
+次の例は、`/home/kidd/privateer` を参照するシンボリックリンク `pirate` を作ります。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	if (symlink("/home/kidd/privateer", "/home/kidd/pirate") == -1) {
+		perror("symlink");
+		return EXIT_FAILURE;
+	}
+
+	puts("created symbolic link /home/kidd/pirate");
+	return EXIT_SUCCESS;
+}
+```
+
+相対パスを使ったシンボリックリンクもよく使われます。
+その場合、解決基準は「リンクをたどる時点でのリンク自身の位置関係」です。
+移動や配布を考えるなら、絶対パスと相対パスのどちらが適切かを意識した方がよいです。
+
+#### ７章の３の３　ファイルのアンリンク/削除
+
+リンク作成の反対は、名前を外すことです。
+Unix系では、ファイルの削除は本質的に「ディレクトリエントリを1つ外す」操作として扱われます。
+
+これを行う基本 API が `unlink()` です。
+
+```c
+#include <unistd.h>
+
+int unlink(const char *pathname);
+int unlinkat(int dirfd, const char *pathname, int flags);
+```
+
+成功すると、`pathname` という名前がディレクトリから消えます。
+それが最後のリンクで、かつ open 中の参照もなければ、実体も最終的に解放されます。
+
+ここで重要なのは、`unlink()` が消すのは「名前」である、という点です。
+
+```text
+最後のリンクを外した:
+	新たにその名前からは開けない
+
+しかし open 中のfdが残っている:
+	そのプロセスは引き続き内容を使える
+```
+
+この性質は、一時ファイル処理でよく使われます。
+作ってすぐ `unlink()` しておけば、名前は消えても、開いている間だけ実体を使い続けられます。
+
+また、`pathname` がシンボリックリンクなら、削除されるのはリンク自身であって参照先ではありません。
+
+代表的なエラーは次の通りです。
+
+```text
+EACCES:
+	親ディレクトリへの権限または探索権限がない
+
+EFAULT:
+	ポインタが無効
+
+EIO:
+	内部I/Oエラー
+
+EISDIR:
+	pathname がディレクトリである
+
+ELOOP:
+	シンボリックリンク解決が深すぎる
+
+ENAMETOOLONG:
+	パスが長すぎる
+
+ENOENT:
+	対象が存在しない
+
+ENOMEM:
+	必要メモリ不足
+
+ENOTDIR:
+	途中要素にディレクトリでないものがある
+
+EPERM:
+	削除権限がない
+
+EROFS:
+	読み取り専用ファイルシステムである
+```
+
+ディレクトリは `unlink()` では削除しません。
+ディレクトリ削除には前節の `rmdir()` を使います。
+ただし `unlinkat()` では `AT_REMOVEDIR` を使ってディレクトリ削除を行うこともできます。
+
+単純な例です。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+	if (unlink("./temporary.txt") == -1) {
+		perror("unlink");
+		return EXIT_FAILURE;
+	}
+
+	puts("removed ./temporary.txt");
+	return EXIT_SUCCESS;
+}
+```
+
+ファイルかディレクトリかを意識せず削除したいときは、標準Cライブラリの `remove()` が使えます。
+
+```c
+#include <stdio.h>
+
+int remove(const char *path);
+```
+
+`remove()` は、対象が通常ファイルなら `unlink()` 相当、ディレクトリなら `rmdir()` 相当の処理を行います。
+戻り値は成功で 0、失敗で -1 です。
+
+ただし、挙動の本質を理解するには、まず `unlink()` と `rmdir()` を別物として捉える方が分かりやすいです。
+
 
 
 
