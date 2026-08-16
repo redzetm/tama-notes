@@ -876,6 +876,272 @@ int malloc_trim(size_t pad);
 
 移植性も低いため、一般的なアプリケーション設計では、これらへ依存しない方が扱いやすいです。
 
+### ８章の６　メモリ割り当てのデバッグ
+
+動的メモリの不具合は、C プログラムで特に厄介です。
+二重解放、領域外書き込み、use-after-free、メモリリークなどは、症状が遅れて出ることも多く、原因特定が難しくなりがちです。
+
+glibc には、古くからメモリ割り当ての検査や統計取得のための仕組みがいくつかあります。
+歴史的には `MALLOC_CHECK_` がよく知られています。
+
+```text
+MALLOC_CHECK_=0:
+	追加検査を実質無効化
+
+MALLOC_CHECK_=1:
+	警告を出す方向の動作
+
+MALLOC_CHECK_=2:
+	致命的エラーで異常終了しやすくする
+```
+
+起動時に環境変数を付けるだけで有効化できるので、再コンパイル不要という利点があります。
+
+```text
+$ MALLOC_CHECK_=1 ./rudder
+```
+
+ただし、今の Linux 開発では、まず valgrind や AddressSanitizer、LeakSanitizer などを使うことの方が一般的です。
+`MALLOC_CHECK_` は手軽ではありますが、検出範囲や挙動の分かりやすさでは、より新しいツール群に劣る場面があります。
+
+また、セキュリティ上の理由から、setuid 系プログラムではこの種の環境変数が無視されることがあります。
+
+#### ８章の６の１　メモリ割り当て統計情報
+
+古い glibc には、`mallinfo()` により割り当て器の統計を取得する仕組みがあります。
+
+```c
+#include <malloc.h>
+
+struct mallinfo mallinfo(void);
+```
+
+ただし、これは現在では古い API です。
+構造体メンバが `int` ベースで、巨大メモリ環境では不十分になりやすいため、今は `mallinfo2()` がある環境ではそちらを優先した方がよいです。
+
+学習のため、まず古い `mallinfo()` の考え方を簡単に押さえると、割り当て器が次のような情報を持っていることが見えてきます。
+
+```text
+ヒープ由来の領域サイズ
+
+未使用チャンク数
+
+mmap 由来の領域数
+
+割り当て済み総量
+
+未使用総量
+```
+
+現代的には次のようなコードの方が扱いやすいです。
+
+```c
+#include <malloc.h>
+#include <stdio.h>
+
+int main(void)
+{
+	struct mallinfo2 info = mallinfo2();
+
+	printf("allocated bytes = %zu\n", (size_t)info.uordblks);
+	printf("free bytes      = %zu\n", (size_t)info.fordblks);
+	return 0;
+}
+```
+
+`mallinfo2()` が使えない環境では `mallinfo()` しかない場合もありますが、どちらにしてもこれらは glibc 依存です。
+移植性の高い一般 API ではありません。
+
+glibc には、標準エラーへ統計を出す `malloc_stats()` もあります。
+
+```c
+#include <malloc.h>
+
+void malloc_stats(void);
+```
+
+ただし、これも実運用の性能分析ツールというよりは、観察や学習向けの道具と考える方が適切です。
+
+### ８章の７　スタック上のメモリ割り当て
+
+ここまでの動的メモリ確保は、主にヒープや匿名マッピングを使うものでした。
+一方で、一時的な小さな領域なら、スタックを使う方法もあります。
+
+歴史的に知られているのが `alloca()` です。
+
+```c
+#include <alloca.h>
+
+void *alloca(size_t size);
+```
+
+`alloca()` は、現在の関数のスタックフレームに領域を積み増すような形でメモリを確保します。
+その領域は、関数から return した時点で自動的に無効になります。
+
+```text
+malloc():
+	明示的に free() が必要
+
+alloca():
+	関数を抜けると自動的に消える
+```
+
+このため、短命な一時バッファには便利です。
+ただし、良いことばかりではありません。
+
+```text
+非標準である
+
+巨大確保でスタックを壊しやすい
+
+失敗を通常の API のように扱いにくい
+
+呼び出し元へ返して使い続ける設計に向かない
+```
+
+古い資料では Linux で `alloca()` を強く勧める調子の説明が出ることがありますが、今の実務では少し慎重に見る方がよいです。
+小さい一時領域には便利でも、濫用するとスタック消費量の見通しが悪くなります。
+
+たとえば、設定ディレクトリ配下のパスを一時的に組み立てて開く例なら、次のように書けます。
+
+```c
+#include <alloca.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#define SYSCONF_DIR "/etc/"
+
+int open_sysconf(const char *file, int flags, mode_t mode)
+{
+	const char *etc = SYSCONF_DIR;
+	size_t name_len = strlen(etc) + strlen(file) + 1U;
+	char *name = alloca(name_len);
+
+	if (snprintf(name, name_len, "%s%s", etc, file) < 0) {
+		return -1;
+	}
+
+	return open(name, flags, mode);
+}
+```
+
+ここで確保した `name` は、この関数の return と同時に使えなくなります。
+そのため、戻り値としてそのポインタを外へ渡してはいけません。
+
+また、`alloca()` を関数引数の途中で呼ぶ書き方は避けるべきです。
+
+```c
+/* 推奨しない */
+ret = foo(x, alloca(10));
+```
+
+評価順序やスタック操作との絡みで、読みづらく、環境差も招きやすいからです。
+
+#### ８章の７の１　スタック上への文字列コピー
+
+`alloca()` の分かりやすい用途の1つは、文字列の一時コピーです。
+
+```c
+#include <alloca.h>
+#include <string.h>
+
+void use_copy(const char *song)
+{
+	char *copy = alloca(strlen(song) + 1U);
+	strcpy(copy, song);
+
+	/* copy を使った一時処理 */
+}
+```
+
+ただし、ここでもサイズが大きくなりすぎない前提が必要です。
+巨大入力をそのまま `alloca()` すると、スタックオーバーフローの危険があります。
+
+GNU 拡張として `strdupa()`、`strndupa()` もあります。
+
+```c
+#define _GNU_SOURCE
+#include <string.h>
+
+char *strdupa(const char *s);
+char *strndupa(const char *s, size_t n);
+```
+
+これらは `alloca()` ベースで文字列を複製する GNU 専用の補助です。
+便利ではありますが、移植性は低いので、Linux 専用コードで使うかどうかを意識して選ぶべきです。
+
+#### ８章の７の２　可変サイズ配列
+
+C99 では、実行時に要素数が決まる可変サイズ配列、VLA が導入されました。
+
+```c
+for (int i = 0; i < n; ++i) {
+	char buffer[i + 1];
+	/* buffer を使う */
+}
+```
+
+この `buffer` は、各ループ反復のスコープを抜けるたびに自動的に消えます。
+その点で、関数を抜けるまで残る `alloca()` とは性質が違います。
+
+```text
+alloca():
+	関数終了まで残る
+
+VLA:
+	ブロックスコープを抜けると消える
+```
+
+この違いにより、ループ内で一時バッファを繰り返し使う場合、VLA の方がメモリ消費を抑えやすいことがあります。
+
+一方で、現在の C では VLA の扱いに注意が必要です。
+C11 以降、VLA は実装上 optional な機能になっており、コンパイラやプロジェクト方針によっては無効化されます。
+そのため、「C17 だからどこでも安心して使える」とは言えません。
+
+実用上の整理は次のようになります。
+
+```text
+小さい一時領域で、対象コンパイラが対応している:
+	VLA は便利
+
+移植性を重視する:
+	VLA へ依存しない方が安全
+
+サイズが大きくなり得る:
+	VLA も alloca() も避ける
+	malloc()/calloc() を使う
+```
+
+前節の例も VLA で書き換えられます。
+
+```c
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#define SYSCONF_DIR "/etc/"
+
+int open_sysconf(const char *file, int flags, mode_t mode)
+{
+	const char *etc = SYSCONF_DIR;
+	size_t name_len = strlen(etc) + strlen(file) + 1U;
+	char name[name_len];
+
+	if (snprintf(name, name_len, "%s%s", etc, file) < 0) {
+		return -1;
+	}
+
+	return open(name, flags, mode);
+}
+```
+
+古い資料には「同じ関数で `alloca()` と VLA を混在させると予測不能」と強い表現が出ることがあります。
+今のコンパイラ実装では必ずしもそう断言すべきではありませんが、少なくともスタック消費の見通しが悪くなり、可読性も落ちます。
+同じ関数では、どちらか一方へ寄せる方が無難です。
+
 
 
 
