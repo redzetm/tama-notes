@@ -1,6 +1,9 @@
 #include <poll.h>
-#include <sys/stat.h>
 #include <stdlib.h>
+#include <sys/types.h>   // blksize_t, blkcnt_t, dev_t などの型
+#include <sys/stat.h>    // struct stat の本体
+#include <unistd.h>      // stat(), fstat(), lstat() の宣言
+
 
 struct pollfd {
     int fd;
