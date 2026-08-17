@@ -4704,7 +4704,7 @@ Linuxでは、ext4、XFS、Btrfs、tmpfs、procfs、sysfs、NFS、FAT、NTFSな�
     close()
 
 VFS
-    共通のファイル操作として受け取る
+    共通のファイル操作として受け取る（実際のファイルシステムのそれぞれの差異は、VFSで吸収する）
 
 具体的なファイルシステム
     ext4
