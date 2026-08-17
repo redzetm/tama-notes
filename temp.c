@@ -1,6 +1,6 @@
 #include <poll.h>
 #include <sys/stat.h>
-
+#include <stdlib.h>
 
 struct pollfd {
     int fd;
