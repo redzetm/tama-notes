@@ -1,8 +1,11 @@
+#include <stdio.h>
 #include <poll.h>
 #include <stdlib.h>
-#include <sys/types.h>   // blksize_t, blkcnt_t, dev_t などの型
+#include <sys/types.h>   // dev_t, ino_t, mode_t, blksize_t など
 #include <sys/stat.h>    // struct stat の本体
+#include <time.h>        // struct timespec の定義
 #include <unistd.h>      // stat(), fstat(), lstat() の宣言
+
 
 
 struct pollfd {
