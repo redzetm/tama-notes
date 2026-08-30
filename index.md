@@ -55,6 +55,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語（現代ポインタ）　2章　C言語の動的メモリ管理]({{ '/UmuOSの為のC言語（現代ポインタ）2.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　3章　ポインタと関数]({{ '/UmuOSの為のC言語（現代ポインタ）3.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　4章　ポインタと配列]({{ '/UmuOSの為のC言語（現代ポインタ）4.html' | relative_url }})
+- [UmuOSの為のC言語（現代ポインタ）　5章　ポインタと文字列]({{ '/UmuOSの為のC言語（現代ポインタ）5.html' | relative_url }})
 - [TCP/IP通信解析の為のC言語]({{ '/tcpip_c_analysis.html' | relative_url }})
 - [UmuOSの為のC言語　Linuxシステムコール、低レベルライブラリ関数１（ファイルI/O）]({{ '/system_call_lib1.html' | relative_url }})
 - [徹底解説！自作シェル ush（うーしゅ）0.0.6解説書]({{ '/ush-0.0.6徹底解説.html' | relative_url }})
