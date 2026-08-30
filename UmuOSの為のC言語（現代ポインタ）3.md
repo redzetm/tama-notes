@@ -129,8 +129,7 @@ Linux/x86-64 では下方向へ伸びる実装をよく見ますが、それを�
 ```c
 #include <stdio.h>
 
-double average(const int *arr, size_t size)
-{
+double average(const int *arr, size_t size) {
 	long long sum = 0;
 
 	printf("&arr  = %p\n", (void *)&arr);
@@ -178,8 +177,7 @@ double average(const int *arr, size_t size)
 例えば、巨大な配列を毎回ローカル変数として確保する設計は危険です。
 
 ```c
-void work(void)
-{
+void work(void) {
 	char buffer[1024 * 1024];
 	buffer[0] = '\0';
 }
@@ -216,15 +214,13 @@ int ** を渡す:
 ```c
 #include <stdio.h>
 
-void swap_int(int *left, int *right)
-{
+void swap_int(int *left, int *right) {
 	int tmp = *left;
 	*left = *right;
 	*right = tmp;
 }
 
-int main(void)
-{
+int main(void) {
 	int first = 5;
 	int second = 10;
 
@@ -248,8 +244,7 @@ int main(void)
 同じ swap を値渡しだけで書くと、呼び出し側の値は変わりません。
 
 ```c
-void swap_broken(int left, int right)
-{
+void swap_broken(int left, int right) {
 	int tmp = left;
 	left = right;
 	right = tmp;
@@ -267,8 +262,7 @@ void swap_broken(int left, int right)
 関数の中でデータを書き換えてほしくない場合は、const を使います。
 
 ```c
-void copy_value(const int *source, int *destination)
-{
+void copy_value(const int *source, int *destination) {
 	*destination = *source;
 }
 ```
@@ -277,8 +271,7 @@ void copy_value(const int *source, int *destination)
 コンパイラもその契約を利用し、誤って書き換えようとした時に検出できます。
 
 ```c
-void broken_copy(const int *source, int *destination)
-{
+void broken_copy(const int *source, int *destination) {
 	/* *source = 100; */
 	*destination = *source;
 }
@@ -301,8 +294,7 @@ void broken_copy(const int *source, int *destination)
 #include <stddef.h>
 #include <stdlib.h>
 
-int *allocate_int_array(size_t count, int value)
-{
+int *allocate_int_array(size_t count, int value) {
 	int *array = malloc(count * sizeof *array);
 
 	if (array == NULL) {
@@ -323,8 +315,7 @@ int *allocate_int_array(size_t count, int value)
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(void)
-{
+int main(void) {
 	int *vector = allocate_int_array(5, 45);
 
 	if (vector == NULL) {
@@ -362,8 +353,7 @@ NULL を返しうる
 次のような関数は誤りです。
 
 ```c
-int *broken_array(void)
-{
+int *broken_array(void) {
 	int values[4] = {1, 2, 3, 4};
 	return values;
 }
@@ -382,8 +372,7 @@ values は自動記憶域期間の局所配列です。
 ポインタを返す方法以外に、呼び出し側が領域を用意し、それを関数へ渡す設計もよく使われます。
 
 ```c
-void fill_int_array(int *array, size_t count, int value)
-{
+void fill_int_array(int *array, size_t count, int value) {
 	if (array == NULL) {
 		return;
 	}
@@ -418,8 +407,7 @@ free(vector);
 #include <stddef.h>
 #include <stdlib.h>
 
-int allocate_and_fill(int **array_ptr, size_t count, int value)
-{
+int allocate_and_fill(int **array_ptr, size_t count, int value) {
 	if (array_ptr == NULL) {
 		return -1;
 	}
@@ -456,8 +444,7 @@ free(vector);
 一方、次のように単なる int * を受け取るだけでは、呼び出し側のポインタ変数は書き換わりません。
 
 ```c
-void allocate_broken(int *array, size_t count, int value)
-{
+void allocate_broken(int *array, size_t count, int value) {
 	array = malloc(count * sizeof *array);
 	if (array == NULL) {
 		return;
@@ -485,8 +472,7 @@ void allocate_broken(int *array, size_t count, int value)
 ```c
 #include <stdlib.h>
 
-void safer_free(void **pointer)
-{
+void safer_free(void **pointer) {
 	if (pointer == NULL || *pointer == NULL) {
 		return;
 	}
@@ -605,13 +591,11 @@ typedef int (*binary_int_op)(int, int);
 ```c
 #include <stdio.h>
 
-int square(int value)
-{
+int square(int value) {
 	return value * value;
 }
 
-int main(void)
-{
+int main(void) {
 	int (*function_ptr)(int) = square;
 	int number = 5;
 
@@ -638,18 +622,15 @@ int (*function_ptr)(int) = &square;
 ```c
 typedef int (*binary_int_op)(int, int);
 
-int add(int left, int right)
-{
+int add(int left, int right) {
 	return left + right;
 }
 
-int subtract(int left, int right)
-{
+int subtract(int left, int right) {
 	return left - right;
 }
 
-int compute(binary_int_op operation, int left, int right)
-{
+int compute(binary_int_op operation, int left, int right) {
 	return operation(left, right);
 }
 ```
@@ -670,8 +651,7 @@ printf("%d\n", compute(subtract, 5, 6));
 ```c
 typedef int (*binary_int_op)(int, int);
 
-binary_int_op select_operation(char opcode)
-{
+binary_int_op select_operation(char opcode) {
 	switch (opcode) {
 	case '+':
 		return add;
@@ -687,8 +667,7 @@ binary_int_op select_operation(char opcode)
 それを使う側は、返ってきたポインタを検査してから呼び出します。
 
 ```c
-int evaluate(char opcode, int left, int right, int *result)
-{
+int evaluate(char opcode, int left, int right, int *result) {
 	binary_int_op operation = select_operation(opcode);
 
 	if (operation == NULL || result == NULL) {
@@ -714,8 +693,7 @@ typedef int (*binary_int_op)(int, int);
 
 static binary_int_op operations[UCHAR_MAX + 1] = {0};
 
-void initialize_operations(void)
-{
+void initialize_operations(void) {
 	operations[(unsigned char)'+'] = add;
 	operations[(unsigned char)'-'] = subtract;
 }
@@ -724,8 +702,7 @@ void initialize_operations(void)
 評価関数は次のように書けます。
 
 ```c
-int evaluate_from_table(char opcode, int left, int right, int *result)
-{
+int evaluate_from_table(char opcode, int left, int right, int *result) {
 	binary_int_op operation = operations[(unsigned char)opcode];
 
 	if (operation == NULL || result == NULL) {
