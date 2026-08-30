@@ -2000,7 +2000,7 @@ int main(void) {
 
 ```text
 危ない理解
-    fwrite() したから fsync() すれば全部保存される
+    fwrite() してから fsync() すれば全部保存される
 
 正しい理解
     fwrite() のデータは stdio バッファに残ることがある
