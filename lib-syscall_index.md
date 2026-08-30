@@ -19,8 +19,6 @@ Linux 上で C 言語を書くときに使う API について、`man` の整理
 
 ## 既存の関連ノート
 
-- [UmuOSの為のC言語　Linuxシステムコール、低レベルライブラリ関数１（ファイルI/O）]({{ '/system_call_lib1.html' | relative_url }})
-
 ## 個別APIノート
 
 個別の API ノートは [man_lib-syscall](man_lib-syscall) に順次追加していきます。
