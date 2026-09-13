@@ -1324,7 +1324,8 @@ void *addr = mmap(NULL, length,
 
 ただし、`MAP_PRIVATE | PROT_WRITE` の場合は少し意味が変わります。
 この場合、書き込みはcopy-on-write、つまりコピーオンライトで行われ、ファイル本体には反映されません。
-読み取り専用で開いたファイルを、私的な変更用として `MAP_PRIVATE | PROT_WRITE` でマッピングできる場合があります。
+読み取り専用で開いたファイルを、私的な変更用として `MAP_PRIVATE | PROT_WRITE` でマッピングできる場合が
+あります。
 
 #### ４章の３の３　MAP_SHAREDとMAP_PRIVATE
 
