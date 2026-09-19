@@ -2529,7 +2529,7 @@ POSIXでは、AIO用のインターフェースとして `<aio.h>` が定義さ�
 #include <aio.h>
 
 struct aiocb {
-	int aio_fildes;               // ファイルディスクリプタ
+	int aio_fildes;                // ファイルディスクリプタ
 	off_t aio_offset;              // ファイル内のオフセット
 	volatile void *aio_buf;        // I/O用バッファ
 	size_t aio_nbytes;             // 処理するバイト数
