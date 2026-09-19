@@ -2263,7 +2263,8 @@ if (readahead(fd, 0, 1024 * 1024) == -1) {
 ```
 
 `readahead()` はLinux固有なので、移植性はありません。
-また、普通のアプリケーションでは `posix_fadvise(fd, offset, len, POSIX_FADV_WILLNEED)` のほうが意図が分かりやすいです。
+また、普通のアプリケーションでは `posix_fadvise(fd, offset, len, POSIX_FADV_WILLNEED)` のほうが
+意図が分かりやすいです。
 
 そのため、現在の研究では、まず `posix_fadvise()` を優先して覚えればよいと思います。
 `readahead()` は、Linux専用で明示的にページキャッシュへ読み込みたい場合のAPI、と考えておくとよいです。
