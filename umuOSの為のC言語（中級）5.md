@@ -1618,7 +1618,8 @@ gid_t gid;
 
 古い説明では `/etc/passwd` と `/etc/group` がよく出てきます。
 これは今でも重要です。
-ただし現在のLinuxでは、NSS、LDAP、systemd-homed、SSSDなどを通して、ユーザ情報が必ずしもローカルファイルだけにあるとは限りません。
+ただし現在のLinuxでは、NSS、LDAP、systemd-homed、SSSDなどを通して、ユーザ情報が
+必ずしもローカルファイルだけにあるとは限りません。
 
 ```text
 カーネル:
