@@ -23,7 +23,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 ## 環境
 - サーバー　富士通プライマジー RockyLinux9.7　Intel(R) Xeon(R) CPU E3-1230 V2 @ 3.30GHz　MEM32GB　HDD2TB 仮想マシンマネージャのサーバとして利用
 - 開発環境　Ubuntu24.04LTS（プライマジーの仮想マシンマネージャのゲスト）
-- 自作OS　UmuOS0.1.4-stable（観測・研究用OS）（プライマジーのターミナルから起動常駐）
+- 自作OS　UmuOS0.1.7-base-stable（観測・研究用OS）（プライマジーのターミナルから起動常駐）
 - 各サーバー、仮想マシンには、SSH接続とtelnet接続（観測のため）
 - ローカルPC　MINISFORUM　Windows11 Pro 25H2 12th Gen Intel(R) Core(TM) i9-12900HK (2.50 GHz) MEM32GB SSD1TB
 
