@@ -1496,7 +1496,8 @@ int main(void)
 
 #### ６章の５の８　sched_rr_get_interval()
 
-`SCHED_RR` は、`SCHED_FIFO` と似ていますが、同一優先度のタスクの間でラウンドロビンに回すための時間片を持ちます。
+`SCHED_RR` は、`SCHED_FIFO` と似ていますが、同一優先度のタスクの間でラウンドロビンに
+回すための時間片を持ちます。
 この時間片の長さを問い合わせるためのAPIが `sched_rr_get_interval()` です。
 
 ```c
