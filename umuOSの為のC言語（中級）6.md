@@ -1255,7 +1255,8 @@ SCHED_IDLE:
 
 #### ６章の５の５　スケジューリングポリシーの参照と設定
 
-プロセスのスケジューリングポリシーを参照するには `sched_getscheduler()`、変更するには `sched_setscheduler()` を使います。
+プロセスのスケジューリングポリシーを参照するには `sched_getscheduler()`、変更するには
+ `sched_setscheduler()` を使います。
 
 ```c
 #include <sched.h>
