@@ -1339,7 +1339,8 @@ int main(void)
 
 #### ６章の５の６　スケジューリングパラメータの参照と変更
 
-POSIX では、スケジューリングポリシーそのものとは別に、スケジューリングパラメータだけを参照・変更するための API も定義されています。
+POSIX では、スケジューリングポリシーそのものとは別に、スケジューリングパラメータだけを参照・変更するための 
+API も定義されています。
 それが `sched_getparam()` と `sched_setparam()` です。
 
 ```c
@@ -1354,7 +1355,8 @@ int sched_setparam(pid_t pid, const struct sched_param *param);
 ```
 
 `sched_getscheduler()` はポリシーだけを返しますが、`sched_getparam()` はパラメータを返します。
-現在のLinuxで `SCHED_FIFO` や `SCHED_RR` を扱うとき、もっとも重要なパラメータは通常 `sched_priority` です。
+現在のLinuxで `SCHED_FIFO` や `SCHED_RR` を扱うとき、もっとも重要なパラメータは
+通常 `sched_priority` です。
 
 現在のプロセスのスケジューリングパラメータを読む簡単な例です。
 
