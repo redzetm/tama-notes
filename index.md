@@ -25,7 +25,9 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - 開発環境　Ubuntu24.04LTS（プライマジーの仮想マシンマネージャのゲスト）
 - 自作OS　UmuOS0.1.7-base-stable（観測・研究用OS）（プライマジーのターミナルから起動常駐）
 - 各サーバー、仮想マシンには、SSH接続とtelnet接続（観測のため）
-- ローカルPC　MINISFORUM　Windows11 Pro 25H2 12th Gen Intel(R) Core(TM) i9-12900HK (2.50 GHz) MEM32GB SSD1TB
+- ローカルPC　MINISFORUM　Windows11 Pro 26H2 12th Gen Intel(R) Core(TM) i9-12900HK (2.50 GHz) MEM32GB SSD1TB
+- IO-DATA 34インチWIDE & IO-DATA 27インチ デュアルモニタ
+- Realforce R3 キーボード　ロジクール有線 マウス M100nBK USB　山田照明 Z-10照明　bose Flex2 WEB会議用スピーカ　ロジクール ウェブカメラ Brio 100 C660GR　オカムラ コンテッサⅡオフィスチェア
 
 ## 研究メモ
 - [LINUXカーネル6系の研究1 概要]({{ '/LINUXカーネル6系%201.html' | relative_url }})
