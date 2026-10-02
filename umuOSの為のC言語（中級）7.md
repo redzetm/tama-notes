@@ -1008,7 +1008,8 @@ inode を見つけます。
 すべてのプロセスは、カレントワーキングディレクトリ、つまり cwd を持ちます。
 相対パスはこの cwd を基準に解決されます。
 
-たとえば cwd が `/home/blackbeard` のときに `parrot.jpg` を開けば、実際には `/home/blackbeard/parrot.jpg` が対象になります。
+たとえば cwd が `/home/blackbeard` のときに `parrot.jpg` を開けば、
+実際には `/home/blackbeard/parrot.jpg` が対象になります。
 一方、`/usr/bin/mast` のように `/` で始まる絶対パスなら、cwd には影響されません。
 
 cwd は親プロセスから引き継がれます。
