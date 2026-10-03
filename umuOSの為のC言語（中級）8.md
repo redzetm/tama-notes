@@ -450,8 +450,10 @@ double free:
 	同じ領域を二重に free() する
 ```
 
-古い資料には `MALLOC_CHECK_`、`mcheck()`、`mtrace()`、`mallinfo()` などの glibc 機能が挙がることがあります。
-歴史的には有用ですが、現在は valgrind、AddressSanitizer、LeakSanitizer などの方がまず使われることが多いです。
+古い資料には `MALLOC_CHECK_`、`mcheck()`、`mtrace()`、`mallinfo()` などの glibc 機能が
+挙がることがあります。
+歴史的には有用ですが、現在は valgrind、AddressSanitizer、LeakSanitizer などの方がまず
+使われることが多いです。
 また `mallinfo()` は古く、今は `mallinfo2()` が使われる場面があります。
 
 ##### ８章の２の４の１　アラインメント
