@@ -1650,7 +1650,8 @@ int main(void)
 }
 ```
 
-現在のLinuxでは、`linkat()` に `AT_SYMLINK_FOLLOW` を指定して、シンボリックリンクをたどるかどうかを明示することもできます。
+現在のLinuxでは、`linkat()` に `AT_SYMLINK_FOLLOW` を指定して、シンボリックリンクをたどるかどうかを
+明示することもできます。
 このあたりは `link()` より `linkat()` の方が意図を表しやすい場合があります。
 
 #### ７章の３の２　シンボリックリンク
@@ -1690,7 +1691,8 @@ int symlink(const char *oldpath, const char *newpath);
 int symlinkat(const char *oldpath, int newdirfd, const char *newpath);
 ```
 
-ここでの `oldpath` は「既存ファイルを必ず指していなければならない実体」ではなく、リンク先として保存したいパス文字列です。
+ここでの `oldpath` は「既存ファイルを必ず指していなければならない実体」ではなく、リンク先として
+保存したいパス文字列です。
 
 代表的なエラーは次の通りです。
 
