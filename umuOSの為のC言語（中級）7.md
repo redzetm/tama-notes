@@ -2073,8 +2073,10 @@ int main(void)
 }
 ```
 
-現在のLinuxでは `renameat2()` もあり、`RENAME_NOREPLACE` や `RENAME_EXCHANGE` などのフラグを使えます。
-ただし、まずは `rename()` の「同一ファイルシステム内での原子的な名前変更」という性質を押さえる方が重要です。
+現在のLinuxでは `renameat2()` もあり、`RENAME_NOREPLACE` や `RENAME_EXCHANGE` などの
+フラグを使えます。
+ただし、まずは `rename()` の「同一ファイルシステム内での原子的な名前変更」という性質を押さえる方が
+重要です。
 
 ### ７章の５　デバイスノード
 
