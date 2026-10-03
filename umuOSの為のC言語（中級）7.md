@@ -1416,7 +1416,8 @@ int dirfd(DIR *dir);
 struct dirent *readdir(DIR *dir);
 ```
 
-Linux では `struct dirent` に複数のメンバがありますが、移植性を考えるなら、まず `d_name` を中心に使うのが基本です。
+Linux では `struct dirent` に複数のメンバがありますが、移植性を考えるなら、まず `d_name` を中心に使うのが
+基本です。
 
 ```c
 struct dirent {
