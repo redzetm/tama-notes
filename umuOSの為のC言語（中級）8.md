@@ -1604,7 +1604,8 @@ vm.overcommit_memory = 2:
 	厳密会計寄りにし、上限を意識して制限する
 ```
 
-`vm.overcommit_memory=2` のときは、`vm.overcommit_ratio` や `vm.overcommit_kbytes` と組み合わせて、どれだけ commit を許すかを制御します。
+`vm.overcommit_memory=2` のときは、`vm.overcommit_ratio` や `vm.overcommit_kbytes` と組み合わせて、
+どれだけ commit を許すかを制御します。
 古い説明では ratio のみが前面に出ることがありますが、現在は kbytes ベースの設定もあります。
 
 ただし、厳密会計を有効にすればすべて解決するわけではありません。
