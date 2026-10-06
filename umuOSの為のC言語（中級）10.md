@@ -649,7 +649,8 @@ int main(void)
 ### １０章の４　現在時刻の設定
 
 通常アプリケーションが現在時刻を変更する場面は多くありません。
-多くの場合、`date`、`timedatectl`、NTP クライアント、systemd-timesyncd などの専用機構が扱います。
+多くの場合、`date`、`timedatectl`、NTP クライアント、systemd-timesyncd などの
+専用機構が扱います。
 
 それでも、時刻設定 API 自体を知っておく価値はあります。
 ただし、この領域は特権が必要で、しかも古い API が混ざっています。
