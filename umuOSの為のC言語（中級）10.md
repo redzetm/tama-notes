@@ -432,7 +432,8 @@ int main(void)
 ```
 
 ただし、ここでも「何の時計を見たいか」が重要です。
-表示や記録なら `CLOCK_REALTIME`、経過時間なら `CLOCK_MONOTONIC`、CPU 使用量なら CPU 時間系、という切り分けが必要です。
+表示や記録なら `CLOCK_REALTIME`、経過時間なら `CLOCK_MONOTONIC`、CPU 使用量なら 
+CPU 時間系、という切り分けが必要です。
 
 もっとも古典的なインタフェースは `time()` です。
 
