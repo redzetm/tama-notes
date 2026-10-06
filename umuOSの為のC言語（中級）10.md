@@ -403,11 +403,14 @@ int main(void)
 }
 ```
 
-ただし、この値は「その clock API が表現できる分解能」を示すのであって、常に実測精度や実際の更新粒度と完全一致するとは限りません。
-特に現代の Linux では高分解能タイマが有効だと、`CLOCK_REALTIME` や `CLOCK_MONOTONIC` でも 1ns と表示されることがあります。
+ただし、この値は「その clock API が表現できる分解能」を示すのであって、
+常に実測精度や実際の更新粒度と完全一致するとは限りません。
+特に現代の Linux では高分解能タイマが有効だと、`CLOCK_REALTIME` や `CLOCK_MONOTONIC` でも 
+1ns と表示されることがあります。
 
 つまり、古い説明にあるように「4ms と出たから HZ=250 だ」と単純に読む時代ではありません。
-今は tickless と high-resolution timers の影響を踏まえて、分解能表示はあくまで API の性質の目安と見る方が安全です。
+今は tickless と high-resolution timers の影響を踏まえて、分解能表示はあくまで API の
+性質の目安と見る方が安全です。
 
 また、昔は POSIX clock 関数の利用時に `-lrt` が必要な環境がありました。
 しかし、現代の glibc では多くの場合 libc 本体へ統合されており、通常は追加の `-lrt` が不要です。
