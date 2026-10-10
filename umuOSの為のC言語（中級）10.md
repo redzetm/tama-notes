@@ -996,7 +996,8 @@ int adjtimex(struct timex *adj);
 ### １０章の７　スリープ
 
 指定時間だけ処理を止める方法はいくつもあります。
-ただし、今の Linux で新規コードを書くなら、基本は `nanosleep()` または `clock_nanosleep()` を考える方がよいです。
+ただし、今の Linux で新規コードを書くなら、基本は `nanosleep()` または `clock_nanosleep()` を
+考える方がよいです。
 
 #### １０章の７の１　秒単位のスリープ
 
