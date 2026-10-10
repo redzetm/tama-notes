@@ -119,9 +119,11 @@ static void sigint_handler(int signo __attribute__((unused)))
 __attribute__((warn_unused_result)) int parse_config(const char *path);
 ```
 
-`read()` や `write()`、自前の `parse_*()`、`open_*()`、`init_*()` のように、失敗を握り潰すと後で壊れる関数に向いています。
+`read()` や `write()`、自前の `parse_*()`、`open_*()`、`init_*()` のように、
+失敗を握り潰すと後で壊れる関数に向いています。
 
-現在の C では C++ のような `[[nodiscard]]` が一般化していないため、Linux/C ではこの属性がまだ実用的です。
+現在の C では C++ のような `[[nodiscard]]` が一般化していないため、Linux/C では
+この属性がまだ実用的です。
 
 #### 付録の３の３　deprecated
 
