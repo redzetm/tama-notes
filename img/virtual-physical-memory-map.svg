@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="4" dy="6" stdDeviation="3" flood-color="#000000" flood-opacity="0.2"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444444"/>
+    </marker>
+    <style>
+      .title {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 26px;
+        font-weight: 700;
+        fill: #222222;
+      }
+      .label {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 19px;
+        fill: #222222;
+      }
+      .center {
+        text-anchor: middle;
+        dominant-baseline: middle;
+      }
+      .small {
+        font-size: 16px;
+      }
+      .tiny {
+        font-size: 15px;
+      }
+      .panel {
+        fill: #ffffff;
+        stroke: #333333;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+        filter: url(#shadow);
+      }
+      .virt {
+        stroke: #2d5f9a;
+        stroke-width: 2;
+      }
+      .phys {
+        stroke: #8a5a20;
+        stroke-width: 2;
+      }
+      .page-a { fill: #eaf4ff; }
+      .page-b { fill: #f0f8ea; }
+      .page-c { fill: #fff7dd; }
+      .page-d { fill: #fdeaea; }
+      .hole { fill: #eeeeee; stroke: #777777; stroke-dasharray: 6 4; }
+      .line {
+        stroke: #444444;
+        stroke-width: 3;
+        fill: none;
+        marker-end: url(#arrow);
+      }
+      .note {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 17px;
+        fill: #333333;
+      }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="978" height="558" fill="#ffffff" stroke="#cccccc" stroke-width="2"/>
+
+  <text class="title" x="40" y="42">仮想アドレス空間と物理メモリの関係</text>
+
+  <rect class="panel" x="40" y="80" width="260" height="360"/>
+  <text class="label center" x="170" y="112">プロセスから見える</text>
+  <text class="label center" x="170" y="136">仮想アドレス空間</text>
+  <text class="label tiny center" x="170" y="160">連続した番地として見える</text>
+
+  <rect class="virt page-a" x="80" y="170" width="180" height="56"/>
+  <text class="label center" x="170" y="198">仮想ページ 0</text>
+  <text class="label tiny center" x="170" y="216">code</text>
+
+  <rect class="virt page-b" x="80" y="226" width="180" height="56"/>
+  <text class="label center" x="170" y="254">仮想ページ 1</text>
+  <text class="label tiny center" x="170" y="272">data</text>
+
+  <rect class="virt page-c" x="80" y="282" width="180" height="56"/>
+  <text class="label center" x="170" y="310">仮想ページ 2</text>
+  <text class="label tiny center" x="170" y="328">heap</text>
+
+  <rect class="virt page-d" x="80" y="338" width="180" height="56"/>
+  <text class="label center" x="170" y="366">仮想ページ 3</text>
+  <text class="label tiny center" x="170" y="384">stack</text>
+
+  <text class="label tiny" x="80" y="164">低位アドレス</text>
+  <text class="label tiny" x="80" y="418">高位アドレス</text>
+
+  <rect class="panel" x="370" y="178" width="220" height="120"/>
+  <text class="label center" x="480" y="220">ページテーブル</text>
+  <text class="label small center" x="480" y="248">+</text>
+  <text class="label center" x="480" y="276">MMU</text>
+
+  <rect class="panel" x="660" y="80" width="280" height="360"/>
+  <text class="label center" x="800" y="112">物理メモリ側の実体</text>
+  <text class="label tiny center" x="800" y="138">ページフレームは飛び飛びでもよい</text>
+
+  <rect class="phys page-b" x="710" y="168" width="180" height="44"/>
+  <text class="label center" x="800" y="190">frame 12</text>
+
+  <rect class="phys hole" x="710" y="212" width="180" height="44"/>
+  <text class="label small center" x="800" y="234">予約領域</text>
+
+  <rect class="phys page-d" x="710" y="256" width="180" height="44"/>
+  <text class="label center" x="800" y="278">frame 98</text>
+
+  <rect class="phys hole" x="710" y="300" width="180" height="44"/>
+  <text class="label small center" x="800" y="322">MMIO の穴</text>
+
+  <rect class="phys page-a" x="710" y="344" width="180" height="44"/>
+  <text class="label center" x="800" y="366">frame 3</text>
+
+  <rect class="phys page-c" x="710" y="388" width="180" height="44"/>
+  <text class="label center" x="800" y="410">frame 44</text>
+
+  <line class="line" x1="260" y1="198" x2="710" y2="366"/>
+  <line class="line" x1="260" y1="254" x2="710" y2="190"/>
+  <line class="line" x1="260" y1="310" x2="710" y2="410"/>
+  <line class="line" x1="260" y1="366" x2="710" y2="278"/>
+
+  <text class="note" x="42" y="486">左側では連続して見えていても、右側の実体は離れたページフレームへ配置できる。</text>
+  <text class="note" x="42" y="514">Linux はこの対応をページテーブルで管理し、MMU がアクセス時に変換する。</text>
+  <text class="note" x="42" y="542">物理側には予約領域や MMIO の穴もあり、RAM 全体が単純に一直線とは限らない。</text>
+</svg>
