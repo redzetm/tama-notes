@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="800" viewBox="0 0 1080 800">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="4" dy="6" stdDeviation="3" flood-color="#000000" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444444"/>
+    </marker>
+    <style>
+      .title {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 28px;
+        font-weight: 700;
+        fill: #222222;
+      }
+      .box {
+        fill: #fafafa;
+        stroke: #333333;
+        stroke-width: 2;
+        rx: 12;
+        ry: 12;
+        filter: url(#shadow);
+      }
+      .left {
+        fill: #eef8ea;
+        stroke: #4b7a31;
+      }
+      .center {
+        fill: #eaf4ff;
+        stroke: #2d5f9a;
+      }
+      .right {
+        fill: #fff4df;
+        stroke: #9a6a2d;
+      }
+      .smallbox {
+        fill: #ffffff;
+        stroke: #555555;
+        stroke-width: 1.5;
+        rx: 8;
+        ry: 8;
+      }
+      .label {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 22px;
+        fill: #222222;
+        text-anchor: middle;
+        dominant-baseline: middle;
+      }
+      .small {
+        font-size: 18px;
+      }
+      .mini {
+        font-size: 16px;
+      }
+      .note {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 17px;
+        fill: #333333;
+      }
+      .line {
+        stroke: #444444;
+        stroke-width: 3;
+        fill: none;
+        marker-end: url(#arrow);
+      }
+      .dash {
+        stroke-dasharray: 8 7;
+      }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1078" height="798" fill="#ffffff" stroke="#cccccc" stroke-width="2"/>
+
+  <text class="title" x="36" y="42">セグメントレジスタと論理アドレスの入口</text>
+
+  <rect class="box left" x="50" y="90" width="300" height="600"/>
+  <text class="label" x="200" y="120">セグメントレジスタ群</text>
+
+  <rect class="smallbox" x="85" y="150" width="230" height="60"/>
+  <text class="label small" x="200" y="180">cs : コード参照の基準</text>
+
+  <rect class="smallbox" x="85" y="225" width="230" height="60"/>
+  <text class="label small" x="200" y="255">ss : スタック参照の基準</text>
+
+  <rect class="smallbox" x="85" y="300" width="230" height="60"/>
+  <text class="label small" x="200" y="330">ds / es : データ側の基準</text>
+
+  <rect class="smallbox" x="85" y="375" width="230" height="88"/>
+  <text class="label small" x="200" y="402">fs / gs : 特殊用途の基準</text>
+  <text class="label mini" x="200" y="432">TLS や per-CPU で重要</text>
+
+  <rect class="smallbox" x="70" y="500" width="260" height="150"/>
+  <text class="label small" x="200" y="532">ここで持っているのは</text>
+  <text class="label small" x="200" y="564">「どの基準を使うか」</text>
+  <text class="label small" x="200" y="596">という入口情報</text>
+  <text class="label mini" x="200" y="628">まだ物理アドレスではない</text>
+
+  <rect class="box center" x="400" y="120" width="300" height="540"/>
+  <text class="label" x="550" y="150">論理アドレス</text>
+
+  <rect class="smallbox" x="445" y="195" width="210" height="82"/>
+  <text class="label small" x="550" y="223">セグメントセレクタ</text>
+  <text class="label mini" x="550" y="253">例: cs, ss, ds など</text>
+
+  <text class="label" x="550" y="318">+</text>
+
+  <rect class="smallbox" x="445" y="345" width="210" height="82"/>
+  <text class="label small" x="550" y="373">オフセット</text>
+  <text class="label mini" x="550" y="403">その領域の中の位置</text>
+
+  <line class="line" x1="550" y1="427" x2="550" y2="482"/>
+
+  <rect class="smallbox" x="425" y="482" width="250" height="126"/>
+  <text class="label small" x="550" y="514">セグメンテーション回路</text>
+  <text class="label mini" x="550" y="548">基準位置と属性を参照し、</text>
+  <text class="label mini" x="550" y="576">次段のアドレスへ進める</text>
+
+  <rect class="box right" x="760" y="140" width="270" height="500"/>
+  <text class="label" x="895" y="172">その先の流れ</text>
+
+  <rect class="smallbox" x="795" y="225" width="200" height="96"/>
+  <text class="label small" x="895" y="252">リニアアドレス</text>
+  <text class="label mini" x="895" y="284">現代 Linux では</text>
+  <text class="label mini" x="895" y="308">仮想アドレスとして意識</text>
+
+  <line class="line" x1="895" y1="321" x2="895" y2="378"/>
+
+  <rect class="smallbox" x="795" y="378" width="200" height="102"/>
+  <text class="label small" x="895" y="406">ページテーブル</text>
+  <text class="label mini" x="895" y="438">MMU が参照して</text>
+  <text class="label mini" x="895" y="462">物理側へ変換</text>
+
+  <line class="line" x1="895" y1="480" x2="895" y2="535"/>
+
+  <rect class="smallbox" x="795" y="535" width="200" height="82"/>
+  <text class="label small" x="895" y="562">物理アドレス</text>
+  <text class="label mini" x="895" y="590">最終的な到達先</text>
+
+  <line class="line" x1="350" y1="255" x2="445" y2="236"/>
+  <line class="line" x1="350" y1="418" x2="445" y2="236"/>
+  <line class="line" x1="675" y1="545" x2="795" y2="273"/>
+
+  <line class="line dash" x1="350" y1="180" x2="400" y2="180"/>
+  <line class="line dash" x1="700" y1="273" x2="760" y2="273"/>
+
+  <text class="note" x="54" y="742">要点: セグメントレジスタは重要な入口情報を持つが、現代 Linux の主役はその先のページングである。</text>
+</svg>
