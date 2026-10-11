@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="4" dy="6" stdDeviation="3" flood-color="#000000" flood-opacity="0.2"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444444"/>
+    </marker>
+    <style>
+      .title {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 26px;
+        font-weight: 700;
+        fill: #222222;
+      }
+      .label {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 20px;
+        fill: #222222;
+        text-anchor: middle;
+        dominant-baseline: middle;
+      }
+      .small {
+        font-size: 18px;
+      }
+      .note {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 17px;
+        fill: #333333;
+      }
+      .box {
+        fill: #fafafa;
+        stroke: #333333;
+        stroke-width: 2;
+        rx: 8;
+        ry: 8;
+        filter: url(#shadow);
+      }
+      .inode {
+        fill: #eef6ff;
+        stroke: #2d5f9a;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+        filter: url(#shadow);
+      }
+      .target {
+        fill: #fff6e8;
+        stroke: #9a6a2d;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+        filter: url(#shadow);
+      }
+      .symlink {
+        fill: #f5ecff;
+        stroke: #7040a0;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+        filter: url(#shadow);
+      }
+      .line {
+        stroke: #444444;
+        stroke-width: 3;
+        fill: none;
+        marker-end: url(#arrow);
+      }
+      .dashed {
+        stroke-dasharray: 8 7;
+      }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1118" height="518" fill="#ffffff" stroke="#cccccc" stroke-width="2"/>
+
+  <text class="title" x="280" y="40">ハードリンク</text>
+  <text class="title" x="840" y="40">シンボリックリンク</text>
+
+  <rect class="box" x="60" y="90" width="150" height="56"/>
+  <text class="label" x="135" y="118">名前: a.txt</text>
+
+  <rect class="box" x="60" y="190" width="150" height="56"/>
+  <text class="label" x="135" y="218">名前: b.txt</text>
+
+  <rect class="inode" x="300" y="138" width="170" height="60"/>
+  <text class="label" x="385" y="166">同じ iノード</text>
+  <text class="label small" x="385" y="188">同じ実体を表す</text>
+
+  <rect class="target" x="500" y="138" width="170" height="60"/>
+  <text class="label" x="585" y="166">実データ</text>
+  <text class="label small" x="585" y="188">中身は1つ</text>
+
+  <line class="line" x1="210" y1="118" x2="300" y2="165"/>
+  <line class="line" x1="210" y1="218" x2="300" y2="171"/>
+  <line class="line" x1="470" y1="168" x2="500" y2="168"/>
+
+  <text class="note" x="58" y="286">別名が増えているだけで、どちらも同じ iノードを指す。</text>
+  <text class="note" x="58" y="312">そのため、片方を消しても、もう片方が残る限り実体は残る。</text>
+
+  <rect class="box" x="700" y="90" width="170" height="56"/>
+  <text class="label" x="785" y="118">名前: target.txt</text>
+
+  <rect class="inode" x="940" y="90" width="130" height="56"/>
+  <text class="label" x="1005" y="118">iノード</text>
+
+  <rect class="target" x="920" y="210" width="170" height="60"/>
+  <text class="label" x="1005" y="238">実データ</text>
+
+  <rect class="box" x="700" y="210" width="170" height="56"/>
+  <text class="label" x="785" y="238">名前: link.txt</text>
+
+  <rect class="symlink" x="700" y="320" width="170" height="80"/>
+  <text class="label" x="785" y="346">中には</text>
+  <text class="label small" x="785" y="372">"target.txt"</text>
+
+  <line class="line" x1="870" y1="118" x2="940" y2="118"/>
+  <line class="line" x1="1005" y1="146" x2="1005" y2="210"/>
+  <line class="line" x1="785" y1="266" x2="785" y2="320"/>
+  <line class="line dashed" x1="870" y1="360" x2="920" y2="250"/>
+
+  <text class="note" x="680" y="432">シンボリックリンクは、別のパス名を記録した</text>
+  <text class="note" x="680" y="456">特別なファイルです。アクセス時には、その名前を使って</text>
+  <text class="note" x="680" y="480">あらためて名前解決をやり直します。</text>
+</svg>
