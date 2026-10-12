@@ -884,7 +884,8 @@ Linux 6.18 LTS をいま読むと、32 ビット時代の highmem 問題その�
 
 Linux 6.18 LTS の最新コードでは細部は変わっていても、
 「カーネル仮想アドレス空間の中に、用途別の特別な窓を持つ」という発想は読み解きに役立ちます。
-UmuOS のような自作 OS でも、あとから device register や boot-time mapping を扱う段階で、この発想がかなり効いてきます。
+UmuOS のような自作 OS でも、あとから device register や boot-time mapping を扱う段階で、この発想がかなり
+効いてきます。
 
 #### ２章の５の８　TLB 無効化と整合性維持
 
