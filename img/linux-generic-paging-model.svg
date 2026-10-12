@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="620" viewBox="0 0 1080 620">
+  <defs>
+    <style>
+      .title { font: 700 28px sans-serif; fill: #1f2937; }
+      .label { font: 700 21px sans-serif; fill: #1f2937; }
+      .text { font: 500 18px sans-serif; fill: #374151; }
+      .small { font: 500 16px sans-serif; fill: #4b5563; }
+      .panel { stroke: #475569; stroke-width: 2; rx: 12; ry: 12; }
+      .line { stroke: #64748b; stroke-width: 3; fill: none; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1078" height="618" fill="#ffffff" stroke="#d1d5db" stroke-width="2"/>
+  <text class="title" x="34" y="42">Linux の汎用ページングモデルと各アーキテクチャの関係</text>
+
+  <rect class="panel" x="54" y="88" width="300" height="456" fill="#f8fafc"/>
+  <text class="label" x="204" y="122" text-anchor="middle">Linux が内部で見る汎用モデル</text>
+  <text class="small" x="204" y="148" text-anchor="middle">できるだけ共通の階層名で扱う</text>
+
+  <rect class="panel" x="118" y="184" width="172" height="52" fill="#dbeafe"/>
+  <text class="text" x="204" y="217" text-anchor="middle">pgd</text>
+
+  <rect class="panel" x="118" y="246" width="172" height="52" fill="#bfdbfe"/>
+  <text class="text" x="204" y="279" text-anchor="middle">p4d</text>
+
+  <rect class="panel" x="118" y="308" width="172" height="52" fill="#c7d2fe"/>
+  <text class="text" x="204" y="341" text-anchor="middle">pud</text>
+
+  <rect class="panel" x="118" y="370" width="172" height="52" fill="#ddd6fe"/>
+  <text class="text" x="204" y="403" text-anchor="middle">pmd</text>
+
+  <rect class="panel" x="118" y="432" width="172" height="52" fill="#fde68a"/>
+  <text class="text" x="204" y="465" text-anchor="middle">pte</text>
+
+  <text class="small" x="204" y="520" text-anchor="middle">アーキテクチャによっては</text>
+  <text class="small" x="204" y="542" text-anchor="middle">一部の段が畳まれることもある</text>
+
+  <rect class="panel" x="404" y="88" width="622" height="456" fill="#fcfcfd"/>
+  <text class="label" x="723" y="122" text-anchor="middle">CPU ごとの実際のページテーブル形式</text>
+  <text class="small" x="723" y="148" text-anchor="middle">Linux はここへ落とし込んで使う</text>
+
+  <rect class="panel" x="446" y="186" width="178" height="126" fill="#eef2ff"/>
+  <text class="text" x="540" y="218" text-anchor="middle">x86_64</text>
+  <text class="small" x="540" y="246" text-anchor="middle">4 段 / 5 段の</text>
+  <text class="small" x="540" y="268" text-anchor="middle">ページテーブルを使う</text>
+
+  <rect class="panel" x="634" y="186" width="178" height="126" fill="#ecfeff"/>
+  <text class="text" x="723" y="218" text-anchor="middle">arm64</text>
+  <text class="small" x="723" y="246" text-anchor="middle">ページサイズや</text>
+  <text class="small" x="723" y="268" text-anchor="middle">段数の構成が変わる</text>
+
+  <rect class="panel" x="822" y="186" width="178" height="126" fill="#f0fdf4"/>
+  <text class="text" x="906" y="218" text-anchor="middle">riscv</text>
+  <text class="small" x="906" y="246" text-anchor="middle">Sv39 / Sv48 など</text>
+  <text class="small" x="906" y="268" text-anchor="middle">階層構成が異なる</text>
+
+  <rect class="panel" x="474" y="378" width="498" height="124" fill="#fff7ed"/>
+  <text class="text" x="723" y="418" text-anchor="middle">共通コードでは</text>
+  <text class="text" x="723" y="444" text-anchor="middle">「どの段をどうたどるか」を抽象化して扱う</text>
+  <text class="small" x="723" y="474" text-anchor="middle">そのため mm/ の大部分を、アーキテクチャごとに</text>
+  <text class="small" x="723" y="496" text-anchor="middle">完全分裂させずに済む</text>
+
+  <line class="line" x1="290" y1="210" x2="446" y2="210" marker-end="url(#arrow)"/>
+  <line class="line" x1="290" y1="272" x2="634" y2="272" marker-end="url(#arrow)"/>
+  <line class="line" x1="290" y1="334" x2="822" y2="334" marker-end="url(#arrow)"/>
+  <line class="line" x1="540" y1="312" x2="540" y2="378" marker-end="url(#arrow)"/>
+  <line class="line" x1="723" y1="312" x2="723" y2="378" marker-end="url(#arrow)"/>
+  <line class="line" x1="906" y1="312" x2="906" y2="378" marker-end="url(#arrow)"/>
+</svg>
