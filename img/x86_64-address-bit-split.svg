@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="560" viewBox="0 0 1080 560">
+  <defs>
+    <style>
+      .title { font: 700 28px sans-serif; fill: #1f2937; }
+      .text { font: 500 20px sans-serif; fill: #1f2937; }
+      .small { font: 500 17px sans-serif; fill: #374151; }
+      .tiny { font: 500 15px sans-serif; fill: #4b5563; }
+      .box { stroke: #475569; stroke-width: 2; }
+      .line { stroke: #64748b; stroke-width: 2.5; fill: none; }
+      .accent { font: 700 18px sans-serif; fill: #0f172a; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1078" height="558" fill="#ffffff" stroke="#d4d4d8" stroke-width="2"/>
+  <text class="title" x="34" y="42">64 ビット環境での仮想アドレスの分割イメージ</text>
+
+  <text class="text" x="540" y="96" text-anchor="middle">仮想アドレスは、上位側を各段の索引、下位 12 ビットをページ内オフセットとして使う</text>
+
+  <rect class="box" x="72" y="132" width="170" height="74" rx="10" ry="10" fill="#dbeafe"/>
+  <rect class="box" x="242" y="132" width="170" height="74" rx="10" ry="10" fill="#bfdbfe"/>
+  <rect class="box" x="412" y="132" width="170" height="74" rx="10" ry="10" fill="#c7d2fe"/>
+  <rect class="box" x="582" y="132" width="170" height="74" rx="10" ry="10" fill="#ddd6fe"/>
+  <rect class="box" x="752" y="132" width="170" height="74" rx="10" ry="10" fill="#fde68a"/>
+  <rect class="box" x="922" y="132" width="86" height="74" rx="10" ry="10" fill="#fecaca"/>
+
+  <text class="accent" x="157" y="160" text-anchor="middle">PGD</text>
+  <text class="small" x="157" y="186" text-anchor="middle">9 bit</text>
+
+  <text class="accent" x="327" y="160" text-anchor="middle">P4D</text>
+  <text class="small" x="327" y="186" text-anchor="middle">9 bit</text>
+
+  <text class="accent" x="497" y="160" text-anchor="middle">PUD</text>
+  <text class="small" x="497" y="186" text-anchor="middle">9 bit</text>
+
+  <text class="accent" x="667" y="160" text-anchor="middle">PMD</text>
+  <text class="small" x="667" y="186" text-anchor="middle">9 bit</text>
+
+  <text class="accent" x="837" y="160" text-anchor="middle">PTE</text>
+  <text class="small" x="837" y="186" text-anchor="middle">9 bit</text>
+
+  <text class="accent" x="965" y="160" text-anchor="middle">offset</text>
+  <text class="small" x="965" y="186" text-anchor="middle">12 bit</text>
+
+  <text class="tiny" x="72" y="230">合計すると、9 + 9 + 9 + 9 + 9 + 12 = 57 bit に見えますが、</text>
+  <text class="tiny" x="72" y="252">実際の x86_64 では有効ビット幅に制約があり、上位側は canonical address の規則に従います。</text>
+
+  <line class="line" x1="157" y1="206" x2="157" y2="292" marker-end="url(#arrow)"/>
+  <line class="line" x1="327" y1="206" x2="327" y2="292" marker-end="url(#arrow)"/>
+  <line class="line" x1="497" y1="206" x2="497" y2="292" marker-end="url(#arrow)"/>
+  <line class="line" x1="667" y1="206" x2="667" y2="292" marker-end="url(#arrow)"/>
+  <line class="line" x1="837" y1="206" x2="837" y2="292" marker-end="url(#arrow)"/>
+  <line class="line" x1="965" y1="206" x2="965" y2="292" marker-end="url(#arrow)"/>
+
+  <rect class="box" x="72" y="308" width="170" height="86" rx="10" ry="10" fill="#eff6ff"/>
+  <rect class="box" x="242" y="308" width="170" height="86" rx="10" ry="10" fill="#eff6ff"/>
+  <rect class="box" x="412" y="308" width="170" height="86" rx="10" ry="10" fill="#eef2ff"/>
+  <rect class="box" x="582" y="308" width="170" height="86" rx="10" ry="10" fill="#f5f3ff"/>
+  <rect class="box" x="752" y="308" width="170" height="86" rx="10" ry="10" fill="#fffbeb"/>
+  <rect class="box" x="922" y="308" width="86" height="86" rx="10" ry="10" fill="#fef2f2"/>
+
+  <text class="text" x="157" y="340" text-anchor="middle">最上位の</text>
+  <text class="text" x="157" y="366" text-anchor="middle">表を選ぶ</text>
+
+  <text class="text" x="327" y="340" text-anchor="middle">次の段の</text>
+  <text class="text" x="327" y="366" text-anchor="middle">表を選ぶ</text>
+
+  <text class="text" x="497" y="340" text-anchor="middle">さらに下位の</text>
+  <text class="text" x="497" y="366" text-anchor="middle">表を選ぶ</text>
+
+  <text class="text" x="667" y="340" text-anchor="middle">候補を</text>
+  <text class="text" x="667" y="366" text-anchor="middle">絞り込む</text>
+
+  <text class="text" x="837" y="340" text-anchor="middle">実ページ</text>
+  <text class="text" x="837" y="366" text-anchor="middle">候補を指す</text>
+
+  <text class="text" x="965" y="340" text-anchor="middle">ページ内</text>
+  <text class="text" x="965" y="366" text-anchor="middle">位置</text>
+
+  <path class="line" d="M 157 438 C 270 482, 820 482, 922 438" marker-end="url(#arrow)"/>
+  <text class="small" x="540" y="500" text-anchor="middle">上位ビット群で段階的に表をたどり、最後に offset でページ内の位置を決める</text>
+</svg>
