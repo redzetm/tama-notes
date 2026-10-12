@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="700" viewBox="0 0 1080 700">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="4" dy="6" stdDeviation="3" flood-color="#000000" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444444"/>
+    </marker>
+    <style>
+      .title {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 28px;
+        font-weight: 700;
+        fill: #222222;
+      }
+      .panel {
+        fill: #ffffff;
+        stroke: #333333;
+        stroke-width: 2;
+        rx: 12;
+        ry: 12;
+        filter: url(#shadow);
+      }
+      .addr {
+        fill: #eaf4ff;
+        stroke: #2d5f9a;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+      }
+      .level {
+        fill: #eef8ea;
+        stroke: #4b7a31;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+      }
+      .frame {
+        fill: #fff4df;
+        stroke: #9a6a2d;
+        stroke-width: 2;
+        rx: 10;
+        ry: 10;
+      }
+      .bitbox-a { fill: #dcecff; stroke: #2d5f9a; stroke-width: 1.5; }
+      .bitbox-b { fill: #e7f5df; stroke: #4b7a31; stroke-width: 1.5; }
+      .bitbox-c { fill: #fff1d8; stroke: #9a6a2d; stroke-width: 1.5; }
+      .bitbox-d { fill: #fde8e8; stroke: #a04545; stroke-width: 1.5; }
+      .bitbox-e { fill: #f2e8ff; stroke: #7040a0; stroke-width: 1.5; }
+      .label {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 20px;
+        fill: #222222;
+        text-anchor: middle;
+        dominant-baseline: middle;
+      }
+      .small {
+        font-size: 17px;
+      }
+      .tiny {
+        font-size: 15px;
+      }
+      .note {
+        font-family: "Noto Sans CJK JP", "Hiragino Sans", sans-serif;
+        font-size: 17px;
+        fill: #333333;
+      }
+      .line {
+        stroke: #444444;
+        stroke-width: 3;
+        fill: none;
+        marker-end: url(#arrow);
+      }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1078" height="698" fill="#ffffff" stroke="#cccccc" stroke-width="2"/>
+  <text class="title" x="36" y="42">64 ビット環境での多段ページテーブルの考え方</text>
+
+  <rect class="panel addr" x="55" y="90" width="970" height="122"/>
+  <text class="label" x="540" y="118">仮想アドレスのビット列を、</text>
+  <text class="label" x="540" y="144">複数段の索引とページ内オフセットへ分ける</text>
+
+  <rect class="bitbox-e" x="95" y="164" width="150" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="170" y="181">PGD 索引</text>
+  <rect class="bitbox-a" x="245" y="164" width="150" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="320" y="181">P4D 索引</text>
+  <rect class="bitbox-b" x="395" y="164" width="150" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="470" y="181">PUD 索引</text>
+  <rect class="bitbox-c" x="545" y="164" width="150" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="620" y="181">PMD 索引</text>
+  <rect class="bitbox-d" x="695" y="164" width="150" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="770" y="181">PTE 索引</text>
+  <rect class="bitbox-a" x="845" y="164" width="140" height="34" rx="6" ry="6"/>
+  <text class="label tiny" x="915" y="181">オフセット</text>
+
+  <rect class="panel level" x="90" y="270" width="150" height="96"/>
+  <text class="label" x="165" y="300">PGD</text>
+  <text class="label small" x="165" y="334">最上位表を選ぶ</text>
+
+  <rect class="panel level" x="270" y="270" width="150" height="96"/>
+  <text class="label" x="345" y="300">P4D</text>
+  <text class="label small" x="345" y="334">次の段を選ぶ</text>
+
+  <rect class="panel level" x="450" y="270" width="150" height="96"/>
+  <text class="label" x="525" y="300">PUD</text>
+  <text class="label small" x="525" y="334">さらに下位へ進む</text>
+
+  <rect class="panel level" x="630" y="270" width="150" height="96"/>
+  <text class="label" x="705" y="300">PMD</text>
+  <text class="label small" x="705" y="334">ページ表を絞り込む</text>
+
+  <rect class="panel level" x="810" y="270" width="150" height="96"/>
+  <text class="label" x="885" y="298">PTE</text>
+  <text class="label small" x="885" y="326">対応する</text>
+  <text class="label small" x="885" y="346">実ページを示す</text>
+
+  <line class="line" x1="165" y1="198" x2="165" y2="270"/>
+  <line class="line" x1="345" y1="198" x2="345" y2="270"/>
+  <line class="line" x1="525" y1="198" x2="525" y2="270"/>
+  <line class="line" x1="705" y1="198" x2="705" y2="270"/>
+  <line class="line" x1="885" y1="198" x2="885" y2="270"/>
+
+  <line class="line" x1="240" y1="318" x2="270" y2="318"/>
+  <line class="line" x1="420" y1="318" x2="450" y2="318"/>
+  <line class="line" x1="600" y1="318" x2="630" y2="318"/>
+  <line class="line" x1="780" y1="318" x2="810" y2="318"/>
+
+  <rect class="panel frame" x="355" y="440" width="370" height="118"/>
+  <text class="label" x="540" y="472">物理ページフレーム</text>
+  <text class="label small" x="540" y="506">最後に PTE が指す実ページへ到達し、</text>
+  <text class="label small" x="540" y="534">オフセットを足して実際の位置が決まる</text>
+
+  <line class="line" x1="885" y1="366" x2="705" y2="440"/>
+
+  <text class="note" x="92" y="605">要点 1: 64 ビット環境では、広い仮想空間を扱うためにページテーブルが多段化される。</text>
+  <text class="note" x="92" y="633">要点 2: ただし本質は同じで、アドレスを段ごとの索引に分けて順番にたどるだけである。</text>
+  <text class="note" x="92" y="661">要点 3: 実際の Linux では段数や有効ビット幅に差はあるが、研究上はこの流れを掴むのが重要である。</text>
+</svg>
