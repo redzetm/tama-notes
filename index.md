@@ -57,6 +57,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語９（中級）　9章　シグナル]({{ '/umuOSの為のC言語（中級）9.html' | relative_url }})
 - [UmuOSの為のC言語１０（中級）　10章　時間]({{ '/umuOSの為のC言語（中級）10.html' | relative_url }})
 - [UmuOSの為のC言語１１（中級）　付録　現代の Linux/C 設計で知っておく GCC/Clang 系拡張]({{ '/umuOSの為のC言語（中級）11.html' | relative_url }})
+- [UmuOSの為のC言語１（上級）　1章　UNIXの歴史と標準化]({{ '/umuOSの為のC言語（上級）1.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　1章　ポインタの復習]({{ '/UmuOSの為のC言語（現代ポインタ）1.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　2章　C言語の動的メモリ管理]({{ '/UmuOSの為のC言語（現代ポインタ）2.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　3章　ポインタと関数]({{ '/UmuOSの為のC言語（現代ポインタ）3.html' | relative_url }})
