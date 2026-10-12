@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="330" viewBox="0 0 980 330">
+  <defs>
+    <style>
+      .title { font: 500 26px sans-serif; fill: #374151; }
+      .label { font: 500 24px sans-serif; fill: #374151; }
+      .text { font: 500 20px sans-serif; fill: #374151; }
+      .small { font: 500 18px sans-serif; fill: #4b5563; }
+      .frame { fill: #f8fafc; stroke: #6b7280; stroke-width: 3; }
+      .shadow { fill: #00000020; }
+      .block { fill: #d1d5db; }
+      .line { stroke: #4b5563; stroke-width: 3; fill: none; }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="978" height="328" fill="#ffffff" stroke="#c7cdd4" stroke-width="2"/>
+
+  <text class="title" x="320" y="34" text-anchor="middle">CPU</text>
+
+  <rect class="shadow" x="176" y="54" width="292" height="238"/>
+  <rect class="frame" x="164" y="42" width="292" height="238"/>
+
+  <rect class="block" x="184" y="62" width="108" height="98" rx="4" ry="4"/>
+  <text class="text" x="238" y="104" text-anchor="middle">SRAM</text>
+  <text class="text" x="238" y="132" text-anchor="middle">キャッシュ</text>
+
+  <rect class="block" x="360" y="62" width="82" height="82" rx="4" ry="4"/>
+  <text class="small" x="401" y="102" text-anchor="middle">ページング</text>
+  <text class="small" x="401" y="126" text-anchor="middle">回路</text>
+
+  <rect class="block" x="184" y="182" width="164" height="80" rx="4" ry="4"/>
+  <text class="text" x="266" y="216" text-anchor="middle">キャッシュ</text>
+  <text class="text" x="266" y="242" text-anchor="middle">コントローラ</text>
+
+  <rect class="block" x="542" y="62" width="170" height="222" rx="4" ry="4"/>
+  <text class="text" x="627" y="170" text-anchor="middle">DRAM</text>
+  <text class="text" x="627" y="198" text-anchor="middle">メインメモリ</text>
+
+  <path class="line" d="M 238 160 L 238 182"/>
+  <path class="line" d="M 401 144 L 401 182 L 348 182"/>
+  <path class="line" d="M 348 222 L 542 222"/>
+</svg>
