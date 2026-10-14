@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="660" viewBox="0 0 960 660" role="img" aria-labelledby="title desc">
+  <title id="title">広い意味のLinuxとカーネルの関係図</title>
+  <desc id="desc">ユーザ空間全体の中にカーネルがあり、その下にハードウェアがある層構造を示す図</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f6fbff"/>
+      <stop offset="100%" stop-color="#eef6ee"/>
+    </linearGradient>
+    <linearGradient id="user" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fff6d8"/>
+      <stop offset="100%" stop-color="#ffe9b8"/>
+    </linearGradient>
+    <linearGradient id="kernel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#d9efff"/>
+      <stop offset="100%" stop-color="#bddfff"/>
+    </linearGradient>
+    <linearGradient id="hw" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#e7e7ea"/>
+      <stop offset="100%" stop-color="#d2d4d9"/>
+    </linearGradient>
+    <style>
+      .base { font-family: "Noto Sans CJK JP", "Yu Gothic", sans-serif; fill: #223; }
+      .title { font-size: 28px; font-weight: 700; }
+      .subtitle { font-size: 17px; font-weight: 600; }
+      .label { font-size: 16px; font-weight: 700; }
+      .text { font-size: 15px; }
+      .small { font-size: 14px; }
+      .stroke { stroke: #314257; stroke-width: 2; }
+      .dash { stroke: #53657f; stroke-width: 2.5; stroke-dasharray: 8 6; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="660" fill="url(#bg)"/>
+
+  <text x="60" y="58" class="base title">「Linux 全体」と「カーネル本体」は同じではない</text>
+  <text x="60" y="88" class="base subtitle">研究では、広い意味の OS と、資源管理の中核としてのカーネルを分けて見る</text>
+
+  <rect x="50" y="120" width="860" height="360" rx="24" fill="#ffffff" class="stroke"/>
+  <text x="80" y="160" class="base label">広い意味の Linux / OS 全体</text>
+  <text x="80" y="186" class="base small">ユーザが普段まとめて「Linux」と呼びやすい範囲</text>
+
+  <rect x="90" y="210" width="780" height="130" rx="20" fill="url(#user)" class="stroke"/>
+  <text x="120" y="245" class="base label">ユーザ空間の部品</text>
+  <text x="120" y="278" class="base text">bash / coreutils / glibc / systemd / ssh / エディタ / 各種アプリ</text>
+  <text x="120" y="308" class="base small">使い勝手、起動、設定、自動化、ライブラリ機能を提供する</text>
+
+  <line x1="100" y1="365" x2="860" y2="365" class="dash"/>
+  <text x="120" y="357" class="base small">ここがユーザ空間とカーネル空間の境界</text>
+
+  <rect x="90" y="390" width="780" height="90" rx="20" fill="url(#kernel)" class="stroke"/>
+  <text x="120" y="425" class="base label">カーネル</text>
+  <text x="120" y="455" class="base text">CPU、メモリ、ファイル、プロセス、権限、デバイス、ネットワークを管理する</text>
+
+  <rect x="170" y="500" width="620" height="38" rx="12" fill="url(#hw)" class="stroke"/>
+  <text x="440" y="525" text-anchor="middle" class="base label">ハードウェア</text>
+
+  <rect x="70" y="565" width="820" height="60" rx="16" fill="#fff4da" stroke="#b86a00" stroke-width="2.5"/>
+  <text x="95" y="592" class="base small">ユーザープログラムは普通、CPU 命令としてシステムコールを自分で直接書くのではなく、</text>
+  <text x="95" y="614" class="base small">libc などの関数入口を通して、結果としてカーネルへ処理を依頼する。</text>
+</svg>
