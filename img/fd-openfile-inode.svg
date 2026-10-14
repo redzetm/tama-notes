@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" role="img" aria-labelledby="title desc">
+  <title id="title">fd と open file description と inode の関係図</title>
+  <desc id="desc">プロセスの fd 表から open file description を経由して inode へ到達する関係と、オフセットが fd 番号ではなく open file description 側に属することを示す図</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#eef8ef"/>
+    </linearGradient>
+    <linearGradient id="panelA" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fff6d9"/>
+      <stop offset="100%" stop-color="#ffe8b7"/>
+    </linearGradient>
+    <linearGradient id="panelB" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#dff1ff"/>
+      <stop offset="100%" stop-color="#c7e4ff"/>
+    </linearGradient>
+    <linearGradient id="panelC" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#e8ecef"/>
+      <stop offset="100%" stop-color="#d7dce2"/>
+    </linearGradient>
+    <style>
+      .base { font-family: "Noto Sans CJK JP", "Yu Gothic", sans-serif; fill: #223; }
+      .title { font-size: 28px; font-weight: 700; }
+      .subtitle { font-size: 17px; font-weight: 600; }
+      .label { font-size: 18px; font-weight: 700; }
+      .text { font-size: 15px; }
+      .small { font-size: 14px; }
+      .box { stroke: #314257; stroke-width: 2; rx: 16; ry: 16; }
+      .cell { fill: #fff; stroke: #314257; stroke-width: 1.8; rx: 10; ry: 10; }
+      .arrow { stroke: #455a74; stroke-width: 3; fill: none; }
+      .note { fill: #fff4da; stroke: #c07a08; stroke-width: 2; rx: 14; ry: 14; }
+    </style>
+    <marker id="arrowHead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <polygon points="0,0 10,4 0,8" fill="#455a74"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="560" fill="url(#bg)"/>
+
+  <text x="48" y="52" class="base title">fd / open file description / inode の関係</text>
+  <text x="48" y="82" class="base subtitle">fd は番号そのもの、offset はその先の open file description に属する</text>
+
+  <rect x="40" y="120" width="240" height="280" fill="url(#panelA)" class="box"/>
+  <text x="60" y="154" class="base label">プロセスAの fd 表</text>
+  <text x="60" y="178" class="base small">fd はこの表を引くための添字</text>
+
+  <rect x="60" y="205" width="200" height="48" class="cell"/>
+  <text x="80" y="235" class="base text">fd 0  →  標準入力</text>
+
+  <rect x="60" y="268" width="200" height="48" class="cell"/>
+  <text x="80" y="298" class="base text">fd 1  →  標準出力</text>
+
+  <rect x="60" y="331" width="200" height="48" class="cell"/>
+  <text x="80" y="361" class="base text">fd 3  →  open済みファイル</text>
+
+  <rect x="340" y="120" width="290" height="280" fill="url(#panelB)" class="box"/>
+  <text x="360" y="154" class="base label">open file description</text>
+  <text x="360" y="178" class="base small">open 済み状態そのもの</text>
+
+  <rect x="360" y="205" width="250" height="48" class="cell"/>
+  <text x="380" y="235" class="base text">現在の file offset = 120</text>
+
+  <rect x="360" y="268" width="250" height="48" class="cell"/>
+  <text x="380" y="298" class="base text">status flags = O_RDONLY</text>
+
+  <rect x="360" y="331" width="250" height="48" class="cell"/>
+  <text x="380" y="361" class="base text">参照先 vnode / inode 情報</text>
+
+  <rect x="690" y="120" width="250" height="280" fill="url(#panelC)" class="box"/>
+  <text x="710" y="154" class="base label">inode / 実体</text>
+  <text x="710" y="178" class="base small">通常ファイルなら inode が</text>
+  <text x="710" y="198" class="base small">実体側を表す</text>
+
+  <rect x="710" y="205" width="210" height="48" class="cell"/>
+  <text x="730" y="235" class="base text">inode 番号 = 12345</text>
+
+  <rect x="710" y="268" width="210" height="48" class="cell"/>
+  <text x="730" y="298" class="base text">所有者 / 権限 / サイズ</text>
+
+  <rect x="710" y="331" width="210" height="48" class="cell"/>
+  <text x="730" y="361" class="base text">ディスク上のデータ実体</text>
+
+  <line x1="260" y1="355" x2="340" y2="355" class="arrow" marker-end="url(#arrowHead)"/>
+  <line x1="610" y1="355" x2="690" y2="355" class="arrow" marker-end="url(#arrowHead)"/>
+
+  <rect x="40" y="430" width="900" height="90" class="note"/>
+  <text x="62" y="462" class="base text">重要: fd 3 そのものが offset 120 を表しているのではない。fd 3 は fd 表の入口番号であり、</text>
+  <text x="62" y="486" class="base text">その先の open file description に「現在位置 offset」「open 時の状態」「参照先実体」がぶら下がっている。</text>
+
+  <text x="62" y="535" class="base small">dup() や fork() で複数の fd が同じ open file description を共有すると、offset も共有されうる。</text>
+</svg>
