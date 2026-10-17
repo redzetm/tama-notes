@@ -577,7 +577,8 @@ int main(void) {
 
 また、32 ビット環境で大きなファイルを意識した `O_LARGEFILE` は歴史的には重要ですが、
 現在の 64 ビット Linux では前面に出る機会はかなり減っています。
-研究の優先度としては、まず `O_CLOEXEC`、`O_CREAT`、`O_EXCL`、`O_TRUNC`、`O_APPEND`、`O_NONBLOCK` を確実に読む方が効果的です。
+研究の優先度としては、まず `O_CLOEXEC`、`O_CREAT`、`O_EXCL`、`O_TRUNC`、`O_APPEND`、`O_NONBLOCK` を確実に読む方が
+効果的です。
 
 ### GNU / Linux 拡張を使うなら機能検査マクロも見る
 
