@@ -1844,3 +1844,6 @@ int main(void) {
 - `O_EXCL`、`O_APPEND`、`dup2()`、`pread()`、`writev()` は、どれも意味を一括で渡して隙間を減らすための道具として読める
 - ファイルI/Oを正しく扱うには、パス名、fd、open file description、i-node を混同しないことが決定的に重要である
 - 現代的な C17 / Linux の実践では、close-on-exec、`_FILE_OFFSET_BITS=64`、安全なテンポラリファイル作成を含めて考える必要がある
+
+
+
