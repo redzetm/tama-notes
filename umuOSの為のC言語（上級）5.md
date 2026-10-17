@@ -822,6 +822,177 @@ int main(void) {
 この理解があると、シェルのリダイレクト、`fork()` 後の fd 継承、`pread()` / `pwrite()` が
 なぜ必要なのかも読みやすくなります。
 
+## 5.6 指定位置でのファイルI/O：pread() と pwrite()
+
+`pread()` と `pwrite()` は、`read()` / `write()` に似ていますが、
+「現在のファイルオフセットを動かさずに、指定位置で I/O する」という点が本質です。
+
+```c
+#include <unistd.h>
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+```
+
+`pread()` は成功時に読み取ったバイト数、EOF なら 0、失敗時は `-1` を返します。
+`pwrite()` は成功時に書き込んだバイト数、失敗時は `-1` を返します。
+
+### 5.6.1 これは `lseek() + read()` の単なる省略形ではない
+
+見た目だけなら、`pread()` は次の手順をまとめたものに見えます。
+
+```c
+orig = lseek(fd, 0, SEEK_CUR);
+lseek(fd, offset, SEEK_SET);
+read(fd, buf, count);
+lseek(fd, orig, SEEK_SET);
+```
+
+しかし研究上は、この理解だけでは不十分です。
+重要なのは「現在位置を保存して戻す」ことではなく、
+その一連の意味を利用側で4手順へ分解せず、指定位置I/Oとしてカーネルへ一括で渡せることです。
+
+つまり `pread()` / `pwrite()` の価値は短縮記法ではなく、
+共有オフセットを壊さない指定位置I/Oという意味のまとまりにあります。
+
+### 5.6.2 現在のファイルオフセットに干渉しない
+
+`read()` / `write()` は通常、現在のファイルオフセットを使い、処理後にその位置を進めます。
+一方 `pread()` / `pwrite()` は、第4引数 `offset` で指定した位置を使いますが、
+open file description に保持されている現在位置そのものは更新しません。
+
+この違いは前節までの内容と直結します。
+
+- `read()` / `write()` は共有されるオフセットを使う
+- `pread()` / `pwrite()` は共有オフセットを経由せず、明示位置でI/Oする
+
+したがって、同じ open file description を複数者で共有していても、
+指定位置I/Oどうしでは「現在位置の取り合い」が起きません。
+
+### 5.6.3 競合状態を避ける意味が大きい
+
+この節の核心はここです。
+
+もし利用側が `lseek()` と `read()` / `write()` を分けて使うと、
+その間に別スレッドや別プロセスが割り込めます。
+
+```c
+lseek(fd, offset, SEEK_SET);
+read(fd, buf, count);
+```
+
+この2行は一見正しそうですが、共有オフセットを持つ相手が途中で `lseek()` すれば意味が壊れます。
+5.1 で見た競合状態が、ここでもそのまま発生します。
+
+`pread()` / `pwrite()` が重要なのは、
+「指定位置でI/Oしたい」という意味を一括でカーネルへ渡せるためです。
+
+### 5.6.4 マルチスレッドで特に意味が大きい
+
+マルチスレッド環境では、同一プロセス内の全スレッドが fd テーブルを共有します。
+つまり、同じ open file description を共有しやすいということです。
+
+このとき `lseek()` と `read()` / `write()` の組み合わせを使うと、
+スレッド同士で現在位置を奪い合う危険があります。
+
+`pread()` / `pwrite()` を使えば、
+「スレッドAは 0x1000 から」「スレッドBは 0x2000 から」のように、
+それぞれが共有オフセットへ干渉せずに処理できます。
+
+研究上は次の整理が有効です。
+
+- 共有オフセットを順送りで使いたいなら `read()` / `write()`
+- 明示位置を各自が独立に扱いたいなら `pread()` / `pwrite()`
+
+### 5.6.5 同じ fd を共有する複数プロセスでも有用
+
+この利点はスレッドだけに限りません。
+`fork()` や `dup()` により同じ open file description を共有している複数プロセスでも、
+`pread()` / `pwrite()` は競合回避の意味を持ちます。
+
+つまり、この API が守っているのは「スレッド安全性」だけではなく、
+より一般に「共有オフセットを使う設計から距離を置けること」です。
+
+### 5.6.6 シーク可能な対象にしか使えない
+
+`pread()` / `pwrite()` は指定位置I/Oなので、対象がシーク可能でなければなりません。
+そのため、通常ファイルでは自然に使えますが、パイプやソケットのような対象では意味を持ちません。
+
+ここでも 4章と 5章で繰り返してきた区別が効きます。
+
+- 入口名は似ていても、対象能力は同じではない
+- 「位置」を持てない対象には、指定位置I/Oという概念自体が乗らない
+
+### 5.6.7 性能面でも有利になりやすい
+
+性能面でも、`lseek()` と `read()` / `write()` を別々に呼ぶより、
+`pread()` / `pwrite()` 1回で済ませる方が有利になりやすいです。
+
+理由は単純で、システムコール境界をまたぐ回数が減るからです。
+ただし研究上は、性能差だけを主目的にするより、
+まず意味の安全性と競合回避を主目的として捉える方が筋が良いです。
+
+### 5.6.8 C17 での最小観察コード
+
+`pread()` が共有オフセットを動かさないことを観察する最小例は次のように書けます。
+
+```c
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void) {
+    char buffer[4];
+    int fd;
+    off_t current;
+    ssize_t bytes_read;
+
+    fd = open("sample.txt", O_RDONLY);
+    if (fd == -1) {
+        perror("open");
+        return EXIT_FAILURE;
+    }
+
+    if (lseek(fd, 10, SEEK_SET) == (off_t)-1) {
+        perror("lseek");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    bytes_read = pread(fd, buffer, 3, 0);
+    if (bytes_read == -1) {
+        perror("pread");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    current = lseek(fd, 0, SEEK_CUR);
+    if (current == (off_t)-1) {
+        perror("lseek");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    printf("current offset after pread: %lld\n", (long long)current);
+
+    close(fd);
+    return EXIT_SUCCESS;
+}
+```
+
+このコードでは、現在位置を 10 にしてから `pread(fd, ..., 0)` を呼んでも、
+その後の現在位置は 10 のままです。
+ここに `pread()` の本質がよく表れています。
+
+### 5.6.9 この節で固定したいこと
+
+この節で固定したいのは次の言い換えです。
+
+- `pread()` / `pwrite()` は、指定位置I/Oを共有オフセット非干渉で行う API である
+- 利用側で `lseek()` と I/O を分けるより、意味を一括でカーネルへ渡せる方が強い
+- これは前節までの「共有される open file description をどう扱うか」という話の自然な延長である
+
 ## この時点での研究メモ
 
 - 5.1 では、アトミック動作を「意味のまとまりが途中で壊れないこと」として読む
@@ -832,4 +1003,5 @@ int main(void) {
 - 5.3 では、`F_GETFL` / `F_SETFL`、`O_ACCMODE`、変更可能フラグの境界を押さえる
 - 5.4 では、fd テーブル、オープンファイル記述、i-node の3層と、どの情報が共有されるかを分けて考える
 - 5.5 では、`dup()` / `dup2()` / `dup3()` を「同じ open file description への別名付け」として理解する
+- 5.6 では、`pread()` / `pwrite()` を「共有オフセットへ干渉しない指定位置I/O」として整理する
 - この章の中心は「API を知ること」より「どこで意味が壊れるか、どこが共有されるか、どこが後から調整できるかを見ること」にある
