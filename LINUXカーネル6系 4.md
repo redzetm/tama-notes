@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「遅延処理、softirq、tasklet」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、softirq の処理上限、tasklet の直列化特性と現代の代替
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8「ワークキュー」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq/tasklet/workqueue の実行文脈
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2482,6 +2482,58 @@ UmuOS の通常ユーザー空間から tasklet object や callback state を直
 - high-priority tasklet は scheduler の real-time priority ではない
 - 新規設計では threaded IRQ、workqueue、softirq/`WQ_BH` を要件に応じて選ぶ
 
+## 4.8 ワークキュー
+
+workqueue は、カーネル関数を後で kernel worker task の文脈で実行する仕組みです。
+hard IRQ や softirq では sleep できませんが、通常の workqueue worker は task としてスケジュールされるため、必要に応じて sleep する処理を実行できます。
+
+### workqueue は「遅延実行」だけでなく実行文脈を選ぶ機構
+
+driver は `work_struct` に処理を関連付け、`queue_work()` 等で実行を要求します。
+要求を出した側がその場で callback を呼ぶのではなく、workqueue core が管理する worker task が後から処理します。
+
+現代 Linux の workqueue は、workqueue ごとに独立 worker を一つずつ作る旧来の単純モデルではありません。
+worker pool と concurrency management により、CPU affinity、同時実行数、作業の依存関係などを考慮して worker を動かします。
+
+### softirq/tasklet/threaded IRQ との使い分け
+
+- hard IRQ handler: 最小限の即時応答。sleep 不可
+- softirq: 高頻度な後続処理。sleep 不可で CPU 間並列を考慮する
+- tasklet: softirq 上の legacy API。sleep 不可で、新規設計では代替を優先する
+- threaded IRQ: 特定 IRQ と密接に結び付いた処理を thread context で実行する
+- 通常 workqueue: IRQ に限らない後続処理を worker task で実行し、必要なら sleep できる
+
+`WQ_BH` workqueue は名称に workqueue を含みますが、bottom-half 文脈で動くため通常 worker workqueue と同じように sleep できません。
+API 名だけではなく、workqueue の type と実行文脈を確認します。
+
+### work item と workqueue の寿命
+
+work item は queue された後に非同期で実行されるため、callback が参照するデータの寿命を保つ必要があります。
+driver の終了や device removal では、work の cancel/flush と起動元の停止を適切な順序で行わないと、解放済みデータを worker が参照する race が起こり得ます。
+
+並列実行の要否や順序保証も設計で選びます。
+単に一度 queue しただけで「必ず即座に実行」「常に同じ CPU」「前の work と完全に直列」とは限らないため、workqueue flags と queue の種類を調べます。
+
+### UmuOS での workqueue 観察
+
+UmuOS の `/proc/interrupts` や `/proc/softirqs` は IRQ/softirq の統計であり、個別 work item の実行履歴そのものではありません。
+driver の後続処理に workqueue が使われているかは Linux 6.18.1 の driver source を追い、tracepoint が利用可能なら workqueue trace event も観察します。
+
+### Linux 6.18 LTS のソースを追う入口
+
+- workqueue API と flags: `include/linux/workqueue.h`
+- worker pool と queue 実装: `kernel/workqueue.c`
+- workqueue trace event: `include/trace/events/workqueue.h`
+- IRQ 後続処理との比較: `kernel/irq/manage.c`、`kernel/softirq.c`
+
+### この節で固定したいこと
+
+- 通常 workqueue callback は worker task 文脈で実行され、sleep できる
+- workqueue は worker pool と concurrency management で work を実行する
+- `WQ_BH` は通常 workqueue と異なり bottom-half 文脈で動き、sleep できない
+- work の queue/cancel/flush と callback が使うデータ寿命を合わせて設計する
+- UmuOS の IRQ/softirq カウンタだけでは個々の work item を追跡できない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2517,4 +2569,5 @@ UmuOS の通常ユーザー空間から tasklet object や callback state を直
 - 4.7.1.4 では、pending snapshot の処理、softirq の再実行上限、ksoftirqd での実行文脈を整理する
 - 4.7.1.5 では、ksoftirqd による残件処理と通常 task の実行機会を両立させる仕組みを整理する
 - 4.7.2 では、tasklet の同一 instance 直列化、lifecycle、現代の代替機構を区別する
+- 4.8 では、workqueue を worker task 文脈で実行する遅延処理機構として、softirq/tasklet と区別する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
