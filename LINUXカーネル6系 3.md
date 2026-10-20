@@ -287,7 +287,8 @@ current->mm、current->files、current->cred、current->pid のような形で�
 元の 3.2.2.3 と 3.2.3 は list_head と hlist、さらに親子関係を説明していました。
 ここも現代 Linux の読解でかなり大事です。
 なぜなら task_struct は単独で存在するのではなく、
-全 task のリスト、親子リスト、スレッドグループ、PID ハッシュ、runqueue など、多数の連結関係の中に埋め込まれているからです。
+全 task のリスト、親子リスト、スレッドグループ、PID ハッシュ、runqueue など、多数の連結関係の中に埋め込まれている
+からです。
 
 Linux の list_head は「コンテナ自身ではなく、要素の中にリンクを埋め込む」設計です。
 このため 1 つの task_struct が、tasks、children、sibling、thread_group など複数のリストに同時参加できます。
