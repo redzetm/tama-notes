@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.4「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配、カーネルスタック」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP 時の affinity、実行文脈ごとのカーネルスタック
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.5「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配、カーネルスタック、IRQ レジスタ退避」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP affinity、IRQ entry の状態保存
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.4 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.5 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1506,6 +1506,75 @@ stack 切り替えを調べるには、UmuOS が使う Linux 6.18.1 の config �
 - softirq の実行場所は常に専用 stack とは限らない
 - UmuOS の IRQ カウンタは CPU 別処理を示すが stack の選択までは示さない
 
+#### 4.6.1.5 割り込みハンドラ用のレジスタ退避処理
+
+外部 IRQ が CPU に配送されると、CPU は IDT の対応ゲートから低水準入口へ移ります。
+割り込まれた処理へ安全に戻り、Linux の IRQ 共通処理へ状態を渡すために、CPU 自動保存分と Linux の entry stub が追加保存する分を合わせて管理します。
+
+#### CPU 自動保存と IRQ entry stub
+
+CPU は割り込み入口に移るとき、復帰に必要な基本状態をアーキテクチャ規則に従って保存します。
+ただし、C の handler を呼ぶために必要な汎用レジスタすべてを CPU が自動保存するわけではありません。
+
+Linux の x86 entry stub は、必要な汎用レジスタを保存し、IRQ vector や入口状態を共通形式へ整えます。
+構成によっては、この段階で CPU ごとの IRQ stack へ切り替えることもあります。
+共通化された状態は `struct pt_regs` などを通じて後続処理へ渡されます。
+
+```text
+CPU IRQ delivery
+    |
+    +--> CPU: 入口・復帰に必要な状態を保存
+    |
+    +--> x86 vector stub: vector 固有の入口処理
+    |
+    +--> entry code: 汎用レジスタ保存 / 必要なら IRQ stack へ移動
+    |
+    +--> IRQ entry -> generic IRQ handler
+```
+
+図は処理の役割を示すもので、すべての vector が同じ命令列や stack 切り替えを行うという意味ではありません。
+
+#### `pt_regs` と vector 情報
+
+`pt_regs` は Linux が保存したレジスタ状態を C 側の処理へ渡すための表現です。
+IRQ handler や診断処理は、この状態から割り込まれた位置やレジスタ値を参照できます。
+
+旧本文では `interrupt[n]` 配列が IRQ ごとの stub を持ち、IRQ 番号から 256 を引いた値をスタックへ積む説明になっています。
+これは Linux 2.6 の x86-32 実装詳細です。
+Linux 6.18 の x86-64 では vector entry stub と entry macro を用いるため、同じ配列名、負の番号符号化、`SAVE_ALL` マクロがそのまま存在すると考えてはいけません。
+
+#### generic IRQ 処理へ引き継ぐ
+
+状態保存を終えると、アーキテクチャ entry code は IRQ 番号や descriptor を特定し、generic IRQ 層の flow handler へ処理を渡します。
+そこから `irq_desc` と `irqaction` に基づき、コントローラ処理やドライバ handler が実行されます。
+
+復帰時も旧本文の `ret_from_intr()` という固定ラベルだけで考えず、現行 entry/exit 経路で IRQ 状態を戻し、保留中処理や再スケジューリングを確認してから元の実行へ戻ると捉えます。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- x86 vector stub と IRQ entry: `arch/x86/entry/entry_64.S`
+- entry macro と `pt_regs` 受け渡し: `arch/x86/include/asm/idtentry.h`
+- x86 IRQ stack / entry 管理: `arch/x86/kernel/irq.c`、`arch/x86/kernel/irq_64.c`
+- 共通 IRQ entry: `kernel/irq/handle.c`
+- `pt_regs` 定義: `arch/x86/include/asm/ptrace.h`
+
+vector stub から共通 entry、IRQ descriptor の flow handler、action handler まで順に追うと、アーキテクチャ依存部分と generic IRQ 層の境界を確認できます。
+
+#### UmuOS での観察
+
+UmuOS の `/proc/interrupts` は、IRQ ごとのカウンタや CPU ごとの処理数を見せますが、entry stub が保存した `pt_regs` やレジスタ保存順は表示しません。
+Oops などの診断が発生した場合はレジスタ dump が出ることがありますが、それだけで IRQ entry の全処理順を復元できるわけではありません。
+
+IRQ entry の細部を調べるときは、UmuOS の Linux 6.18.1 と一致するソース、CPU アーキテクチャ、カーネル設定をそろえて読みます。
+
+#### この小節で固定したいこと
+
+- CPU 自動保存と Linux entry stub の追加保存を区別する
+- vector stub は IRQ を低水準 entry へ導き、共通 IRQ 層へ状態を渡す
+- `pt_regs` は保存状態を C 側で扱う Linux の表現である
+- `interrupt[]`、負の IRQ 番号、`SAVE_ALL`、`ret_from_intr()` を Linux 6.18 x86-64 の現行実装と同一視しない
+- UmuOS の `/proc/interrupts` は IRQ 活動を示すが、レジスタ保存フレームは示さない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1526,4 +1595,5 @@ stack 切り替えを調べるには、UmuOS が使う Linux 6.18.1 の config �
 - 4.6.1.2 では、`irq_desc` / `irq_data` / `irqaction` / `irq_chip` の責務分担を整理する
 - 4.6.1.3 では、SMP 時の IRQ 配送を一律ラウンドロビンではなく affinity と実効配置で捉える
 - 4.6.1.4 では、task stack・hard IRQ stack・IST stack の役割を分け、softirq の実行文脈は構成依存として読む
+- 4.6.1.5 では、CPU 自動保存、x86 vector stub、`pt_regs`、generic IRQ entry の役割を分ける
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
