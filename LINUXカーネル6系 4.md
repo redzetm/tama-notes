@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8「ワークキュー」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq/tasklet/workqueue の実行文脈
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.1「ワークキューとデータ構造」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、softirq/tasklet/workqueue の実行文脈、workqueue 内部構造
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.1 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2534,6 +2534,93 @@ driver の後続処理に workqueue が使われているかは Linux 6.18.1 の
 - work の queue/cancel/flush と callback が使うデータ寿命を合わせて設計する
 - UmuOS の IRQ/softirq カウンタだけでは個々の work item を追跡できない
 
+### 4.8.1.1 ワークキューのデータ構造
+
+workqueue を読むときは、work item、workqueue、worker pool、worker task を同じものとして扱わないことが重要です。
+Linux 6.18 の内部構造は旧本文の「CPU ごとの `cpu_workqueue_struct` 配列」と同一ではなく、workqueue と worker pool の関係を通じて実行管理を行います。
+
+```text
+work_struct (実行する関数と work state)
+    |
+    v
+workqueue_struct (workqueue の設定・属性)
+    |
+    v
+pool_workqueue (queue と worker_pool の接続・active 管理)
+    |
+    v
+worker_pool (worker 群と実行待ち work)
+    |
+    v
+worker task (kernel thread として callback を実行)
+```
+
+この図は通常の worker-pool workqueue の責務を理解するための概念図です。`WQ_BH` はこの通常の worker task 経路とは異なり、bottom-half 文脈で実行されます。
+Linux 6.18 の実際のメンバ配置や内部型は `kernel/workqueue.c` と関連 header で確認します。
+
+#### `work_struct`: 実行する一件の work
+
+`struct work_struct` は、後で実行する work item を表します。
+概念上、どの callback を実行するか、queue 中かどうか、内部管理に必要な状態を持ちます。
+
+driver は通常、work item を静的に用意するか `INIT_WORK()` 等で初期化し、`queue_work()` で workqueue へ投入します。
+内部フラグの配置や bit encoding は実装詳細なので、driver は公開 macro/API を使い、内部 field を直接操作しません。
+
+#### `workqueue_struct`: work の属性と利用単位
+
+`workqueue_struct` は、work の属性、active 制限、worker pool への接続などを管理する workqueue の単位です。
+通常の bound workqueue は CPU locality を考慮して worker pool へ接続されますが、unbound workqueue では CPU binding の扱いが異なります。
+
+workqueue flags は、凍結、メモリ回収との相互作用、高優先度、unbound、BH context などの属性を選ぶために使われます。
+すべての flag がどの用途にも安全に使えるわけではなく、必要性と実行文脈を確認して選びます。
+
+#### `pool_workqueue` と `worker_pool`
+
+`pool_workqueue` は、特定 workqueue と worker pool を結び付け、同時実行数などの queue 管理を仲介します。
+worker pool は実際に work を実行する worker 群と待ち行列を管理し、CPU ごとの pool や unbound pool など複数の形を持ち得ます。
+
+この階層により、Linux は「各 workqueue が独自の worker thread を一つずつ持つ」という単純な設計にせず、worker の再利用と concurrency management を行います。
+
+#### worker は task context だが呼び出し元 task ではない
+
+work callback は worker kernel thread の task context で実行されます。
+そのため、通常の workqueue では sleep できる場合がありますが、呼び出し元のプロセス文脈やユーザーアドレス空間を引き継ぐわけではありません。
+
+つまり「task context で実行される」と「queue した task の代わりにその task の文脈で実行される」は別です。
+callback は worker task の優先度、CPU 配置、queue 属性などの影響を受けます。
+
+#### 構造体の内部配置は driver の契約ではない
+
+原文の `cpu_workqueue_struct`、`worklist`、`remove_sequence` / `insert_sequence` 等の表は Linux 2.6 の実装を説明しています。
+Linux 6.18 では内部構造や concurrency 管理の方法が変わっているため、そのメンバ名を driver の利用契約として覚える必要はありません。
+
+driver が依存すべきなのは `work_struct` の初期化、queue/cancel/flush などの公開 API と、その同期規則です。
+workqueue core を研究するときにのみ、内部構造の定義と更新経路を対象バージョンのソースで追います。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- 公開型・初期化 macro・flags: `include/linux/workqueue.h`
+- workqueue / worker pool の内部実装: `kernel/workqueue.c`
+- workqueue trace event: `include/trace/events/workqueue.h`
+- 内部構造の header: `kernel/workqueue_internal.h`
+
+`queue_work()` の API から投入処理へ進み、workqueue と pool の選択、worker の起床、callback 実行、work 完了の同期を順に追います。
+
+#### UmuOS での構造の観察
+
+UmuOS の `/proc` で `kworker` task を確認できる場合がありますが、特定の work item がどの `work_struct` / pool に属するかは通常の process list だけでは分かりません。
+tracefs の workqueue event が利用できる場合は、queue・activate・execute・complete のイベントで実行関係を観察できます。
+
+通常ユーザー空間から内部構造体の field を直接読むことはできないため、実行中 kernel に対応する Linux 6.18.1 の source と、必要な tracing/debug 設定を揃えます。
+
+#### この小節で固定したいこと
+
+- `work_struct` は一件の work、`workqueue_struct` は queue の属性、worker_pool は実行基盤、worker は実行 task を表す
+- Linux 6.18 の workqueue は concurrency management と pool 再利用を行う
+- worker は task context だが queue 元の task/user address space ではない
+- 旧 `cpu_workqueue_struct` の表を現在の driver API と混同しない
+- UmuOS の process list だけでは個々の work item を特定できず、必要なら workqueue trace event を使う
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2570,4 +2657,5 @@ driver の後続処理に workqueue が使われているかは Linux 6.18.1 の
 - 4.7.1.5 では、ksoftirqd による残件処理と通常 task の実行機会を両立させる仕組みを整理する
 - 4.7.2 では、tasklet の同一 instance 直列化、lifecycle、現代の代替機構を区別する
 - 4.8 では、workqueue を worker task 文脈で実行する遅延処理機構として、softirq/tasklet と区別する
+- 4.8.1.1 では、work item・workqueue・pool・worker task の階層と責務を分けて捉える
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
