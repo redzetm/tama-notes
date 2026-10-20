@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.6「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ entry と dispatch」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP affinity、IRQ entry から handler までの dispatch
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.7「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、IRQ flow handler から device action までの処理
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.6 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.7 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1648,6 +1648,60 @@ IRQ 名、virtio デバイス、affinity、カーネル設定を合わせて読�
 - IRQ からの復帰時に softirq 等の保留処理が進む場合がある
 - UmuOS の IRQ カウンタは dispatch の結果を示すが、内部の呼び出し順までは示さない
 
+#### 4.6.1.7 __do_IRQ() の役割を現代の flow handler から読む
+
+旧本文の `__do_IRQ()` は、IRQ descriptor の状態を確認し、controller の ack/end 操作や action handler の呼び出しを組み合わせていました。
+Linux 6.18 では、この処理を一つの `__do_IRQ()` 関数と固定フラグループだけで理解するのではなく、IRQ の flow type ごとに割り当てられる flow handler と `irq_chip` callback の組として読みます。
+
+#### flow handler が IRQ の処理順を組み立てる
+
+IRQ descriptor には、その IRQ の種類に応じた flow handler が結び付きます。
+代表的には edge、level、fast EOI、per-CPU などの処理形式があり、それぞれで mask、ack、action 呼び出し、EOI のタイミングが異なります。
+
+たとえば level-triggered IRQ では、割り込み要因が残ったまま再通知されないよう mask/ack の扱いが重要になります。
+fast-EOI 型では、action handler 群を処理した後に EOI を行う流れが基本になります。
+どの方式でも順序が完全に同じというわけではなく、controller の仕様と IRQ flow handler が決めます。
+
+#### `irq_chip` callback と device action の境界
+
+flow handler は IRQ descriptor の状態を確認し、必要に応じて `irq_chip` の mask/unmask、ack、EOI などを呼び出します。
+その後、descriptor に登録された `irqaction` の handler を実行し、各 action が割り込み要因を自デバイスの状態から判定します。
+
+共有 IRQ では複数の action が順に呼ばれ、どの handler が割り込みを処理したかを戻り値で共通層へ伝えます。
+該当 handler がない、または全 handler が自デバイスの割り込みではないと判断する状態は、spurious/unhandled IRQ の検出に関係します。
+
+#### descriptor lock と handler 実行を一つの長いロック区間にしない
+
+IRQ descriptor の状態遷移は lock や atomic state によって保護されますが、action handler の実行を常に descriptor lock の保持中に行うとは限りません。
+デバイス handler の実行中に他 CPU や別の IRQ 処理が関係し得るため、lock の取得・解放位置を実際の flow handler と IRQ core で確認します。
+
+原文の擬似コードにある `IRQ_PENDING` / `IRQ_INPROGRESS` ループは、2.6 系実装の状態遷移を理解する材料です。
+Linux 6.18 の内部表現へ同じフラグ名や同じループ構造をそのまま当てはめず、現行の flow handler が担う意味を追います。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- generic flow handler: `kernel/irq/chip.c`
+- action handler の呼び出し: `kernel/irq/handle.c`
+- `irq_desc` / IRQ state: `include/linux/irqdesc.h`、`include/linux/irq.h`
+- irq_chip callback の抽象化: `include/linux/irq.h`
+- x86 vector から IRQ への接続: `arch/x86/kernel/apic/vector.c`、`arch/x86/kernel/irq.c`
+
+IRQ descriptor にどの flow handler が設定されるかを見てから、flow handler の ack/mask/action/EOI の順序を追うと、旧 `__do_IRQ()` の一枚岩の処理を現代の層へ分解できます。
+
+#### UmuOS での flow handler 観察
+
+UmuOS の `/proc/interrupts` は IRQ のカウンタと名称を示しますが、どの flow handler が使われ、ack/EOI がどの順で実行されたかは表示しません。
+kernel の tracing が利用可能なら、irq handler entry/exit trace event を使って handler の実行を観察できます。
+tracefs の mount 状態、kernel config、権限が必要なので、使用可否を確認してから使います。
+
+#### この小節で固定したいこと
+
+- 現代の IRQ 処理は一つの `__do_IRQ()` 関数ではなく、flow handler と irq_chip callback に分担される
+- edge/level/fast-EOI 等の flow type により mask/ack/EOI の順序が異なる
+- `irqaction` handler はデバイス固有の割り込み要因を確認し、処理結果を共通層へ返す
+- descriptor の状態保護と device handler 実行の lock 範囲を区別して読む
+- UmuOS の `/proc/interrupts` は flow type や controller callback の順序を直接示さない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1670,4 +1724,5 @@ IRQ 名、virtio デバイス、affinity、カーネル設定を合わせて読�
 - 4.6.1.4 では、task stack・hard IRQ stack・IST stack の役割を分け、softirq の実行文脈は構成依存として読む
 - 4.6.1.5 では、CPU 自動保存、x86 vector stub、`pt_regs`、generic IRQ entry の役割を分ける
 - 4.6.1.6 では、x86 vector entry から generic IRQ dispatch、action handler、irq_exit までを責務ごとに追う
+- 4.6.1.7 では、IRQ flow handler と irq_chip callback が処理順を組み立てることを押さえる
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
