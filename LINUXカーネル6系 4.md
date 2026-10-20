@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー、データ構造、API、system workqueue」
-- 今回の主題: I/O IRQ の共有・配送、softirq/tasklet/workqueue の実行文脈、work の lifecycle と system workqueue の選択
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9「割り込みおよび例外からの復帰」
+- 今回の主題: IRQ/例外の入口から復帰まで、ネストの解消、user return 前の pending work と再スケジューリング
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2750,6 +2750,76 @@ workqueue trace event が有効なら queue/execute/complete を追い、使え�
 - `WQ_BH` は system worker task の queue と異なり sleep できない
 - UmuOS の `kworker` 表示だけでは workqueue や work item を識別できない
 
+## 4.9 割り込みおよび例外からの復帰
+
+割り込み・例外の処理を終えると、Linux は保存していた状態を使って中断された実行を再開します。
+ただし復帰先は必ずユーザー空間とは限りません。
+割り込みや例外が別のカーネル処理を中断していた場合は、そのカーネル文脈へ戻り、ネストがほどけて最外の復帰地点に到達して初めてユーザー空間へ戻ることがあります。
+
+復帰時の大きな分岐は次の通りです。
+
+- ネストした entry: 直前に中断されたカーネル実行を再開する
+- user mode への復帰: 保留中シグナルや通知処理、再スケジューリングの必要性を確認する
+- kernel mode への復帰: 割り込み状態や preemption 条件が許す場合に再スケジューリングを行う
+
+このため「ハンドラが return したら直ちに割り込まれた命令へ戻る」とだけ考えると、Linux の復帰前処理を見落とします。
+
+### 4.9.1 復帰条件を現代 Linux の entry/exit 経路で考える
+
+原文は x86-32 の `ret_from_intr()` / `ret_from_exception()`、`thread_info` flag、VM86 mode を含む経路を説明します。
+Linux 6.18 x86-64 では entry/exit の実装、thread flag の配置、システムコール入口との共通化が異なるため、古いラベルと flag 一覧を現行ソースにそのまま当てはめません。
+
+#### ネスト中なら kernel context へ戻る
+
+IRQ や例外がカーネル実行中に発生していた場合、復帰の最初の目的はそのカーネル実行を継続することです。
+さらに entry がネストしていれば、まず一つ内側の handler または中断された kernel path へ戻り、全ての復帰条件を確認できる最外の地点までユーザー復帰処理を進めません。
+
+kernel mode からの復帰でも preemption は条件付きです。
+preempt count、ローカル IRQ 状態、lock/atomic context などが許す場合に限り、再スケジューリングが行われます。
+
+#### user mode へ戻る前に追加 work を処理する
+
+user mode へ戻る最外の経路では、カーネルは保留中シグナル、再スケジューリング要求、notify/trace/audit 等の復帰前 work を確認します。
+再スケジュールが必要なら別 task を実行してから戻り、シグナルがあれば user context を調整して signal handler へ移る場合があります。
+
+これらは「例外 handler が直接ユーザーの signal handler を呼ぶ」という形ではありません。
+例外処理が状態や signal を準備し、共通の return-to-user 経路が安全な地点で配送を完了します。
+
+#### interrupt/exception return と system call return
+
+x86-64 で割り込みや例外から戻るときは、保存状態と特権遷移に応じて interrupt return の機構を使います。
+一方、通常の 64-bit system call は `syscall` 入口を持ち、復帰経路は別の最適化・検証条件を持ちます。
+両者は user return 前の work を共有する場合がありますが、同じ入口命令・同じ復帰命令の一つの経路ではありません。
+
+古い本文にある仮想 8086 mode の保存処理や `EIP`/`EFLAGS` のスタック位置は x86-32 の説明です。
+Linux 6.18 x86-64 の復帰フレームと混ぜず、対象の entry assembly と common return code で確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- x86-64 entry/return assembly: `arch/x86/entry/entry_64.S`
+- 共通の syscall/exception return work: `kernel/entry/common.c`
+- x86 固有の user return work: `arch/x86/entry/common.c`
+- signal delivery と user frame: `kernel/signal.c`
+- IRQ entry/exit と復帰連携: `arch/x86/kernel/irq.c`、`kernel/softirq.c`
+
+まず entry assembly から user/kernel return の分岐を見つけ、次に共通 exit-to-user work の loop、シグナル配送、schedule の呼び出しへ進むと復帰処理全体を追えます。
+
+#### UmuOS での復帰経路の見方
+
+UmuOS でユーザープロセスの例外後にシグナルや終了状態が見える場合、それは例外入口の後に Linux の return-to-user 処理が進んだ結果です。
+起動中のカーネル例外なら、Oops/panic としてシリアルログや `dmesg` に出る場合があり、ユーザー空間へ復帰する通常経路とは分けて扱います。
+
+ログだけでは、復帰前に schedule が入ったか、どの return fast path が選ばれたかまでは分かりません。
+UmuOS の Linux 6.18.1 entry source と、利用可能な tracing を組み合わせて確認します。
+
+#### この節で固定したいこと
+
+- 復帰先は user mode と kernel mode で分岐し、ネスト中は一つ前の kernel context に戻る
+- user mode への復帰前には、保留中シグナルや再スケジューリング等の work を処理する
+- kernel mode の preemption には context/lock/IRQ state の条件がある
+- interrupt/exception return と system call return は入口機構が異なる
+- x86-32 の VM86 と固定 thread_info flag 表を x86-64 の現行復帰経路と混同しない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2789,4 +2859,5 @@ workqueue trace event が有効なら queue/execute/complete を追い、使え�
 - 4.8.1.1 では、work item・workqueue・pool・worker task の階層と責務を分けて捉える
 - 4.8.1.2 では、queue・delay・flush・cancel の API 契約と work の寿命管理を整理する
 - 4.8.1.3 では、system workqueue と専用 queue の使い分け、旧 events queue からの現代化を整理する
+- 4.9 では、IRQ/例外からの復帰を単純なレジスタ復元でなく、user/kernel return と保留 work の判定経路として捉える
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
