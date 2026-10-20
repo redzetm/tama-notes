@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.1「割り込み処理、I/O 割り込み、割り込みベクタ」
-- 今回の主題: 外部 IRQ と CPU 例外の区別、IDT から Linux 入口への引き継ぎ、I/O IRQ の共有・配送、IRQ 番号と CPU ベクタの動的対応
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.2「割り込み処理、I/O 割り込み、割り込みベクタ、IRQ データ構造」
+- 今回の主題: 外部 IRQ と CPU 例外の区別、I/O IRQ の共有・配送、IRQ 番号と CPU ベクタの動的対応、generic IRQ のデータ構造
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.1 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.2 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1270,6 +1270,100 @@ Linux IRQ と CPU vector の対応を調べる場合は、x86 vector 管理と I
 - Linux 2.6 系の固定ベクタ表を Linux 6.18 x86-64 の割り当てとして使わない
 - UmuOS の `/proc/interrupts` は Linux IRQ を示し、CPU vector を直接示すものではない
 
+#### 4.6.1.2 IRQ データ構造
+
+Linux の generic IRQ 層は、IRQ ごとの状態、割り込みコントローラとの接続、ドライバ handler の登録を別々の構造で管理します。
+Linux 2.6 系の `irq_desc_t` 表やメンバ一覧をそのまま現行構造へ対応付けるのではなく、役割の分担から読むと理解しやすくなります。
+
+```text
+Linux IRQ 番号
+    |
+    v
+irq_desc  -- IRQ 全体の状態、flow handler、action 群
+    |
+    +-- irq_data -- hardware IRQ / irqdomain / irq_chip との対応
+    |
+    +-- irqaction -- 登録された device handler、flags、dev_id 等
+    |
+    +-- 統計・状態管理
+```
+
+この図は概念的な関係です。実際のメンバ配置や親子 IRQ の構成は Linux 6.18 の型定義で確認します。
+
+#### `irq_desc`: Linux IRQ ごとの管理の中心
+
+`struct irq_desc` は、Linux IRQ ごとの管理状態をまとめる中心的な記述子です。
+IRQ の状態、実行する flow handler、登録された `irqaction` の列、統計や同期に関わる情報などが結び付いています。
+
+つまり `irq_desc` は CPU ベクタの表ではありません。
+Linux IRQ 番号から、共通 IRQ 層がその割り込みをどう処理するかを引き出すための管理単位です。
+
+#### `irq_data`: hardware IRQ と controller 層への接続
+
+`struct irq_data` は、Linux IRQ と割り込みコントローラ側の情報を結び付けます。
+hardware IRQ 番号、所属する IRQ domain、対応する `irq_chip`、chip 固有データなどが関係します。
+
+IRQ domain は、コントローラ固有の番号を Linux が扱う IRQ へ対応付ける層です。
+階層化された割り込みコントローラでは親 domain との連鎖もあり得るため、「Linux IRQ から hardware IRQ が一意な単純配列で求まる」とは限りません。
+
+#### `irqaction`: ドライバ handler の登録
+
+`struct irqaction` は、IRQ に登録された処理を表します。
+共有 IRQ では一つの `irq_desc` に複数の action が登録され、それぞれが自身の handler と `dev_id` を持ちます。
+
+- `handler`: hard IRQ 側で呼ばれる primary handler
+- `thread_fn`: threaded IRQ を使う場合のスレッド側処理
+- `flags`: 共有や trigger 条件などの登録属性
+- `name`: `/proc/interrupts` などに表示する識別名
+- `dev_id`: handler が自分のデバイス状態を特定するための値
+
+実際のフィールドや構成はカーネル版で確認します。
+ここで押さえるべきなのは、IRQ の controller 状態とドライバ固有処理を同じオブジェクトに混ぜず、登録 action として接続することです。
+
+#### `irq_chip`: controller 固有操作の抽象化
+
+`struct irq_chip` は、割り込みコントローラに固有な操作を共通 IRQ 層へ提供します。
+代表的な操作には IRQ の mask/unmask、ack/EOI、affinity 設定などがあります。
+
+generic IRQ の flow handler は状態遷移と処理順序を管理し、必要な controller 操作を `irq_chip` の callback に依頼します。
+そのため、ドライバ handler が直接 PIC/APIC のレジスタや MSI 設定をすべて扱う必要はありません。
+
+#### 状態フラグと統計を読むときの注意
+
+原文にある `IRQ_PENDING`、`IRQ_INPROGRESS`、`IRQ_DISABLED` 等は、Linux 2.6 系の状態モデルを説明する名前です。
+Linux 6.18 では内部状態の表現や同期方法が変化しているため、同じ名前・意味が同じ構造体に存在すると仮定せず、現行の `irq_desc` / `irq_data` 定義と IRQ core の処理を確認します。
+
+また、未処理・spurious IRQ の検出や、過剰な割り込みへの対処は、単一の古いカウンタ閾値だけで理解できません。
+統計の目的、抑止方針、表示方法を現在の `kernel/irq/` の実装から調べます。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ 記述子: `include/linux/irqdesc.h`
+- IRQ data と chip/domain 接続: `include/linux/irqdata.h`
+- IRQ action と登録 API: `include/linux/interrupt.h`
+- IRQ chip API: `include/linux/irq.h`
+- IRQ descriptor の割り当て・管理: `kernel/irq/` 配下
+- `/proc/interrupts` の出力: `kernel/irq/proc.c`
+
+`request_irq()` の登録経路で `irq_desc` に action が接続されるところから読み、次に `irq_data` で hardware domain と chip がどう結び付くかを追うと、構造間の境界が見えます。
+
+#### UmuOS での IRQ 状態観察
+
+UmuOS では `/proc/interrupts` を読み、Linux IRQ ごとのカウンタ、デバイス名、CPU 別の処理数を確認できます。
+`/proc/irq/<IRQ>/` が存在する場合は affinity などの公開属性も観察できますが、内部の `irq_desc` や `irqaction` の全状態がそのまま公開されるわけではありません。
+
+実際の IRQ 番号は起動構成で変わり得るため、前回の番号を固定値として扱わず、毎回表示名とデバイス構成を照合します。
+内部構造を確認するときは UmuOS の実行カーネルと一致する Linux 6.18.1 のソースを使います。
+
+#### この小節で固定したいこと
+
+- `irq_desc` は Linux IRQ ごとの状態と処理経路を管理する
+- `irq_data` は hardware IRQ、IRQ domain、irq_chip との接続を表す
+- `irqaction` はドライバ handler の登録単位であり、共有 IRQ では複数登録され得る
+- `irq_chip` は割り込みコントローラ固有の mask/ack/EOI 等を抽象化する
+- 2.6 系の状態フラグ名や統計閾値を、Linux 6.18 の実装と同一視しない
+- UmuOS の `/proc/interrupts` は内部データ構造の一部を観察する窓口である
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1287,4 +1381,5 @@ Linux IRQ と CPU vector の対応を調べる場合は、x86 vector 管理と I
 - 4.6 では、I/O IRQ・タイマ割り込み・IPI を発生源と処理目的で分けて捉える
 - 4.6.1 では、共有 IRQ、generic IRQ 層、irq_chip、hardirq と後続処理の分担を整理する
 - 4.6.1.1 では、Linux IRQ と CPU vector の動的な対応、古い固定ベクタ表の扱いを整理する
+- 4.6.1.2 では、`irq_desc` / `irq_data` / `irqaction` / `irq_chip` の責務分担を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
