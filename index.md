@@ -33,6 +33,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [LINUXカーネル6系の研究１ 概要]({{ '/LINUXカーネル6系%201.html' | relative_url }})
 - [LINUXカーネル6系の研究２ メモリアドレッシング]({{ '/LINUXカーネル6系%202.html' | relative_url }})
 - [LINUXカーネル6系の研究３ プロセス]({{ '/LINUXカーネル6系%203.html' | relative_url }})
+- [LINUXカーネル6系の研究４ 割り込みと例外]({{ '/LINUXカーネル6系%204.html' | relative_url }})
 - [運用コマンド man風ノート インデックス（Rocky Linux 9.7）]({{ '/man_index.html' | relative_url }})
 - [C言語ライブラリ／システムコール man風ノート インデックス]({{ '/lib-syscall_index.html' | relative_url }})
 - [開発現場でのSELinuxの位置づけとdisable]({{ '/selinux.html' | relative_url }})
