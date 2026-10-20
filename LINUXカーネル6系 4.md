@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」、4.7「遅延処理」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、IRQ の動的割り当て、hard IRQ 後続処理の実行文脈
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」、4.7〜4.7.1「遅延処理と softirq」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、IRQ の動的割り当て、hard IRQ 後続処理と softirq の実行文脈
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1995,7 +1995,7 @@ x86 の `/proc/interrupts` には `RES`、`CAL`、`TLB` など CPU 間処理に�
 そこで Linux は、直ちに行う必要のない処理を別の実行機構へ移し、hard IRQ の処理を短く保ちます。
 この章では、その代表として softirq、tasklet、workqueue、threaded IRQ の違いを整理します。
 
-### 4.7.1 遅延処理は「どの文脈で実行するか」で選ぶ
+### 遅延処理は「どの文脈で実行するか」で選ぶ
 
 遅延処理の選択では、単に「後で動かす」だけでなく、sleep が必要か、複数 CPU で並列実行され得るか、順序保証が必要かを考えます。
 
@@ -2007,7 +2007,7 @@ x86 の `/proc/interrupts` には `RES`、`CAL`、`TLB` など CPU 間処理に�
 `WQ_BH` のように workqueue API を使っても bottom-half 文脈で実行される形があります。
 通常の worker workqueue と同じように sleep できるとは限らないため、実際の workqueue type を確認します。
 
-### 4.7.2 softirq/tasklet と workqueue の文脈差
+### softirq/tasklet と workqueue の文脈差
 
 softirq と tasklet は割り込みに近い文脈で実行され、sleep できません。
 処理時間を短く保ち、ユーザー空間メモリへ直接アクセスしたり、ブロッキング I/O を行ったりしないようにします。
@@ -2015,7 +2015,7 @@ softirq と tasklet は割り込みに近い文脈で実行され、sleep でき
 通常の workqueue は kernel worker task の文脈で動くため、必要に応じて sleep できます。
 この違いは、実装をどの後続処理へ渡すかを決める重要な基準です。
 
-### 4.7.3 tasklet は現代コードでは legacy として読む
+### tasklet は現代コードでは legacy として読む
 
 原文では tasklet が汎用的な遅延処理の選択肢として扱われています。
 Linux 6.18 では tasklet API は既存 driver を読むうえではまだ重要ですが、新規コードでの採用は避け、threaded IRQ、workqueue、要件に合う bottom-half 機構を検討する方向です。
@@ -2023,14 +2023,14 @@ Linux 6.18 では tasklet API は既存 driver を読むうえではまだ重要
 つまり、tasklet を見たら直ちに誤りと判断するのではなく、既存設計の理由と置き換え先を考えます。
 並列性、sleep の要否、処理順序、キャンセル・終了時の同期を比べて選びます。
 
-### 4.7.4 CPU affinity と遅延処理
+### CPU affinity と遅延処理
 
 遅延処理は起動された CPU 上で実行される場合や、workqueue の設計に基づいて別 CPU の worker で実行される場合があります。
 「必ず起動元 CPU に留まる」と一律には考えず、softirq、tasklet、per-CPU work、通常 workqueue のそれぞれで affinity と並列性を確認します。
 
 これにより、CPU ごとのデータを使う処理で同期が必要か、CPU hotplug や負荷分散にどう対応するかが変わります。
 
-### 4.7.5 UmuOS での遅延処理の観察
+### UmuOS での遅延処理の観察
 
 UmuOS では `/proc/softirqs` を読むと、CPU ごとの softirq 処理回数を観察できます。
 `/proc/interrupts` と合わせて、virtio-net の通信などを発生させる前後のカウンタを比べると、hard IRQ と softirq の活動を分けて眺められます。
@@ -2038,7 +2038,7 @@ UmuOS では `/proc/softirqs` を読むと、CPU ごとの softirq 処理回数�
 ただし、このカウンタは個別の tasklet や workqueue function の実行をすべて特定するものではありません。
 workqueue の実行者や処理順まで確認する場合は、利用できる tracepoint、debug 設定、または Linux 6.18.1 の該当 driver と core source を使います。
 
-### 4.7.6 Linux 6.18 LTS のソースを追う入口
+### Linux 6.18 LTS のソースを追う入口
 
 - softirq core: `kernel/softirq.c`
 - softirq/tasklet API: `include/linux/interrupt.h`
@@ -2046,13 +2046,91 @@ workqueue の実行者や処理順まで確認する場合は、利用できる 
 - threaded IRQ 登録と処理: `kernel/irq/manage.c`
 - trace event: `include/trace/events/irq.h`、workqueue trace event 定義
 
-### 4.7.7 この節で固定したいこと
+### この節で固定したいこと
 
 - 遅延処理は、hard IRQ handler を短く保つための実行機構である
 - softirq/tasklet と通常 workqueue は実行文脈と sleep 可能性が異なる
 - tasklet は legacy code の読解対象であり、新規設計では代替機構を検討する
 - 起動元 CPU への固定や並列性は処理機構ごとに確認する
 - UmuOS では `/proc/softirqs` を統計観察に使えるが、個別 callback の実行までは分からない
+
+### 4.7.1 ソフト割り込み（softirq）
+
+softirq は、hard IRQ handler の最小限の処理から分離した後続処理を、割り込みに近い文脈で実行する仕組みです。
+workqueue の worker task とは異なり、softirq handler は sleep できず、短時間で処理する必要があります。
+
+Linux 2.6 の原文には当時の少数の softirq 種別だけが載っています。
+Linux 6.18 ではネットワーク、タイマ、block I/O、RCU など複数の用途で使われます。
+ソフト割り込み種別と index はカーネル内の定義で管理されるため、古い表の行数や番号を現行構成として使わず、ソースで確認します。
+
+#### Linux 6.18 で見る代表的な softirq 種別
+
+以下は用途を理解するための代表例です。実際の定義・順序は対象カーネルの `include/linux/interrupt.h` で確認します。
+
+- `HI_SOFTIRQ`: 高優先度 tasklet を含む高優先度の後続処理
+- `TIMER_SOFTIRQ`: timer wheel 等の timer 処理
+- `NET_TX_SOFTIRQ` / `NET_RX_SOFTIRQ`: ネットワーク送信・受信側の処理
+- `BLOCK_SOFTIRQ` / `IRQ_POLL_SOFTIRQ`: block I/O 完了や poll 処理
+- `TASKLET_SOFTIRQ`: legacy tasklet の実行
+- `SCHED_SOFTIRQ`: scheduler 関連の後続処理
+- `HRTIMER_SOFTIRQ`: high-resolution timer に関連する処理
+- `RCU_SOFTIRQ`: RCU callback 等の処理
+
+これらは「デバイスごとの softirq 一覧」ではありません。
+各 subsystem が共通の softirq slot を使い、必要な処理を登録・起動します。
+
+#### 起動要求と実行は CPU ごとに管理される
+
+softirq の起動要求は、対象 CPU に pending として記録されます。
+通常はその CPU の割り込み復帰時などに pending 状態を確認して処理します。
+処理量が多い場合は `ksoftirqd/N` のような per-CPU kernel thread が後続を実行する場合があります。
+
+このため、softirq を読むときは「いつ起動要求が記録されたか」と「どの実行文脈で callback が処理されたか」を分けます。
+`/proc/softirqs` は処理回数の統計であり、個々の callback の発生理由を示すログではありません。
+
+#### softirq は別 CPU で並行実行され得る
+
+softirq は CPU ごとの pending 状態を持つため、同じ softirq 種別の callback が異なる CPU 上で同時に実行される場合があります。
+そのため、複数 CPU から共有データへ触れる handler は、ロック、atomic、per-CPU データなど適切な同期を設計する必要があります。
+
+同じ CPU 上で同じ softirq を再入させない制御があっても、それだけでシステム全体の並行アクセスがなくなるわけではありません。
+tasklet の「同一 tasklet を並列実行しない」性質と、softirq handler 全体の CPU 間並列性も区別します。
+
+#### softirq と他の後続処理の選択
+
+次のように実行要件で選びます。
+
+- hard IRQ 内で完了できる短い処理: primary IRQ handler
+- sleep 不要で高頻度の処理: softirq 等の bottom-half 機構
+- 既存 tasklet の維持: tasklet。ただし新規設計では代替を検討
+- sleep を必要とする処理: threaded IRQ または通常 workqueue
+
+処理を softirq に移せば自動で安全・高速になるわけではありません。
+sleep 不可、CPU 間並列、遅延上限などの制約があり、要件に合わないなら task 文脈の機構を選ぶ必要があります。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- softirq 種別の定義: `include/linux/interrupt.h`
+- softirq 登録・起動・実行: `kernel/softirq.c`
+- `ksoftirqd` 処理: `kernel/softirq.c`
+- tasklet API と実装: `include/linux/interrupt.h`、`kernel/softirq.c`
+- ネットワーク後続処理の例: `net/core/dev.c`
+
+#### UmuOS での観察
+
+UmuOS では `cat /proc/softirqs` で CPU ごとの種別別カウンタを読み、virtio-net 通信などの前後差分を確認できます。
+`/proc/interrupts` と同時に見ると、ハード IRQ のカウンタと softirq 側の処理量を分けて観察できます。
+
+ただし、カウンタ差分だけでどの network callback が実行されたかまでは分かりません。
+必要なら tracefs の利用可否を確認し、tracepoint と `net/core/dev.c` の呼び出し経路を調べます。
+
+#### この小節で固定したいこと
+
+- softirq は hard IRQ の後続処理を担うが、sleep できない割り込みに近い文脈である
+- 種別と index は Linux 6.18 の定義を確認し、Linux 2.6 の表を固定仕様として使わない
+- CPU ごとに pending 状態を持ち、同じ種類の softirq が別 CPU で並列実行され得る
+- `ksoftirqd` は処理量が残る場合の実行経路の一つであり、唯一の softirq 実行場所ではない
+- UmuOS の `/proc/softirqs` は統計観察の窓口で、callback の詳細な因果関係は別途追跡する
 
 ## この時点での研究メモ
 
@@ -2082,4 +2160,5 @@ workqueue の実行者や処理順まで確認する場合は、利用できる 
 - 4.6.1.10 では、IRQ/vector 確保と handler 登録を分け、現代 PCI/virtio の動的割り当てを読む
 - 4.6.2 では、IPI をデバイス IRQ と区別し、CPU 間要求と同期の仕組みとして整理する
 - 4.7 では、hard IRQ 後続処理を softirq/tasklet/workqueue/threaded IRQ の実行文脈で区別する
+- 4.7.1 では、softirq の種類、CPU ごとの pending、並列実行と sleep 不可の制約を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
