@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.3「割り込み・例外復帰と kernel preemption」
-- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、preemption model、user return 前の pending work
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.4「割り込み・例外復帰と user mode 復帰」
+- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の pending work と signal 等の処理
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.3 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.4 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2991,6 +2991,54 @@ tracefs が利用できるなら IRQ entry/exit と `sched_switch` 等を同じ�
 - kernel preemption の範囲は Linux 6.18 の build config/model を確認する
 - UmuOS では context switch の原因をログだけで断定せず、config/source/tracing を照合する
 
+#### 4.9.1.4 ユーザモードプログラムの再開
+
+割り込まれた実行が user mode だった場合、Linux は保存した user register frame を直ちに復元するのではなく、ユーザーモードへ戻る前に必要な処理が残っていないか確認します。
+この exit-to-user 経路は、割り込み・例外だけでなく system call 等からの復帰にも関係する共通の境界です。
+
+#### user return 前に保留 work を処理する
+
+再スケジュール、保留 signal、通知・tracing 等の work がある場合、カーネルは対応する処理を行ってから user mode へ戻ります。
+処理によっては task が切り替わったり、signal handler 用に user register frame が変更されたりするため、「割り込み前の命令へ必ずそのまま戻る」とは限りません。
+
+保留 work がなくなれば、entry code は保存された user state を復元し、適切な x86-64 return path でユーザー実行を再開します。
+どの命令で戻るかや、各 work flag の具体的な配置は entry path と CPU/設定に依存します。
+
+#### 旧 `resume_userspace` と現行 entry/exit 経路
+
+原文の `resume_userspace`、`work_pending`、`TIF_SYSCALL_TRACE` 等を直接検査する命令列は、旧 x86-32 の実装例です。
+Linux 6.18 では同じ責務を現行 x86 entry code と共通の exit-to-user 処理が分担するため、旧ラベルや flag mask を現行コードの配置・手順として探さないでください。
+
+- x86-64 の IRQ/exception entry と return: `arch/x86/entry/entry_64.S`
+- 共通の user mode 復帰準備・保留 work: `kernel/entry/common.c`
+- task schedule と再スケジュール: `kernel/sched/core.c`
+- signal 処理と user frame の準備: `kernel/signal.c` および architecture 固有コード
+
+読むときは、user mode から入ったことをどこで判定するか、return 前にどの work を処理するか、その後どの経路で user register frame を戻すかを分けて追います。
+
+#### signal は user mode に戻る前の境界で反映される
+
+保留 signal がある場合、カーネルは signal disposition や mask 等に従って処理を判断します。
+user handler を実行するケースでは、カーネルが handler を直接呼ぶのではなく、復帰用 user state を整えてユーザーモードへ戻り、その後に user code として handler が実行されます。
+signal の既定動作や無視など、必ず handler 起動になるわけではありません。
+
+system call trace/audit、single-step、notification 等も同様に、旧本文の一つの `thread_info` flag mask に還元せず、現行の機能ごとの入口・出口処理として追います。
+
+#### UmuOS での user return 観察
+
+UmuOS のユーザー空間からは、system call の結果、signal handler の動作、task switch などの結果を確認できますが、それだけでは内部の exit-to-user loop の実行順序は分かりません。
+
+tracefs が使える場合は syscall/signal/scheduler の trace event を組み合わせます。
+通常のシリアルログや `/proc/interrupts` は復帰時の保留 work を直接示すものではないため、Linux 6.18.1 の entry/common code と観測結果を対応付けます。
+
+#### この小節で固定したいこと
+
+- user mode へ戻る前に、再スケジュールや signal 等の保留 work を処理する
+- 保留 signal の処理結果により user register frame が変わることがある
+- user handler はカーネル内で直接呼ばれず、復帰後の user execution として実行される
+- 旧 x86-32 の `resume_userspace` と flag mask を現行 x86-64 の固定手順とみなさない
+- UmuOS の外部観測だけでは exit-to-user loop の内部順序を断定できない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -3034,4 +3082,5 @@ tracefs が利用できるなら IRQ entry/exit と `sched_switch` 等を同じ�
 - 4.9.1.1 では、entry frame による復帰先判定と kernel/user return の分岐を整理する
 - 4.9.1.2 では、kernel path の再開、preemption 条件、need_resched の意味を区別する
 - 4.9.1.3 では、need_resched と実際の preemption 可否を preempt/lock/IRQ state から判断する
+- 4.9.1.4 では、user return 前の保留 work と user register frame の準備を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
