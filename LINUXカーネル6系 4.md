@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.3「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP 時の IRQ affinity
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.4「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配、カーネルスタック」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP 時の affinity、実行文脈ごとのカーネルスタック
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.3 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.4 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1432,6 +1432,80 @@ QEMU の vCPU 数が 1 なら、CPU 間分配や複数 CPU affinity の比較は
 - MSI/MSI-X の複数 vector/queue 配置は性能や CPU 局所性に関係する
 - UmuOS で CPU ごとの IRQ カウンタを比べるには、複数 vCPU と affinity 設定を確認する
 
+#### 4.6.1.4 複数のカーネルモードスタック
+
+Linux は、ユーザー空間からカーネルへ入った task を処理するためのカーネルスタックを task ごとに持ちます。
+しかし、割り込みや深刻な例外の入口を、常にその task の通常カーネルスタックだけで処理するとは限りません。
+スタックを分ける主な理由は、割り込みのネストによるスタック消費を抑え、通常スタックが使いにくい状況でも診断・処理を開始できるようにすることです。
+
+#### task カーネルスタック
+
+各 task のカーネルスタックは、その task がシステムコールやカーネル内処理を実行するためのスタックです。
+スケジューラが task を切り替えると、その task のカーネル実行文脈も対応するカーネルスタックから再開します。
+
+サイズや配置、ガード領域、割り当て方法はカーネル構成・アーキテクチャで異なります。
+したがって、古い本文の `thread_union` と 4KB/8KB の記述を Linux 6.18 x86-64 全般の固定仕様として覚えないようにします。
+
+#### CPU ごとの hard IRQ stack
+
+x86-64 Linux では、構成に応じて hard IRQ の入口処理に CPU ごとの IRQ stack を使います。
+これにより、IRQ が task のカーネルスタックを深く消費することを抑え、IRQ nesting の実行文脈を task の通常カーネル処理から分けやすくなります。
+
+この stack は task 固有ではなく CPU 固有です。
+そのため、どの CPU の IRQ stack 上で動いているかを含めて状態を管理する必要があります。
+実際の切り替え条件と構成 option は x86 の IRQ entry code で確認します。
+
+#### IST と深刻な例外用 stack
+
+x86-64 の IST（Interrupt Stack Table）は、IDT ゲートが特定の例外入口で専用 stack を選べる仕組みです。
+通常の task stack が壊れている、または十分に使えない可能性がある状況でも、別の stack から例外処理を始めるために利用できます。
+
+IST stack は hard IRQ stack と同じものではありません。
+前者は特定ベクタに関連付ける例外入口用、後者は CPU ごとの IRQ 処理用という異なる役割を持ちます。
+どの例外が IST を使うかは Linux の IDT 設定を確認します。
+
+#### softirq は常に専用 stack とは限らない
+
+softirq の処理場所は、起動された経路とカーネル構成に依存します。
+hard IRQ の終了時に処理される場合と、`ksoftirqd` のような kernel thread の task 文脈で処理される場合があり、後者は task のカーネルスタックを使います。
+
+そのため、Linux 2.6 時代の「CPU ごとに soft IRQ stack を持つ」という説明を Linux 6.18 の全構成にそのまま当てはめず、softirq の実行文脈と architecture 実装を追います。
+
+#### stack の対応関係を概念図で整理する
+
+```text
+task のカーネル処理         -> task ごとの kernel stack
+hard IRQ entry              -> 条件に応じて CPU ごとの IRQ stack
+特定の例外 entry (IST 使用) -> TSS に設定した IST stack
+softirq                     -> 実行経路に応じた hardirq / task 文脈
+```
+
+この図は代表的な役割分担です。実際に stack が切り替わる条件は、Linux 6.18 の x86 設定と entry code で確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- x86-64 IRQ stack の切り替え: `arch/x86/kernel/irq_64.c`
+- x86 IRQ stack の宣言と helper: `arch/x86/include/asm/irq_stack.h`
+- IDT / IST の設定: `arch/x86/kernel/idt.c`、`arch/x86/include/asm/desc.h`
+- x86 entry code: `arch/x86/entry/entry_64.S`
+- task stack の管理: `kernel/fork.c`、`include/linux/sched/task_stack.h`
+- softirq の実行経路: `kernel/softirq.c`
+
+#### UmuOS での観察
+
+UmuOS の `/proc/interrupts` で IRQ の CPU 別カウンタは見られますが、どの stack を使って handler が動いたかは通常表示されません。
+stack 切り替えを調べるには、UmuOS が使う Linux 6.18.1 の config と x86 entry source を照合します。
+
+起動初期の例外や kernel Oops の診断では、通常 task stack 以外の専用 stack が使われる可能性も含めて読みます。
+レジスタ dump の値だけから「どの stack にいたか」を断定せず、IST 設定と IRQ stack の実装を合わせて確認します。
+
+#### この小節で固定したいこと
+
+- task kernel stack、CPU ごとの hard IRQ stack、IST stack は目的と所有単位が異なる
+- hard IRQ stack の使用や stack size は構成に依存する
+- softirq の実行場所は常に専用 stack とは限らない
+- UmuOS の IRQ カウンタは CPU 別処理を示すが stack の選択までは示さない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1451,4 +1525,5 @@ QEMU の vCPU 数が 1 なら、CPU 間分配や複数 CPU affinity の比較は
 - 4.6.1.1 では、Linux IRQ と CPU vector の動的な対応、古い固定ベクタ表の扱いを整理する
 - 4.6.1.2 では、`irq_desc` / `irq_data` / `irqaction` / `irq_chip` の責務分担を整理する
 - 4.6.1.3 では、SMP 時の IRQ 配送を一律ラウンドロビンではなく affinity と実効配置で捉える
+- 4.6.1.4 では、task stack・hard IRQ stack・IST stack の役割を分け、softirq の実行文脈は構成依存として読む
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
