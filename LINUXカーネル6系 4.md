@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.8「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch、再通知」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、IRQ flow handler から action までの処理、pending IRQ の再通知
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.9「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch、再通知、ISR」
+- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、pending IRQ の再通知、現代の ISR と threaded IRQ
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.8 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.9 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1763,6 +1763,78 @@ IRQ を意図的に disable して再通知を試す実験は、ストレージ�
 - spurious/unhandled IRQ と pending IRQ の再通知は別の状態として扱う
 - UmuOS のカウンタだけではイベント欠落や再通知の成否を確定できない
 
+#### 4.6.1.9 割り込みサービスルーチン（ISR）
+
+デバイス driver の ISR は、generic IRQ 層から呼び出されるデバイス固有 handler です。
+ISR は「割り込みを受けたら常に仕事をする関数」ではなく、まず自分のデバイスに処理すべき要因があるかを確認し、その結果を IRQ core へ返します。
+
+#### 現代の primary handler API
+
+Linux の一般的な IRQ handler は `irq_handler_t` に対応する形で登録され、概念的には IRQ 番号と driver が渡した `dev_id` を受け取ります。
+
+```c
+irqreturn_t handler(int irq, void *dev_id);
+```
+
+旧本文のように `pt_regs *regs` を全 ISR が通常引数として受け取る形ではありません。
+CPU レジスタ状態が必要な特別な処理は、アーキテクチャ入口や別の tracing/debug 経路と区別して扱います。
+
+#### 共有 IRQ ではデバイス要因を確認する
+
+共有 IRQ の場合、同じ IRQ に登録された複数 handler が呼ばれる可能性があります。
+各 handler は自分のデバイスの status register、completion queue、interrupt cause 等を確認し、自デバイスが通知元か判定します。
+
+- `IRQ_NONE`: 自デバイスの割り込み要因ではない
+- `IRQ_HANDLED`: 自デバイスの割り込みを確認し、必要な一次処理を行った
+- `IRQ_WAKE_THREAD`: 一次処理の後、登録された threaded handler へ処理を渡す
+
+この戻り値は共有 IRQ の未処理判定や spurious IRQ 検出に関係します。
+デバイス要因を確認せず常に `IRQ_HANDLED` を返すと、共有先の誤判定や診断情報の劣化を招きます。
+
+#### primary handler は短く保つ
+
+primary handler は hardirq 文脈で呼び出されるため、sleep する処理や長時間の作業を行えません。
+通常は割り込み要因を確認し、デバイス側の必要な ack/mask を行い、状態を記録して後続処理を起動する程度に絞ります。
+
+デバイス driver は `request_threaded_irq()` を使うことで、短い primary handler と thread context で動く `thread_fn` を組み合わせられます。
+threaded handler は task 文脈で動くため、必要に応じて sleep できます。
+hardirq 側で処理を完了する設計が適切か、スレッドへ渡すべきかは、遅延要件とデバイス仕様で判断します。
+
+#### IRQ handler の戻り値と controller ACK を混同しない
+
+`IRQ_HANDLED` は Linux の handler が自デバイスの割り込み要因を処理したことを示す戻り値です。
+これは割り込みコントローラへの ACK/EOI 操作そのものではありません。
+controller の mask/ack/EOI は generic IRQ flow handler と `irq_chip` callback の責務であり、デバイス側の status clear は driver 固有処理です。
+
+どの層が何を acknowledge するかは controller とデバイスの仕様で異なります。
+デバイス status の clear と APIC EOI を同じ操作と考えず、両者の順序は該当 driver と irqchip のコードで確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ handler の型と戻り値: `include/linux/interrupt.h`
+- `request_irq()` / `request_threaded_irq()` の登録: `kernel/irq/manage.c`
+- action handler の呼び出しと戻り値処理: `kernel/irq/handle.c`
+- IRQ flow handler: `kernel/irq/chip.c`
+- threaded IRQ の実装: `kernel/irq/` 配下
+
+driver の `request_threaded_irq()` 呼び出しから登録した primary handler / `thread_fn` へ進み、IRQ core が戻り値と controller 処理をどう扱うかを追います。
+
+#### UmuOS での ISR 観察
+
+標準の UmuOS user space だけでは、カーネル driver 内の ISR を直接呼び出したり、その戻り値を画面から読んだりはできません。
+`/proc/interrupts` は IRQ counter と名前を示し、kernel tracing が利用可能なら IRQ handler entry/exit event を観察できる場合があります。
+
+ISR の戻り値や共有 IRQ の判定を調べるには、UmuOS が使う Linux 6.18.1 の該当 driver と IRQ core のソースを照合します。
+実験目的でカーネル driver を変更する場合は、固定版の UmuOS ではなく複製した開発用イメージを使います。
+
+#### この小節で固定したいこと
+
+- ISR はデバイス固有の割り込み要因を確認する handler である
+- 共有 IRQ では `IRQ_NONE` / `IRQ_HANDLED` 等の戻り値が IRQ core の判定に関わる
+- primary handler は hardirq 制約の範囲で短くし、sleep が必要なら threaded IRQ 等を検討する
+- handler の戻り値と controller ACK/EOI は別の層の操作である
+- Linux 6.18 の一般 ISR API は旧本文の `regs` 引数や `SA_INTERRUPT` 前提と異なる
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1787,4 +1859,5 @@ IRQ を意図的に disable して再通知を試す実験は、ストレージ�
 - 4.6.1.6 では、x86 vector entry から generic IRQ dispatch、action handler、irq_exit までを責務ごとに追う
 - 4.6.1.7 では、IRQ flow handler と irq_chip callback が処理順を組み立てることを押さえる
 - 4.6.1.8 では、pending IRQ、controller retrigger、イベント数の保持、spurious IRQ を区別する
+- 4.6.1.9 では、device ISR の戻り値、共有 IRQ 判定、threaded IRQ への分離を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
