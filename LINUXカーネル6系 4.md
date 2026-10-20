@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6「割り込み処理」
-- 今回の主題: 外部 IRQ と CPU 例外の区別、IDT から Linux 入口への引き継ぎ、実行文脈のネスト、割り込みの処理目的
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1「割り込み処理と I/O 割り込み」
+- 今回の主題: 外部 IRQ と CPU 例外の区別、IDT から Linux 入口への引き継ぎ、実行文脈のネスト、I/O IRQ の共有・配送・処理
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1068,7 +1068,7 @@ I/O を要求した task が、割り込みを受けた瞬間にも同じ CPU �
 デバイス処理を開始した task が sleep し、別の task が動いている間に完了 IRQ が届くこともあります。
 そのため、IRQ をそのときの current task に対するエラー通知として扱うのではなく、デバイスやカーネル状態を更新するイベントとして処理します。
 
-### 4.6.1 割り込みの主な分類
+### 割り込みの主な分類
 
 #### I/O 割り込み
 
@@ -1087,7 +1087,7 @@ IPI は CPU が別の CPU へ処理を要求するための割り込みです。
 代表的な用途には、再スケジューリング通知、TLB shootdown、CPU 間関数呼び出しなどがあります。
 外部デバイスの I/O IRQ とは発生源と目的が異なります。
 
-### 4.6.2 例外と IRQ で「発生元」を結び付ける意味が違う
+### 例外と IRQ で「発生元」を結び付ける意味が違う
 
 例外は特定の命令実行と結び付き、通常はその命令を実行していた task の文脈で原因を処理します。
 一方、I/O IRQ はデバイスが通知するため、IRQ 到着時に実行中の task が I/O 要求元とは限りません。
@@ -1095,15 +1095,15 @@ IPI はさらに、他 CPU からカーネルへ依頼された処理です。
 
 この違いがあるため、例外では原因命令やアクセスアドレスを調べることが重要になり、IRQ ではデバイス状態・IRQ 記述子・登録済み handler の対応を調べることが重要になります。
 
-### 4.6.3 即時処理と後続処理を分ける
+### 即時処理と後続処理を分ける
 
 ハード IRQ handler は、割り込み源を確認し、必要な最小限の応答や状態更新を行います。
 時間のかかる処理や sleep を伴う処理は、そのまま hardirq 文脈で実行できないため、softirq、workqueue、threaded IRQ などへ渡します。
 この分担はデバイス応答を遅らせず、通常 task の実行機会も確保するために重要です。
 
-具体的な共有 IRQ、handler 登録、割り込みベクタ、遅延処理の方法は、4.6.1 以降で順に扱います。
+具体的な共有 IRQ、handler 登録、割り込みベクタ、遅延処理の方法は、次の 4.6.1 以降で順に扱います。
 
-### 4.6.4 UmuOS での割り込み観察
+### UmuOS での割り込み観察
 
 UmuOS では、virtio-blk への I/O や virtio-net の通信を起こす前後で `/proc/interrupts` を読み、カウンタやデバイス表示の変化を比べられます。
 タイマや IPI の表示も確認できますが、カウンタ名や割り当て番号は CPU 数、カーネル設定、QEMU の仮想デバイス構成で変わります。
@@ -1112,7 +1112,7 @@ UmuOS では、virtio-blk への I/O や virtio-net の通信を起こす前後�
 特定のドライバ関数が実行されたことや、割り込みがネストしたことまで `/proc/interrupts` だけで証明できるわけではありません。
 必要に応じて、該当する Linux 6.18.1 の IRQ handler と tracing 情報を照合します。
 
-### 4.6.5 Linux 6.18 LTS のソースを追う入口
+### Linux 6.18 LTS のソースを追う入口
 
 - Linux 共通 IRQ 管理: `kernel/irq/`
 - IRQ handler の実行: `kernel/irq/handle.c`
@@ -1122,13 +1122,95 @@ UmuOS では、virtio-blk への I/O や virtio-net の通信を起こす前後�
 - タイマと tick 管理: `kernel/time/`、`kernel/time/tick/`
 - CPU 間関数呼び出し: `kernel/smp.c`
 
-### 4.6.6 この節で固定したいこと
+### この節で固定したいこと
 
 - I/O IRQ はデバイス通知、タイマ IRQ は時間イベント、IPI は CPU 間要求として区別する
 - IRQ 到着時の current task を、必ず I/O 要求元と見なしてはいけない
 - hard IRQ で行う即時処理と、softirq/workqueue 等へ渡す後続処理を分ける
 - 現代 Linux のタイマ動作は必ずしも固定周期ではない
 - UmuOS の `/proc/interrupts` はカウンタ変化の観測点であり、内部関数実行の完全なトレースではない
+
+### 4.6.1 I/O 割り込み処理
+
+I/O IRQ が CPU へ届いた後は、CPU 固有の入口から Linux の共通 IRQ 層へ制御が渡り、該当 IRQ に登録されたデバイス処理が呼び出されます。
+現代 Linux では、IRQ 番号、割り込みコントローラ、IRQ chip、登録済み handler を複数の層に分けて管理します。
+
+概念的な経路は次のようになります。
+
+```text
+デバイス通知
+    |
+    v
+割り込みコントローラ / MSI
+    |
+    v
+CPU のベクタ入口
+    |
+    v
+x86 entry -> generic IRQ 層 -> irq_desc / irq_chip
+                                            |
+                                            +--> 登録済み device handler
+                                                         |
+                                                         +--> 即時処理
+                                                         +--> threaded IRQ / softirq / workqueue
+```
+
+これは概念図です。コントローラや IRQ flow handler、MSI の構成によって実際の呼び出し経路は異なります。
+
+#### IRQ 共有とデバイスの特定
+
+複数デバイスが同じ Linux IRQ を共有する構成では、共通 IRQ 層はその IRQ に登録された複数の handler を呼び出します。
+各 handler は自分が担当するデバイスの状態を調べ、割り込み要因が自デバイスに属するかを判定します。
+
+Linux ドライバは `request_irq()` 等で handler を登録し、共有を許可する場合は `IRQF_SHARED` を指定します。
+共有 IRQ では、登録された各 handler が適切な `dev_id` を持ち、自分のデバイスを識別できる必要があります。
+handler の戻り値は、その handler が割り込みを処理したかを共通層へ知らせるために使われます。
+
+一方、IRQ 番号はデバイスの恒久的な識別子ではありません。
+デバイス構成や IRQ domain、起動時の割り当てによって対応が変わるため、古い本文の固定 IRQ 表や固定ベクタ番号を現在の実機・仮想環境へそのまま適用しません。
+
+#### 共通 IRQ 層と irq_chip の責務
+
+デバイスドライバは通常、割り込みコントローラのレジスタを直接操作して ACK/EOI を行うのではなく、Linux の IRQ API と IRQ chip の抽象化を利用します。
+generic IRQ 層は IRQ の状態、handler の登録、flow handling を管理し、irq_chip 側の実装が割り込みコントローラ固有の mask/unmask、ack、EOI 等を担います。
+
+この分離により、ドライバは 8259A、I/O APIC、MSI などの違いを直接扱わずに済みます。
+ただし、特殊なデバイスや irqchip 実装を読むときは、どの処理が共通層で、どの処理がコントローラ固有かを追う必要があります。
+
+#### hard IRQ の即時処理と後続処理
+
+ハード IRQ handler は、デバイスの割り込み要因を確認し、割り込みを適切に処理・抑止し、後続処理に必要な情報を記録するなど、短い処理を担当します。
+待ちを伴う処理や長時間かかる処理は hardirq 文脈で行わず、threaded IRQ、softirq、workqueue などへ渡します。
+
+どの後続機構を使うかは処理要件で決まります。
+threaded IRQ はスレッド文脈で動く handler が必要な場合に使い、softirq は割り込み後の高頻度な処理に使われ、workqueue は sleep が必要な作業を worker task で実行できます。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ 登録 API: `include/linux/interrupt.h`
+- IRQ 記述子と管理: `kernel/irq/`、`include/linux/irqdesc.h`
+- IRQ action の実行: `kernel/irq/handle.c`
+- IRQ chip API: `include/linux/irq.h`
+- hardirq/softirq の境界: `kernel/softirq.c`
+- x86 IRQ entry: `arch/x86/kernel/irq.c`、`arch/x86/entry/`
+
+`request_irq()` の呼び出しから登録処理へ進み、IRQ descriptor と irq_chip の flow handler を経て action handler が呼ばれる経路を追うと、層ごとの責務が見えます。
+
+#### UmuOS での I/O IRQ 観察
+
+UmuOS の virtio-blk や virtio-net への I/O 前後で `/proc/interrupts` を比較すると、関連 IRQ カウンタが変化する場合があります。
+IRQ 名や番号は起動構成に依存するため、表示名と virtio デバイスの状態を合わせて確認します。
+
+この観察は IRQ が発生した手掛かりになりますが、共有 IRQ のどの handler が `IRQ_HANDLED` を返したか、IRQ chip がどの ACK/EOI 処理をしたかまでは示しません。
+そこは Linux 6.18.1 のドライバと generic IRQ ソースで補います。
+
+#### この小節で固定したいこと
+
+- generic IRQ 層は IRQ と handler の管理を担い、irq_chip はコントローラ固有操作を担う
+- 共有 IRQ では複数 handler が自デバイスの割り込み要因を判定する
+- ドライバ handler は hardirq 内の短い処理に絞り、必要な作業を適切な後続文脈へ渡す
+- IRQ 番号はデバイスの恒久的な識別子ではなく、固定表の番号を環境へ直適用しない
+- UmuOS の `/proc/interrupts` は発生カウンタの観測であり、handler 内部の処理結果までは示さない
 
 ## この時点での研究メモ
 
@@ -1145,4 +1227,5 @@ UmuOS では、virtio-blk への I/O や virtio-net の通信を起こす前後�
 - 4.5.1 では、CPU 自動保存、Linux entry stub、`pt_regs` の役割を分けて理解する
 - 4.5.2 では、例外別ハンドラ、fixup/シグナル生成、復帰前処理の責務を分けて追う
 - 4.6 では、I/O IRQ・タイマ割り込み・IPI を発生源と処理目的で分けて捉える
+- 4.6.1 では、共有 IRQ、generic IRQ 層、irq_chip、hardirq と後続処理の分担を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
