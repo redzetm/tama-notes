@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.4「割り込み・例外復帰と user mode 復帰」
-- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の pending work と signal 等の処理
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.5「割り込み・例外復帰と user mode 復帰・再スケジューリング」
+- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の保留 work と再スケジューリング loop
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.4 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.5 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -3039,6 +3039,53 @@ tracefs が使える場合は syscall/signal/scheduler の trace event を組み
 - 旧 x86-32 の `resume_userspace` と flag mask を現行 x86-64 の固定手順とみなさない
 - UmuOS の外部観測だけでは exit-to-user loop の内部順序を断定できない
 
+#### 4.9.1.5 再スケジューリングの確認
+
+user mode へ戻る前に再スケジューリング要求が保留されていれば、カーネルはユーザー状態を復元する前に scheduler を呼び出します。
+この処理は前節で扱った exit-to-user work の一つであり、hard IRQ handler 自身が user task を切り替える説明ではありません。
+
+#### user return 前の scheduler 呼び出し
+
+再スケジューリング要求は、現在の task より先に動かすべき task があるか scheduler に再評価させます。
+`schedule()` が実行されても、必ず別 task に切り替わるとは限らず、現在の task が選ばれてそのまま続くこともあります。
+
+別 task が選ばれた場合、元 task は後に scheduler から戻ってきたところで user return 処理を続けます。
+その時点で signal や別の保留 work が新たに発生している可能性があるため、Linux は user mode へ戻る前に work state を再確認します。
+
+この再確認が重要なのは、scheduler 呼び出しの間にも task 状態や保留 work が変化しうるためです。
+一度 `need_resched` を処理したことだけを根拠に、残りの user return work を無条件で飛ばすことはできません。
+
+#### kernel return の preemption との違い
+
+kernel mode へ戻る場合は、現在の kernel path を安全に preempt できるかが問題になります。
+一方、user mode へ戻る場合は、user state を復元してしまう前に保留 reschedule を処理する境界が明確にあります。
+どちらも再スケジューリング要求を扱いますが、実行文脈と return path が異なります。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- user return work loop: `kernel/entry/common.c` の `exit_to_user_mode_loop()` 周辺
+- scheduler の選択と task switch: `kernel/sched/core.c` の `schedule()` 周辺
+- x86-64 から共通 exit path への接続: `arch/x86/entry/entry_64.S`
+
+旧本文の `work_pending` と `work_resched` label は現行コードの label 名ではありません。
+現行実装では、共通 exit-to-user work の判定、schedule、work state の再評価をコード上で順に確認します。
+
+#### UmuOS での観察
+
+利用可能なら `sched_switch` trace event を記録し、IRQ/exception や syscall の trace と時刻を照合します。
+context switch が復帰直後に見えても、それだけではどの入口が要求を立てたか、user return loop のどの判定で切り替わったかは確定できません。
+
+`/proc/interrupts` は IRQ の累積回数を示す統計であり、user return 前の schedule の有無や原因を示すものではありません。
+trace が利用できない場合は、Linux 6.18.1 の build config と entry/scheduler source を観測条件と併せて確認します。
+
+#### この小節で固定したいこと
+
+- user mode へ戻る前に保留 reschedule があれば scheduler を実行する
+- `schedule()` の実行は必ず別 task への切り替えを意味するわけではない
+- task が schedule から戻った後は、変化しうる user return work を再確認する
+- user return 前の reschedule と kernel return の preemption は別の実行条件として追う
+- `/proc/interrupts` だけでは復帰時の context switch の有無や原因を判断できない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -3083,4 +3130,5 @@ tracefs が使える場合は syscall/signal/scheduler の trace event を組み
 - 4.9.1.2 では、kernel path の再開、preemption 条件、need_resched の意味を区別する
 - 4.9.1.3 では、need_resched と実際の preemption 可否を preempt/lock/IRQ state から判断する
 - 4.9.1.4 では、user return 前の保留 work と user register frame の準備を整理する
+- 4.9.1.5 では、user return 前の schedule と work state 再確認の関係を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
