@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」
-- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、動的 IRQ/vector 割り当て、CPU 間割り込みの用途と配送
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」、4.7「遅延処理」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、IRQ の動的割り当て、hard IRQ 後続処理の実行文脈
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1989,6 +1989,71 @@ x86 の `/proc/interrupts` には `RES`、`CAL`、`TLB` など CPU 間処理に�
 - 固定ベクタ番号は Linux 2.6 の表から現在へ持ち込まず、現行送受信経路を追う
 - UmuOS で CPU 間 IPI を観察するには複数 vCPU が必要で、`/proc/interrupts` は活動の手掛かりに留まる
 
+## 4.7 ソフト割り込みとタスクレット
+
+ハード IRQ handler の中ですべての後続作業を完了しようとすると、割り込み処理が長くなり、同じ CPU の応答性を損ねます。
+そこで Linux は、直ちに行う必要のない処理を別の実行機構へ移し、hard IRQ の処理を短く保ちます。
+この章では、その代表として softirq、tasklet、workqueue、threaded IRQ の違いを整理します。
+
+### 4.7.1 遅延処理は「どの文脈で実行するか」で選ぶ
+
+遅延処理の選択では、単に「後で動かす」だけでなく、sleep が必要か、複数 CPU で並列実行され得るか、順序保証が必要かを考えます。
+
+- softirq: 高頻度な bottom-half 処理向け。同じ softirq 種別が複数 CPU で並列実行され得るため、共有状態を適切に同期する
+- tasklet: softirq 上に実装された旧来の遅延処理。tasklet 単位の再入を避ける性質があるが、legacy API として扱い、新規設計では別方式を優先する
+- workqueue: worker task の文脈で動作し、通常は sleep を伴う処理も実行できる
+- threaded IRQ: 一次 handler と IRQ thread を分け、IRQ に結び付いた処理をスレッド文脈で実行する
+
+`WQ_BH` のように workqueue API を使っても bottom-half 文脈で実行される形があります。
+通常の worker workqueue と同じように sleep できるとは限らないため、実際の workqueue type を確認します。
+
+### 4.7.2 softirq/tasklet と workqueue の文脈差
+
+softirq と tasklet は割り込みに近い文脈で実行され、sleep できません。
+処理時間を短く保ち、ユーザー空間メモリへ直接アクセスしたり、ブロッキング I/O を行ったりしないようにします。
+
+通常の workqueue は kernel worker task の文脈で動くため、必要に応じて sleep できます。
+この違いは、実装をどの後続処理へ渡すかを決める重要な基準です。
+
+### 4.7.3 tasklet は現代コードでは legacy として読む
+
+原文では tasklet が汎用的な遅延処理の選択肢として扱われています。
+Linux 6.18 では tasklet API は既存 driver を読むうえではまだ重要ですが、新規コードでの採用は避け、threaded IRQ、workqueue、要件に合う bottom-half 機構を検討する方向です。
+
+つまり、tasklet を見たら直ちに誤りと判断するのではなく、既存設計の理由と置き換え先を考えます。
+並列性、sleep の要否、処理順序、キャンセル・終了時の同期を比べて選びます。
+
+### 4.7.4 CPU affinity と遅延処理
+
+遅延処理は起動された CPU 上で実行される場合や、workqueue の設計に基づいて別 CPU の worker で実行される場合があります。
+「必ず起動元 CPU に留まる」と一律には考えず、softirq、tasklet、per-CPU work、通常 workqueue のそれぞれで affinity と並列性を確認します。
+
+これにより、CPU ごとのデータを使う処理で同期が必要か、CPU hotplug や負荷分散にどう対応するかが変わります。
+
+### 4.7.5 UmuOS での遅延処理の観察
+
+UmuOS では `/proc/softirqs` を読むと、CPU ごとの softirq 処理回数を観察できます。
+`/proc/interrupts` と合わせて、virtio-net の通信などを発生させる前後のカウンタを比べると、hard IRQ と softirq の活動を分けて眺められます。
+
+ただし、このカウンタは個別の tasklet や workqueue function の実行をすべて特定するものではありません。
+workqueue の実行者や処理順まで確認する場合は、利用できる tracepoint、debug 設定、または Linux 6.18.1 の該当 driver と core source を使います。
+
+### 4.7.6 Linux 6.18 LTS のソースを追う入口
+
+- softirq core: `kernel/softirq.c`
+- softirq/tasklet API: `include/linux/interrupt.h`
+- workqueue core: `kernel/workqueue.c`
+- threaded IRQ 登録と処理: `kernel/irq/manage.c`
+- trace event: `include/trace/events/irq.h`、workqueue trace event 定義
+
+### 4.7.7 この節で固定したいこと
+
+- 遅延処理は、hard IRQ handler を短く保つための実行機構である
+- softirq/tasklet と通常 workqueue は実行文脈と sleep 可能性が異なる
+- tasklet は legacy code の読解対象であり、新規設計では代替機構を検討する
+- 起動元 CPU への固定や並列性は処理機構ごとに確認する
+- UmuOS では `/proc/softirqs` を統計観察に使えるが、個別 callback の実行までは分からない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2016,4 +2081,5 @@ x86 の `/proc/interrupts` には `RES`、`CAL`、`TLB` など CPU 間処理に�
 - 4.6.1.9 では、device ISR の戻り値、共有 IRQ 判定、threaded IRQ への分離を整理する
 - 4.6.1.10 では、IRQ/vector 確保と handler 登録を分け、現代 PCI/virtio の動的割り当てを読む
 - 4.6.2 では、IPI をデバイス IRQ と区別し、CPU 間要求と同期の仕組みとして整理する
+- 4.7 では、hard IRQ 後続処理を softirq/tasklet/workqueue/threaded IRQ の実行文脈で区別する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
