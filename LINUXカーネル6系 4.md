@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.2「遅延処理、softirq、データ構造、実行経路」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の登録・raise・実行・実行文脈
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.3「遅延処理、softirq、データ構造、dispatch」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の登録・raise・safe-point dispatch
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.3 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2267,6 +2267,49 @@ tracefs と該当 tracepoint が kernel config で有効なら実行イベント
 - softirq handler は hardirq context に近い制約を持ち、sleep できない
 - UmuOS の `/proc/softirqs` は処理回数を示すが、pending/dispatch の時系列は示さない
 
+#### 4.7.1.3 do_softirq() と softirq dispatch
+
+softirq の pending bit が立っていても、どの文脈からでもその場で action を実行してよいわけではありません。
+Linux は interrupt context や bottom-half 禁止状態などを確認し、安全な dispatch point でローカル CPU の pending softirq を処理します。
+
+#### do_softirq() は安全な文脈からの dispatch を行う
+
+原文の `do_softirq()` は、割り込み文脈などから呼ばれた場合に何もせず戻り、softirq を処理できる状態であることを確認してから実行へ進む役割を説明しています。
+現代 Linux では内部関数・entry path の構成が変化しているため、これを driver が任意に呼び出す汎用 API と誤解せず、IRQ exit や BH enable 等から core がいつ処理するかを追います。
+
+処理を実行できない文脈では pending 状態を保ち、後に安全な地点で処理するか、`ksoftirqd/N` へ引き継ぎます。
+「今は実行できない」と「softirq 要求が消えた」は別の状態です。
+
+#### 再入を抑えながら別の hard IRQ は受け付ける
+
+softirq action の実行中にローカル hard IRQ を許可する構成では、新しい IRQ が到着し、その IRQ exit から softirq を再び処理しようとする可能性があります。
+同一 CPU 上で softirq dispatcher が入れ子にならないよう、bottom-half/softirq context の accounting と禁止状態を使って制御します。
+
+これはローカル CPU 上の softirq 再入を抑える説明です。
+別 CPU 上で同じ softirq 種別が並行実行される可能性は残るため、共有データの同期は別に必要です。
+
+#### pending mask を取り出し、実行中に発生した要求を次へ回す
+
+softirq core は、ローカル CPU の pending mask を取り出して対象 action を実行します。
+処理開始後に新しい softirq が raise された場合、それは次の pass の pending として扱われます。
+新規要求が絶えないと無制限のループになり得るため、実行回数・時間に上限を設け、残りを `ksoftirqd/N` に委ねる仕組みがあります。
+
+ここで重要なのは、実行中に pending を消す処理が「新しい要求を失う」ことを意味しないよう、古い mask と新しい mask を分けて扱う点です。
+具体的な順序や上限は Linux 6.18 の `kernel/softirq.c` を確認します。
+
+#### UmuOS での dispatch 観察
+
+`/proc/softirqs` のカウンタは action が実行された統計の手掛かりになりますが、`do_softirq()` 相当の dispatch をいつ、どの復帰経路が起動したかは示しません。
+その時系列を調べるには IRQ/softirq trace event が利用可能か確認し、tracefs 設定とカーネル構成を合わせます。
+
+#### この小節で固定したいこと
+
+- pending softirq は安全な dispatch point で実行され、任意の文脈から強制実行できるわけではない
+- softirq/bottom-half context の状態管理で、同一 CPU 上の dispatcher 再入を抑える
+- hard IRQ を受け付けることと、softirq を再入実行することは別の制御である
+- 実行中に新たに raise された softirq は後続 pass へ回り、処理量の上限後は ksoftirqd に引き継がれる
+- `/proc/softirqs` はdispatchの詳細な時系列を示さず、必要なら tracing を使う
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2298,4 +2341,5 @@ tracefs と該当 tracepoint が kernel config で有効なら実行イベント
 - 4.7.1 では、softirq の種類、CPU ごとの pending、並列実行と sleep 不可の制約を整理する
 - 4.7.1.1 では、softirq action、CPU ごとの pending state、interrupt context accounting の責務を分ける
 - 4.7.1.2 では、softirq の raise から dispatch、再実行制限、ksoftirqd への引き継ぎを追う
+- 4.7.1.3 では、安全な dispatch point、再入防止、新しい pending 要求の扱いを整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
