@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.9「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch、再通知、ISR」
-- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、pending IRQ の再通知、現代の ISR と threaded IRQ
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.10「割り込み処理、IRQ データ構造、SMP 分配、IRQ dispatch、再通知、ISR、IRQ 割り当て」
+- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、pending IRQ の再通知、現代の ISR、動的 IRQ/vector 割り当て
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.9 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.10 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1835,6 +1835,84 @@ ISR の戻り値や共有 IRQ の判定を調べるには、UmuOS が使う Linu
 - handler の戻り値と controller ACK/EOI は別の層の操作である
 - Linux 6.18 の一般 ISR API は旧本文の `regs` 引数や `SA_INTERRUPT` 前提と異なる
 
+#### 4.6.1.10 IRQ の動的割り当てと driver の登録
+
+現代 Linux で「IRQ を動的に割り当てる」という場合、古い ISA デバイスの IRQ 線をデバイス使用時だけ予約する話と、Linux が IRQ descriptor や MSI vector を動的に確保する話を分けます。
+一般的な PCI/PCIe や virtio-pci デバイスでは、デバイスの検出・割り込み方式の選択・Linux IRQ の割り当て・driver handler の登録が、初期化の異なる段階で行われます。
+
+```text
+bus / firmware がデバイスと割り込み能力を提示
+    |
+    v
+IRQ domain が hardware IRQ を Linux IRQ へ対応
+    |
+    +--> 必要に応じて MSI/MSI-X vector を確保
+    |
+    v
+driver probe が IRQ を取得
+    |
+    v
+request_irq() / request_threaded_irq() で handler を登録
+    |
+    v
+device を有効化して I/O を開始
+    |
+    v
+終了・remove 時に free_irq() / vector 解放
+```
+
+この図は典型的な driver lifecycle です。デバイス bus、firmware 情報、irqchip、MSI/MSI-X の有無で詳細は変わります。
+
+#### IRQ 番号確保と handler 登録は別操作
+
+IRQ domain やデバイス bus の処理は、hardware IRQ と Linux IRQ の対応を作ります。
+PCI driver では `pci_alloc_irq_vectors()` 等で利用する vector 数と方式を確保し、その後に返された Linux IRQ 番号を使って `request_irq()` 系 API で handler を登録することがあります。
+
+したがって、次の処理は同じ意味ではありません。
+
+- IRQ / vector を確保し、番号空間と配送経路を用意する
+- `request_irq()` でその IRQ に device handler を接続する
+- driver の終了時に handler を外し、確保した IRQ / vector を解放する
+
+IRQ 番号はハードウェア線の番号そのものとは限らず、実行時に割り当てられる内部番号です。
+ユーザー空間アプリケーションが一般的なファイル操作のように IRQ 番号を取得して handler を登録する API ではありません。
+
+#### 固定 IRQ と旧来デバイスの位置づけ
+
+原文のフロッピーディスク IRQ 6 の例は、固定 IRQ 線を使う旧来デバイスを理解する資料として有効です。
+一方、現代の PCI/PCIe デバイスでは、firmware/PCI subsystem が routing を行い、MSI/MSI-X の vector を使う構成も一般的です。
+そのため「利用時に `request_irq(6, ...)` を呼ぶ」ことを現代 driver の標準的な割り当て方法とは見なしません。
+
+また、`request_irq()` の登録に成功したことは、device 側の割り込み要因が正しく設定され、実際に IRQ が届くことまで保証しません。
+device の有効化、DMA/queue 設定、mask 状態、controller routing は別途確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ descriptor / IRQ 番号の割り当て: `kernel/irq/irqdesc.c`、`kernel/irq/irqdomain.c`
+- PCI IRQ vector API: `drivers/pci/msi/api.c`、`include/linux/pci.h`
+- MSI domain 管理: `kernel/irq/msi.c`
+- handler の登録・解除: `kernel/irq/manage.c`
+- x86 vector 割り当て: `arch/x86/kernel/apic/vector.c`
+- IRQ domain API: `include/linux/irqdomain.h`
+
+PCI driver の probe/remove から vector 確保、IRQ 番号取得、handler 登録、解放の順に追うと、割り当てと登録の境界を確認できます。
+
+#### UmuOS での観察
+
+UmuOS では、QEMU の仮想デバイス方式と kernel driver によって、virtio-blk/net の transport や IRQ 方式が決まります。
+virtio-pci か virtio-mmio か、MSI/MSI-X が使われているかを QEMU 起動構成、ゲストの PCI 情報、`/proc/interrupts` と合わせて確認します。
+
+起動ごとに Linux IRQ 番号が変わる可能性があるため、以前観測した IRQ 番号だけを device identity として固定しません。
+IRQ の行名、device の bus 情報、driver の probe 経路を照合します。
+
+#### この小節で固定したいこと
+
+- 現代の動的 IRQ 割り当ては、IRQ domain / bus / MSI vector 確保など複数層の処理である
+- IRQ 番号や vector の確保と `request_irq()` による handler 登録は別段階である
+- IRQ 番号を物理 IRQ 線番号や恒久的 device ID と同一視しない
+- 旧フロッピー IRQ 6 の例は legacy hardware の文脈として扱う
+- UmuOS では QEMU の virtio transport とゲストの driver/IRQ 表示を照合する
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1860,4 +1938,5 @@ ISR の戻り値や共有 IRQ の判定を調べるには、UmuOS が使う Linu
 - 4.6.1.7 では、IRQ flow handler と irq_chip callback が処理順を組み立てることを押さえる
 - 4.6.1.8 では、pending IRQ、controller retrigger、イベント数の保持、spurious IRQ を区別する
 - 4.6.1.9 では、device ISR の戻り値、共有 IRQ 判定、threaded IRQ への分離を整理する
+- 4.6.1.10 では、IRQ/vector 確保と handler 登録を分け、現代 PCI/virtio の動的割り当てを読む
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
