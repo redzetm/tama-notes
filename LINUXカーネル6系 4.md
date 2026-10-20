@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.3「遅延処理、softirq、データ構造、dispatch」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の登録・raise・safe-point dispatch
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.4「遅延処理、softirq、データ構造、dispatch」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の pending・safe-point dispatch・再実行制限
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.3 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.4 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2310,6 +2310,64 @@ softirq core は、ローカル CPU の pending mask を取り出して対象 ac
 - 実行中に新たに raise された softirq は後続 pass へ回り、処理量の上限後は ksoftirqd に引き継がれる
 - `/proc/softirqs` はdispatchの詳細な時系列を示さず、必要なら tracing を使う
 
+#### 4.7.1.4 __do_softirq() の処理
+
+softirq core の実行処理は、ローカル CPU に pending している種別を取り出し、その時点で処理対象になっている action を呼び出します。
+処理中に新しい softirq が raise されることがあるため、実行開始時の pending mask と実行中に追加された pending を区別して扱います。
+
+#### snapshot した pending を処理する
+
+実行開始時に pending mask をローカルに取り出し、対応する action を種別順に処理します。
+その後 pending mask を再確認し、新しい要求があれば次の pass で処理します。
+このように、action 実行中に発生した要求を同じ snapshot の中へ混ぜず、次回処理へ回します。
+
+#### action 実行中の hard IRQ と bottom-half 状態
+
+softirq action の実行中も、構成や処理経路に応じてローカル hard IRQ を受け付けられます。
+一方、softirq dispatcher 自体が同一 CPU 上で再入しないよう、bottom-half/context state を管理します。
+
+このため、softirq 内で新たな hard IRQ が発生し、その IRQ exit から softirq 実行が要求されても、softirq action の入れ子実行をそのまま始めるわけではありません。
+pending 状態は維持され、安全な次の pass または後続実行へ引き継がれます。
+
+#### 処理上限で通常 task の実行機会を守る
+
+softirq が新しい softirq を繰り返し raise し続ける場合、pending がなくなるまで同期的に処理する設計では通常 task が CPU を使えなくなります。
+Linux は softirq の再実行回数や処理時間に上限を設け、上限後に pending が残る場合は `ksoftirqd/N` を起床して処理を引き継がせます。
+
+上限値や細かな条件を古い本文の `restart = 10` 等から現在の定数として引用せず、Linux 6.18 の `kernel/softirq.c` を確認します。
+目的は「softirq を必ず一回だけ実行する」ことではなく、「遅延を抑えつつ CPU を占有し続けない」ことです。
+
+#### ksoftirqd へ移っても action の文脈制約は残る
+
+`ksoftirqd/N` は task としてスケジューラに管理され、負荷に応じて実行機会を得ます。
+しかし、その task が softirq action を実行している間は、action が softirq context の制約を持つ点は変わりません。
+「ksoftirqd のスレッド上だから softirq handler の中で sleep できる」とは考えず、sleep が必要な処理は workqueue や threaded IRQ へ分けます。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- `__do_softirq()` と処理上限: `kernel/softirq.c`
+- IRQ exit から softirq への接続: `kernel/softirq.c`、`arch/x86/kernel/irq.c`
+- bottom-half state の操作: `include/linux/bottom_half.h`、`include/linux/preempt.h`
+- per-CPU pending state: `include/linux/irq_cpustat.h`
+- ksoftirqd の起動と処理: `kernel/softirq.c`
+
+pending の取得・clear・action 呼び出し・再確認・上限到達後の wakeup の順に追うと、snapshot と新規 pending の関係が明確になります。
+
+#### UmuOS での観察
+
+`/proc/softirqs` は softirq 処理数の累積を示しますが、一度の `__do_softirq()` 内で何回 pass したかや、どの action が上限に達したかは示しません。
+処理が継続的に多い場合は、利用可能な tracepoint と `ksoftirqd/N` の CPU 使用状況を合わせて調べます。
+観測時には QEMU の vCPU 数と生成した負荷を記録し、カウンタ差分の条件をそろえます。
+
+#### この小節で固定したいこと
+
+- `__do_softirq()` 相当の core は CPU ごとの pending snapshot を使って action を処理する
+- 実行中に新たに raise された softirq は後続 pass の対象になる
+- 再入防止と hard IRQ 受け付けは別の制御として考える
+- 処理時間・再実行の上限を超えた pending は ksoftirqd へ引き継がれる
+- ksoftirqd が実行しても softirq action 自体は sleep できない
+- Linux 2.6 の具体的な restart 回数を現行の固定値として使わない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2342,4 +2400,5 @@ softirq core は、ローカル CPU の pending mask を取り出して対象 ac
 - 4.7.1.1 では、softirq action、CPU ごとの pending state、interrupt context accounting の責務を分ける
 - 4.7.1.2 では、softirq の raise から dispatch、再実行制限、ksoftirqd への引き継ぎを追う
 - 4.7.1.3 では、安全な dispatch point、再入防止、新しい pending 要求の扱いを整理する
+- 4.7.1.4 では、pending snapshot の処理、softirq の再実行上限、ksoftirqd での実行文脈を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
