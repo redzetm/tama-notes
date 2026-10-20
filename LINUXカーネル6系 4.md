@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.4「遅延処理、softirq、データ構造、dispatch」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の pending・safe-point dispatch・再実行制限
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.5「遅延処理、softirq、ksoftirqd」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の処理上限と task fairness
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.4 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.5 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2368,6 +2368,53 @@ pending の取得・clear・action 呼び出し・再確認・上限到達後の
 - ksoftirqd が実行しても softirq action 自体は sleep できない
 - Linux 2.6 の具体的な restart 回数を現行の固定値として使わない
 
+#### 4.7.1.5 ksoftirqd カーネルスレッド
+
+Linux は CPU ごとに `ksoftirqd/N` を用意し、その CPU に残った softirq 処理を task 文脈から進める経路を持ちます。
+`N` は CPU 番号を表します。
+softirq action が短時間に処理しきれないほど続いた場合、softirq core は pending を残したまま同期的な処理を切り上げ、対応する `ksoftirqd` を起床させます。
+
+#### ksoftirqd は遅延処理を続けるための公平性機構
+
+softirq をすべて hardirq exit の直後に pending がなくなるまで実行すると、ネットワーク受信などが連続する状況で通常 task が CPU を得にくくなります。
+反対に、一度の pass だけで完全に終えてしまうと、再度 pending になった softirq の処理が長く遅れる場合があります。
+
+`ksoftirqd/N` はこの両極端を避けるため、softirq の処理をスケジューラが扱える task 文脈へ移し、通常 task にも実行機会を与えながら pending work を進めます。
+CPU がほかの仕事で忙しければ worker の実行は後になることがあり、CPU が idle なら速やかに処理される場合があります。
+
+#### ksoftirqd で実行しても softirq の制約は残る
+
+`ksoftirqd/N` 自体は kernel thread なので、通常のスケジューリング対象です。
+しかし、その thread が softirq action を呼び出している間、action は softirq context として扱われます。
+したがって、action 内で sleep してよいことにはならず、待ちを伴う処理は通常 workqueue や threaded IRQ へ移します。
+
+この区別は、「ksoftirqd が task であること」と「softirq callback が task context の自由な処理になること」を混同しないために重要です。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- `ksoftirqd` の起動と実行 loop: `kernel/softirq.c`
+- softirq の raise、dispatch、処理上限: `kernel/softirq.c`
+- scheduler との連携: `kernel/sched/`、`kernel/softirq.c`
+- per-CPU softirq 統計: `fs/proc/softirqs.c`
+
+softirq 処理上限に到達した際の wakeup、`ksoftirqd/N` の pending 確認、実行後に sleep へ戻る流れを追うと、この仕組みの役割が分かります。
+
+#### UmuOS での観察
+
+UmuOS でネットワーク負荷を与えると `/proc/softirqs` の `NET_RX` 等が増加し、CPU 使用状況に `ksoftirqd/N` が現れる場合があります。
+ただし、表示されるかどうかは負荷量、vCPU 数、カーネル構成、ユーザー空間の観測コマンドに依存します。
+
+softirq のカウンタ増加だけでは、softirq が hardirq exit と ksoftirqd のどちらで実行されたかは特定できません。
+必要なら tracefs の利用可能性を確認し、softirq raise/entry/exit event と task 実行状況を合わせて調べます。
+
+#### この小節で固定したいこと
+
+- `ksoftirqd/N` は CPU ごとに残った softirq work を進める kernel thread である
+- 役割は遅延を抑えつつ、softirq の連続実行で通常 task が飢餓にならないよう調整すること
+- ksoftirqd 上で実行中でも softirq action は sleep できない
+- softirq がどの経路で実行されたかは `/proc/softirqs` の累積値だけでは分からない
+- UmuOS では vCPU 数と負荷条件を記録し、カウンタ・task 状態・tracepoint を組み合わせて観察する
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2401,4 +2448,5 @@ pending の取得・clear・action 呼び出し・再確認・上限到達後の
 - 4.7.1.2 では、softirq の raise から dispatch、再実行制限、ksoftirqd への引き継ぎを追う
 - 4.7.1.3 では、安全な dispatch point、再入防止、新しい pending 要求の扱いを整理する
 - 4.7.1.4 では、pending snapshot の処理、softirq の再実行上限、ksoftirqd での実行文脈を整理する
+- 4.7.1.5 では、ksoftirqd による残件処理と通常 task の実行機会を両立させる仕組みを整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
