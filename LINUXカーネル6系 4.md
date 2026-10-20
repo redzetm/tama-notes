@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.7「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、IRQ flow handler から device action までの処理
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.8「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ dispatch、再通知」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、IRQ flow handler から action までの処理、pending IRQ の再通知
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.7 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.8 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1702,6 +1702,67 @@ tracefs の mount 状態、kernel config、権限が必要なので、使用可�
 - descriptor の状態保護と device handler 実行の lock 範囲を区別して読む
 - UmuOS の `/proc/interrupts` は flow type や controller callback の順序を直接示さない
 
+#### 4.6.1.8 失われた割り込みの再通知
+
+IRQ を disable している間や処理中に新しい割り込み要因が起きた場合、その通知がどう扱われるかは割り込み源と controller の仕様に依存します。
+Linux は IRQ の状態を管理し、再び有効化するときに pending 状態を確認して、必要なら controller の retrigger 機能などを通じて処理を再開させます。
+
+ここでいう「再通知」は、失われたすべてのイベントを正確な回数だけ再生することを意味しません。
+controller が pending 状態を保持するか、デバイスの状態レジスタから要因を再確認できるか、irq_chip が retrigger を実装するかによって回復可能性が変わります。
+
+#### pending 状態はイベント数そのものではない
+
+Linux の IRQ descriptor は、IRQ の処理中、無効化中、保留中などの状態を管理します。
+しかし pending を示す状態は、通常、到着したエッジイベントの全個数を記録するカウンタではありません。
+複数のイベントが一つの pending 状態にまとまる可能性があり、イベントごとの回数が必要ならデバイス側のキューやカウンタを確認します。
+
+特に edge-triggered と level-triggered では、保留の性質が異なります。
+level-triggered IRQ は要因が残っている間に再度通知され得ますが、edge-triggered IRQ は controller やデバイス側がエッジを保持・再通知できるかが重要です。
+「IRQ が一度入ればソフトウェアが必ず全イベントを数えられる」とは考えないようにします。
+
+#### disable と enable の対になる処理
+
+ドライバが `disable_irq()` 等を使う場合、対応する再有効化と処理中 handler の完了条件を正しく扱う必要があります。
+入れ子の disable/enable や、handler 内での同期的な disable はデッドロックや意図しない再入を招くことがあるため、API の同期規則を確認します。
+
+IRQ を止めた間のデバイス要因は、再有効化時にデバイス状態を読み直して処理する設計が必要になる場合があります。
+Linux の resend 機能だけに依存せず、デバイス仕様上の pending bit、completion queue、status register などを含めて考えます。
+
+#### spurious IRQ と pending IRQ を区別する
+
+spurious IRQ は、IRQ handler が呼ばれたものの登録デバイスが自分の割り込み要因を確認できなかった状態などを指します。
+pending IRQ の再通知とは別の問題です。
+
+共有 IRQ では、ある handler が `IRQ_NONE` を返しても、別の handler がその IRQ を処理している場合があります。
+一回の未処理応答だけで直ちに IRQ 全体を停止するのではなく、IRQ core の統計や抑止方針を通じて対処するのが基本です。
+旧本文にある特定回数・固定閾値は、Linux 6.18 の普遍的な規則として使いません。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ の enable/disable と状態遷移: `kernel/irq/manage.c`
+- pending IRQ の resend/retrigger: `kernel/irq/resend.c`
+- irq_chip retrigger 等の共通処理: `kernel/irq/chip.c`、`include/linux/irq.h`
+- spurious/unhandled IRQ の管理: `kernel/irq/spurious.c`
+- x86 APIC の retrigger / vector 配送: `arch/x86/kernel/apic/`
+
+呼び出し元から IRQ を再有効化する経路を追い、pending 状態の確認、irq_chip の retrigger callback、デバイス側要因の再確認がどこで行われるかを切り分けます。
+
+#### UmuOS での観察
+
+UmuOS では `/proc/interrupts` のカウンタや `dmesg` の spurious/unhandled IRQ メッセージを観察できますが、カウンタだけでイベントの欠落や再通知の成功を確定できません。
+確認にはデバイス固有の状態やキュー、ドライバログも必要です。
+
+IRQ を意図的に disable して再通知を試す実験は、ストレージやネットワークなど稼働中デバイスの停止・データ損失につながる可能性があります。
+実施するなら、破棄可能な QEMU 複製環境と専用テスト用デバイス/ドライバを使い、通常の UmuOS ベース環境では行いません。
+
+#### この小節で固定したいこと
+
+- Linux は pending IRQ の状態と controller の retrigger/resend 機能を使う場合がある
+- pending 状態は、到着したイベントすべての個数を保証するカウンタではない
+- edge/level、デバイス状態、irq_chip 実装によって再通知の意味が変わる
+- spurious/unhandled IRQ と pending IRQ の再通知は別の状態として扱う
+- UmuOS のカウンタだけではイベント欠落や再通知の成否を確定できない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1725,4 +1786,5 @@ tracefs の mount 状態、kernel config、権限が必要なので、使用可�
 - 4.6.1.5 では、CPU 自動保存、x86 vector stub、`pt_regs`、generic IRQ entry の役割を分ける
 - 4.6.1.6 では、x86 vector entry から generic IRQ dispatch、action handler、irq_exit までを責務ごとに追う
 - 4.6.1.7 では、IRQ flow handler と irq_chip callback が処理順を組み立てることを押さえる
+- 4.6.1.8 では、pending IRQ、controller retrigger、イベント数の保持、spurious IRQ を区別する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
