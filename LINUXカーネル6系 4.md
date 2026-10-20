@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.2「割り込み・例外復帰と kernel path 再開」
-- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の pending work と再スケジューリング
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.3「割り込み・例外復帰と kernel preemption」
+- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、preemption model、user return 前の pending work
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.3 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2932,6 +2932,66 @@ UmuOS の通常シリアルログだけでは、kernel task が interrupt return
 - UmuOS の通常ログでは復帰時の schedule 経路を直接見られず、trace/source を用いる
 
 ## この時点での研究メモ
+- UmuOS の通常ログでは復帰時の schedule 経路を直接見られず、trace/source を用いる
+
+#### 4.9.1.3 カーネル内プリエンプションの確認
+
+割り込み復帰時に再スケジュール要求があるかを調べても、それだけで直ちに別 task へ切り替えられるとは限りません。
+Linux は現在の preemption state、lock/atomic context、ローカル割り込み状態、カーネルの preemption model を合わせて、切り替え可能性を判断します。
+
+#### `need_resched` は要求であり、即時実行命令ではない
+
+`TIF_NEED_RESCHED` 等の再スケジューリング要求は、現在より実行に適した task があるなど、scheduler が再評価すべきことを示します。
+要求が設定されても、カーネルが安全に schedule できる地点でなければ切り替えは延期されます。
+
+したがって、割り込み復帰時の制御は概念的に次のようになります。
+
+- 再スケジューリング要求がない: 保存状態を復元して中断された kernel path へ戻る
+- 要求があり、preemption が許可される: scheduler を呼んで次の task を選ぶ
+- 要求があるが atomic/lock/IRQ state 等で切替不可: 中断 path を続け、後の安全な地点で再確認する
+
+実際の分岐条件と helper 名は Linux 6.18 の entry code と scheduler 実装で確認します。
+
+#### preempt count、lock、IRQ state の関係
+
+preempt count や関連する context state は、カーネルが現在どの実行制約下にあるかを示します。
+spinlock を保持している、atomic section にいる、ローカル IRQ を禁止しているなどの状態で不用意に schedule すると、共有データの不整合や deadlock を引き起こす可能性があります。
+
+割り込み復帰時の preemption は、通常の task context からの preemption と入口条件が異なるため、IRQ state を適切に扱う専用 helper を通ることがあります。
+ただし、すべての割り込み復帰が preemptible とは限らず、handler が実行中の文脈や設定条件が関係します。
+
+#### preemption model と build config
+
+Linux が kernel mode のどの地点で preempt 可能かは、カーネルの構成と preemption model に依存します。
+たとえば voluntary preemption と fully preemptible kernel では、通常の kernel path の切替可能地点が異なります。
+Linux 6.18 では build option や dynamic preemption 設定も関係するため、旧本文の「preemption が有効/無効」の二択だけで説明しないようにします。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ return 時の preemption helper: `kernel/sched/core.c`
+- preemption/context state: `include/linux/preempt.h`
+- x86-64 IRQ/exception return: `arch/x86/entry/entry_64.S`
+- 共通 entry/exit work: `kernel/entry/common.c`
+- scheduler config: `kernel/Kconfig.preempt`、対象 kernel の `.config`
+
+`need_resched` を設定する側、entry return 側で確認する箇所、preemption helper から `schedule()` に入る経路を順に追うと要求から切替までがつながります。
+
+#### UmuOS での観察
+
+UmuOS では、スケジューリングが割り込み復帰に続いて起きたとしても、シリアルログだけでは「IRQ return が直接 schedule した」のか「後の safe point で切り替わった」のか判別できない場合があります。
+
+実際の preemption model は Linux 6.18.1 の config を確認します。
+tracefs が利用できるなら IRQ entry/exit と `sched_switch` 等を同じ時間軸で記録し、利用できない場合は kernel source と build config を対応付けて調べます。
+
+#### この小節で固定したいこと
+
+- `need_resched` は scheduler に再評価を求める状態で、どこでも即時切替できる意味ではない
+- preempt count、lock/atomic context、ローカル IRQ state が切替可能時点を制限する
+- IRQ return の preemption は通常 task context の preemption と同じではない
+- kernel preemption の範囲は Linux 6.18 の build config/model を確認する
+- UmuOS では context switch の原因をログだけで断定せず、config/source/tracing を照合する
+
+## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
 - 4.2.1 では、IRQ 番号、Linux IRQ、CPU ベクタ、割り込みコントローラを別の層として整理する
@@ -2973,4 +3033,5 @@ UmuOS の通常シリアルログだけでは、kernel task が interrupt return
 - 4.9 では、IRQ/例外からの復帰を単純なレジスタ復元でなく、user/kernel return と保留 work の判定経路として捉える
 - 4.9.1.1 では、entry frame による復帰先判定と kernel/user return の分岐を整理する
 - 4.9.1.2 では、kernel path の再開、preemption 条件、need_resched の意味を区別する
+- 4.9.1.3 では、need_resched と実際の preemption 可否を preempt/lock/IRQ state から判断する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
