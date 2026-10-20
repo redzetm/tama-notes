@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.1「割り込み・例外復帰と entry point」
-- 今回の主題: IRQ/例外の入口から復帰まで、kernel/user return の分岐、entry point での復帰状態判定
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.2「割り込み・例外復帰と kernel path 再開」
+- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の pending work と再スケジューリング
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.1 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.2 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2884,6 +2884,53 @@ UmuOS のユーザープロセスに保留 signal があると、復帰前 work 
 - 古い `ret_from_intr` 名や x86-32 の stack mask を現行 x86-64 のコード手順と見なさない
 - UmuOS の通常ログでは復帰 loop の内部判断までは見えず、source/tracing とプロセス結果を照合する
 
+#### 4.9.1.2 カーネル実行パスの再開
+
+割り込みや例外が kernel mode の実行を中断していた場合、復帰経路は保存状態を戻して中断位置へ続行するか、安全な条件が整えば別 task へ切り替えるかを判断します。
+ここでいう「再開」は、必ず直ちに同じ task の次命令へ戻ることではありません。
+
+#### `need_resched` があっても即座に切り替えるとは限らない
+
+current task に再スケジュール要求が立っていても、カーネルは任意の場所で schedule できません。
+preemption count がゼロか、spinlock 等を保持していないか、ローカル IRQ 状態が適切かを確認し、切り替えて安全な地点で schedule します。
+
+条件を満たさない場合は、割り込まれた kernel path を復元して処理を続け、後に preemption 可能な地点で再スケジュールします。
+このため、`need_resched` は「今すぐ必ず切り替えろ」という命令ではなく、「安全な地点で scheduler に再評価させる必要がある」という状態です。
+
+#### task switch 後も中断位置は kernel stack に残る
+
+kernel task が preempt された場合、その task の kernel stack 上には関数呼び出しや復帰位置が残ります。
+schedule を経て別 task が実行され、元の task が後で再び選ばれると、保存していた kernel context から継続します。
+
+ここで task switch は IRQ handler の中で sleep することとは異なります。
+割り込み復帰経路が preemption 条件を満たして scheduler を呼ぶことと、hardirq handler 自身が block することを混同しないでください。
+
+#### Linux 6.18 LTS の復帰経路
+
+Linux 6.18 では、x86-64 の低水準 entry/exit code と common entry code が連携し、kernel return の preemption 条件や user return 前の work を処理します。
+原文の `resume_kernel`、`need_resched`、`preempt_schedule_irq()` という x86-32 の label/命令列をそのまま探すのではなく、現在の entry path から共通処理へ追います。
+
+- x86-64 の IRQ/exception entry/exit: `arch/x86/entry/entry_64.S`
+- 共通の entry 処理: `kernel/entry/common.c`
+- preemption context 判定: `include/linux/preempt.h`
+- scheduler の切り替え: `kernel/sched/core.c`
+
+#### UmuOS での kernel path 再開の観察
+
+UmuOS の通常シリアルログだけでは、kernel task が interrupt return を経てどの地点で preempt されたかは分かりません。
+複数 vCPU で動かす場合は、利用可能なら scheduler trace event の `sched_switch` と IRQ handler entry/exit を合わせて観察します。
+
+観測には kernel tracing/debug 機能の設定が必要です。
+利用できない場合は、Linux 6.18.1 の entry code と scheduler の呼び出し経路をソースで追い、`/proc/interrupts` は IRQ 活動の補助統計として使います。
+
+#### この小節で固定したいこと
+
+- kernel return は保存状態の復元と、必要時の安全な preemption 判断を含む
+- `need_resched` は即時 context switch の強制ではなく、schedule が可能な地点で処理する要求である
+- lock/atomic context や IRQ 状態が許さない間は、kernel path を再開して切り替えを遅らせる
+- task switch 後に元 task は自分の kernel stack 上の継続位置から再開できる
+- UmuOS の通常ログでは復帰時の schedule 経路を直接見られず、trace/source を用いる
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2925,4 +2972,5 @@ UmuOS のユーザープロセスに保留 signal があると、復帰前 work 
 - 4.8.1.3 では、system workqueue と専用 queue の使い分け、旧 events queue からの現代化を整理する
 - 4.9 では、IRQ/例外からの復帰を単純なレジスタ復元でなく、user/kernel return と保留 work の判定経路として捉える
 - 4.9.1.1 では、entry frame による復帰先判定と kernel/user return の分岐を整理する
+- 4.9.1.2 では、kernel path の再開、preemption 条件、need_resched の意味を区別する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
