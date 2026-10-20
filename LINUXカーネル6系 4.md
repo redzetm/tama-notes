@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.2「ワークキュー、データ構造、API」
-- 今回の主題: I/O IRQ の共有・配送、softirq/tasklet/workqueue の実行文脈、work item の queue/flush/cancel と worker pool の使い方
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー、データ構造、API、system workqueue」
+- 今回の主題: I/O IRQ の共有・配送、softirq/tasklet/workqueue の実行文脈、work の lifecycle と system workqueue の選択
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2696,6 +2696,60 @@ kernel config、tracefs の有効状態、vCPU 数、再現した I/O 条件を�
 - teardown では再 queue 元を止めてから work を drain/cancel し、参照データを解放する
 - system workqueue を長時間占有する work に使うと、他の利用者へ影響し得る
 
+### 4.8.1.3 あらかじめ用意されている workqueue
+
+Linux は、kernel subsystem や driver が一般的な deferred work を実行できるよう、system workqueue をあらかじめ用意しています。
+めったに使わない処理のためだけに専用 workqueue と worker の仕組みを重複して作る必要はありません。
+
+#### 旧 events / keventd_wq からの読み替え
+
+原文にある `events` workqueue や `keventd_wq`、`schedule_work()` の内部対応表は Linux 2.6 時代の説明です。
+現代 Linux では、`system_wq` などの system workqueue と concurrency-managed worker pool を通じて処理されます。
+
+`schedule_work()` や `schedule_delayed_work()` のような helper は、用意済み queue を使う手段として現在も利用できるものがあります。
+ただし、内部の workqueue 名や worker thread 構成を旧本文の `events/0` のような名前で固定して考えず、公開 API と対象カーネルの worker pool 実装を確認します。
+
+#### system workqueue の選択と共有の注意
+
+一般用途の `system_wq` は便利ですが、共有 queue を長時間占有する work に使うと、同じ worker pool を使う他の処理へ遅延を波及させる可能性があります。
+長時間の処理、特別な concurrency/affinity 要件、flush の独立性が必要なら、専用 workqueue の作成を検討します。
+
+カーネルには用途別の system workqueue もあります。
+代表例には高優先度処理向け、長時間処理向け、unbound、freezable、power-efficient 等があり、選択は名前の印象だけでなく flags と API 契約を確認します。
+
+通常 worker task の queue と `WQ_BH` は同じものではありません。
+`WQ_BH` は softirq/bottom-half 文脈で動くため sleep できず、共有 system worker pool の worker task で実行する queue と実行制約が異なります。
+
+#### pre-created queue と専用 queue の判断
+
+- 短く、一般的な deferred work: system workqueue を検討
+- 長時間処理や共有 queue への影響を避けたい work: 専用 workqueue を検討
+- 厳密な順序が必要な work: ordered workqueue 等の契約を検討
+- sleep 不要な bottom-half work: softirq / `WQ_BH` 等を要件に応じて検討
+
+専用 queue を作ること自体が高速化や完全な分離を保証するわけではありません。
+worker pool の共有、max_active、CPU affinity、work の再 queue、メモリ回収との関係まで見て選択します。
+
+#### UmuOS での観察
+
+UmuOS の `/proc` や `ps` で `kworker` を確認できる場合がありますが、どの system workqueue を処理中かは task 名だけでは判断できません。
+workqueue trace event が有効なら queue/execute/complete を追い、使えない場合は Linux 6.18.1 の driver 呼び出しと workqueue API の経路を照合します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- system workqueue の公開定義: `include/linux/workqueue.h`
+- system queue 初期化と worker pool: `kernel/workqueue.c`
+- workqueue の system-wide 参照: `kernel/workqueue.c`、`include/linux/workqueue.h`
+- workqueue trace event: `include/trace/events/workqueue.h`
+
+#### この小節で固定したいこと
+
+- system workqueue は一般的な work を流す共有 queue である
+- 旧 `events` / `keventd_wq` の内部構成を Linux 6.18 の構造として扱わない
+- 長時間 work や独立した concurrency/flush 要件では専用 queue を検討する
+- `WQ_BH` は system worker task の queue と異なり sleep できない
+- UmuOS の `kworker` 表示だけでは workqueue や work item を識別できない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2734,4 +2788,5 @@ kernel config、tracefs の有効状態、vCPU 数、再現した I/O 条件を�
 - 4.8 では、workqueue を worker task 文脈で実行する遅延処理機構として、softirq/tasklet と区別する
 - 4.8.1.1 では、work item・workqueue・pool・worker task の階層と責務を分けて捉える
 - 4.8.1.2 では、queue・delay・flush・cancel の API 契約と work の寿命管理を整理する
+- 4.8.1.3 では、system workqueue と専用 queue の使い分け、旧 events queue からの現代化を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
