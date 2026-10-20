@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.5「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配、カーネルスタック、IRQ レジスタ退避」
-- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP affinity、IRQ entry の状態保存
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.6「割り込み処理、IRQ データ構造、SMP 分配、カーネルスタック、IRQ entry と dispatch」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP affinity、IRQ entry から handler までの dispatch
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.5 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.6 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1575,6 +1575,79 @@ IRQ entry の細部を調べるときは、UmuOS の Linux 6.18.1 と一致す�
 - `interrupt[]`、負の IRQ 番号、`SAVE_ALL`、`ret_from_intr()` を Linux 6.18 x86-64 の現行実装と同一視しない
 - UmuOS の `/proc/interrupts` は IRQ 活動を示すが、レジスタ保存フレームは示さない
 
+#### 4.6.1.6 IRQ dispatch: 旧 do_IRQ() から現代の共通経路へ
+
+旧本文の `do_IRQ()` は x86-32/Linux 2.6 当時の入口関数であり、Linux 6.18 の x86-64 に同じ関数が同じ責務で存在すると考えてはいけません。
+現在は、アーキテクチャ固有の vector entry と generic IRQ 層が分担して、CPU vector から対象 IRQ、flow handler、登録済み action へ処理をつなぎます。
+
+#### 現代の IRQ dispatch を概念的に追う
+
+```text
+x86 CPU vector entry
+    |
+    v
+vector に対応する Linux IRQ を解決
+    |
+    v
+irq_enter 系の文脈管理
+    |
+    v
+irq_desc の flow handler
+    |
+    +--> irq_chip の必要な操作
+    +--> 登録済み irqaction handler 群
+    |
+    v
+irq_exit 系の処理 -> pending softirq 等を確認 -> entry/exit 復帰経路
+```
+
+実際の関数名や呼び出し順は IRQ flow type、irqchip、CPU アーキテクチャで変わります。
+この図は旧 `do_IRQ()` の逐語的な置き換えではなく、現代の責務境界を示しています。
+
+#### vector と Linux IRQ を結び付けてから handler へ進む
+
+x86 entry は CPU vector を受け取り、現在の CPU に設定された vector-to-IRQ 対応などを使って Linux IRQ を特定します。
+その後、IRQ descriptor の flow handler が、level/edge、fast EOI、per-CPU 等の割り込み方式に応じた共通処理を行い、action handler を呼び出します。
+
+このため、旧本文の `regs->orig_eax` から IRQ 番号を得る流れを、Linux 6.18 x86-64 の現行実装へそのまま当てはめることはできません。
+vector の保持方法、per-CPU 対応、entry frame の利用は現行 entry code で確認します。
+
+#### `irq_enter()` / `irq_exit()` は文脈管理を含む
+
+IRQ の入口・出口処理は、単に割り込み回数を数えるだけではありません。
+hardirq の入れ子や interrupt context の状態を管理し、IRQ から戻る際には保留中の softirq など後続処理を実行できるか確認します。
+
+したがって `irq_exit()` の後に必ず同じ命令へ直ちに戻るとは限りません。
+復帰前に遅延処理や再スケジューリングに関わる処理が進む場合があります。
+ただし hardirq handler 自体が任意に sleep して task を切り替えることとは区別します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- x86 外部 IRQ entry: `arch/x86/entry/entry_64.S`、`arch/x86/kernel/irq.c`
+- x86 vector-to-IRQ 管理: `arch/x86/kernel/apic/vector.c`
+- generic IRQ dispatch: `kernel/irq/handle.c`
+- IRQ flow handler: `kernel/irq/chip.c`
+- IRQ 文脈の entry/exit と softirq: `kernel/softirq.c`
+- IRQ descriptor/action: `include/linux/irqdesc.h`、`include/linux/interrupt.h`
+
+vector entry から IRQ を引き当てる箇所を見つけ、`irq_desc` の flow handler、action 呼び出し、`irq_exit` の順に追うと、アーキテクチャ層と共通層の連携が見えます。
+
+#### UmuOS での観察
+
+UmuOS の `/proc/interrupts` では dispatch 後の IRQ カウンタを観察できますが、entry から handler までの呼び出し順や `irq_enter/exit` の内部状態は直接表示されません。
+必要に応じて kernel tracing が有効か確認し、そうでなければ Linux 6.18.1 ソースの経路を追います。
+
+複数 vCPU の場合は CPU 別カウンタを比較できますが、カウンタ差だけで特定の irqaction が実行されたと断定できません。
+IRQ 名、virtio デバイス、affinity、カーネル設定を合わせて読みます。
+
+#### この小節で固定したいこと
+
+- Linux 2.6 の `do_IRQ()` は歴史的な入口名であり、現代 x86-64 の共通 IRQ 経路と同一視しない
+- vector entry が Linux IRQ を解決し、generic IRQ の flow handler が action handler へつなぐ
+- `irq_enter/exit` は hardirq context と後続処理の境界管理を担う
+- IRQ からの復帰時に softirq 等の保留処理が進む場合がある
+- UmuOS の IRQ カウンタは dispatch の結果を示すが、内部の呼び出し順までは示さない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1596,4 +1669,5 @@ IRQ entry の細部を調べるときは、UmuOS の Linux 6.18.1 と一致す�
 - 4.6.1.3 では、SMP 時の IRQ 配送を一律ラウンドロビンではなく affinity と実効配置で捉える
 - 4.6.1.4 では、task stack・hard IRQ stack・IST stack の役割を分け、softirq の実行文脈は構成依存として読む
 - 4.6.1.5 では、CPU 自動保存、x86 vector stub、`pt_regs`、generic IRQ entry の役割を分ける
+- 4.6.1.6 では、x86 vector entry から generic IRQ dispatch、action handler、irq_exit までを責務ごとに追う
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
