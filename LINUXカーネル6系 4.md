@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.5「遅延処理、softirq、ksoftirqd」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の処理上限と task fairness
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「遅延処理、softirq、tasklet」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、softirq の処理上限、tasklet の直列化特性と現代の代替
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.5 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2415,6 +2415,73 @@ softirq のカウンタ増加だけでは、softirq が hardirq exit と ksoftir
 - softirq がどの経路で実行されたかは `/proc/softirqs` の累積値だけでは分からない
 - UmuOS では vCPU 数と負荷条件を記録し、カウンタ・task 状態・tracepoint を組み合わせて観察する
 
+### 4.7.2 タスクレット（tasklet）
+
+tasklet は softirq 上に構築された遅延処理の仕組みです。
+その設計上の特徴は、同一 tasklet instance が複数 CPU で同時に実行されないよう直列化することでした。
+ただし tasklet は softirq/bottom-half context で実行されるため sleep できず、処理時間や同期の制約を受けます。
+
+#### tasklet の直列化が保証する範囲
+
+同じ tasklet object の callback は、同時に複数 CPU 上で実行されないよう制御されます。
+このため、同一 instance の状態を守る点では、再入可能な callback を書かずに済む場合があります。
+
+この保証は「tasklet 全体が並列化されない」という意味ではありません。
+別々の tasklet instance や別の softirq action は、異なる CPU 上で並行実行され得ます。
+さらに、tasklet がアクセスする共有データを他の task、IRQ handler、別 CPU の callback も触るなら、別途同期が必要です。
+
+#### 起動・disable・終了時の同期
+
+tasklet は初期化した instance を schedule して pending にし、softirq 実行時に callback を呼びます。
+disable API は今後の実行を抑止し、同期版の disable や kill は既に実行中の callback の完了を待つ場合があります。
+
+driver の終了処理では、IRQ や timer など callback の起動源を止めてから tasklet を終了・破棄する必要があります。
+逆順にすると、解放済みデータを callback が参照する race が発生し得ます。
+
+API 名や callback signature は kernel version によって変化しているため、旧 `tasklet_init()` の用例を Linux 6.18 の現在の定義と照合して使います。
+
+#### 優先度付き tasklet は scheduler の優先度ではない
+
+歴史的 API には high-priority tasklet を schedule する入口があります。
+これは softirq の実行順のクラスに関する区別であり、tasklet callback 自身が real-time scheduler の優先度を持つという意味ではありません。
+どちらも softirq context の制約を受け、sleep はできません。
+
+#### Linux 6.18 で新規設計に使う機構を選ぶ
+
+tasklet API は既存 driver を読むためには重要ですが、新しいコードでは legacy/deprecated な選択肢として慎重に扱います。
+
+- IRQ と結び付いた sleep 可能処理: threaded IRQ
+- sleep 可能な一般 deferred work: workqueue
+- sleep 不要で bottom-half context を保つ work: softirq または要件に応じた `WQ_BH`
+
+選択では、IRQ とのライフサイクル連携、sleep の要否、同じ callback の並列性、終了時の同期方法を比べます。
+単に「tasklet は軽い」という理由だけで新規採用しないことが大切です。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- tasklet API 宣言: `include/linux/interrupt.h`
+- tasklet と softirq の実装: `kernel/softirq.c`
+- workqueue / BH workqueue: `kernel/workqueue.c`、`include/linux/workqueue.h`
+- threaded IRQ: `kernel/irq/manage.c`
+
+既存 tasklet の初期化・schedule・disable/kill の順を読み、呼び出し元の IRQ/timer 停止と object 解放がどの順で同期されるかを確認します。
+
+#### UmuOS での tasklet の見方
+
+UmuOS の通常ユーザー空間から tasklet object や callback state を直接見ることはできません。
+`/proc/softirqs` の `TASKLET` や関連カウンタが表示される場合は活動量の参考になりますが、特定 driver の tasklet が実行された証拠にはなりません。
+
+必要なら Linux 6.18.1 の driver source で tasklet API の利用箇所を探し、その起動源・callback・終了時の同期を追います。
+新規設計の検討では、tasklet をそのまま追加するのではなく、前項の threaded IRQ/workqueue/softirq の要件と比較します。
+
+#### この小節で固定したいこと
+
+- tasklet は softirq 上の legacy deferred mechanism で、sleep できない
+- 同一 tasklet instance の直列化は、全共有データの thread safety を保証するものではない
+- disable/kill と起動源の停止順は callback の寿命を守るために重要である
+- high-priority tasklet は scheduler の real-time priority ではない
+- 新規設計では threaded IRQ、workqueue、softirq/`WQ_BH` を要件に応じて選ぶ
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2449,4 +2516,5 @@ softirq のカウンタ増加だけでは、softirq が hardirq exit と ksoftir
 - 4.7.1.3 では、安全な dispatch point、再入防止、新しい pending 要求の扱いを整理する
 - 4.7.1.4 では、pending snapshot の処理、softirq の再実行上限、ksoftirqd での実行文脈を整理する
 - 4.7.1.5 では、ksoftirqd による残件処理と通常 task の実行機会を両立させる仕組みを整理する
+- 4.7.2 では、tasklet の同一 instance 直列化、lifecycle、現代の代替機構を区別する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
