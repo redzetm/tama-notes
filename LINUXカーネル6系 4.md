@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」、4.7〜4.7.1「遅延処理と softirq」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、IRQ の動的割り当て、hard IRQ 後続処理と softirq の実行文脈
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.1.1「遅延処理、softirq、softirq データ構造」
+- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、hard IRQ 後続処理、softirq の action・CPU ごとの pending・実行文脈
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.1.1 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2132,6 +2132,68 @@ UmuOS では `cat /proc/softirqs` で CPU ごとの種別別カウンタを読�
 - `ksoftirqd` は処理量が残る場合の実行経路の一つであり、唯一の softirq 実行場所ではない
 - UmuOS の `/proc/softirqs` は統計観察の窓口で、callback の詳細な因果関係は別途追跡する
 
+#### 4.7.1.1 ソフト割り込みで使用するデータ構造
+
+softirq の仕組みは、大きく「種別ごとの処理関数」「CPU ごとの pending 状態」「現在の実行文脈を示す accounting」に分けて見ると理解しやすくなります。
+原文にある配列サイズ、構造体メンバ、`preempt_count` のビット幅は Linux 2.6 の実装説明であり、Linux 6.18 の固定 ABI としては扱いません。
+
+#### 種別ごとの action table
+
+Linux は softirq 種別ごとに action を登録し、softirq core が pending bit を確認して対応する action を呼び出します。
+種別はカーネル内で定義されるため、ユーザー空間や一般ドライバが任意に無制限追加する API ではありません。
+
+action table は「この softirq 種別ならどの処理関数へ渡すか」を示します。
+softirq が呼び出された理由やデバイスの個別状態は、action の処理先や driver/subsystem 側で確認します。
+
+#### CPU ごとの pending 状態
+
+softirq の pending 状態は CPU ごとに保持されます。
+ある CPU で softirq が raise されると、その CPU の pending bitmap に種別が記録され、後続の実行機会に local CPU 上で処理されます。
+
+この設計は CPU 局所性を活用しますが、異なる CPU で同じ softirq 種別が同時に動く可能性をなくすものではありません。
+したがって、action が global な共有データを扱うなら同期が必要です。
+
+#### interrupt context accounting
+
+Linux は hardirq、softirq、NMI、preemption 禁止などの実行文脈を accounting し、現在のコードが sleep できるか、プリエンプトできるかの判断に使います。
+原文の `preempt_count` のビット分割や `thread_info` 内の位置は実装版に依存するため、概念と現行定義を分けます。
+
+`in_interrupt()` 等の判定 helper は、現在が通常の task 文脈か interrupt context かを調べるために使われます。
+割り込み文脈で sleep が必要な処理を行うと、schedule 不可能な状態で待つことになり、警告や deadlock の原因になります。
+
+#### 原文の「優先度 index」表の読み替え
+
+原文は softirq index の小さい順を優先度として説明します。
+現代の Linux でも softirq action は定義された順序で処理されますが、各 softirq を一般的な scheduler priority のように任意設定できるわけではありません。
+順序だけで処理の重要度や遅延保証を評価せず、softirq core の実行予算、再実行、ksoftirqd への移譲など全体の制御を見る必要があります。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- softirq action table と core: `kernel/softirq.c`
+- softirq 種別と context helper: `include/linux/interrupt.h`
+- per-CPU IRQ statistic/state: `include/linux/irq_cpustat.h`
+- preemption / interrupt context 定義: `include/linux/preempt.h`
+- `/proc/softirqs` 表示: `fs/proc/softirqs.c`
+
+softirq の種別定義、raise、pending bitmap 更新、action 実行、処理しきれない場合の ksoftirqd 経路を順に追うと、データ構造の役割がつながります。
+
+#### UmuOS での観察
+
+UmuOS では `/proc/softirqs` を読み、softirq 種別ごと・CPU ごとの累積カウンタを観察できます。
+virtio-net 通信の前後で `NET_RX` / `NET_TX` 等のカウンタを比較すると、ネットワーク処理に伴う softirq 活動の手掛かりになります。
+
+ただし、カウンタは pending bitmap の現在値でも、個別 callback の実行記録でもありません。
+差分をとる時間幅、vCPU 数、通信量を記録し、詳細な処理原因は driver と networking source、利用可能な tracepoint で補います。
+
+#### この小節で固定したいこと
+
+- softirq action table は種別と処理関数を対応させる
+- pending state は CPU ごとに保持される
+- softirq は interrupt context accounting と結び付き、通常 task の sleep 可能性とは異なる
+- 同じ softirq 種別が CPU 間で並列実行され得るため、共有データの同期を考慮する
+- 原文の配列サイズ、bit layout、優先度表を Linux 6.18 の固定仕様と見なさない
+- UmuOS の `/proc/softirqs` は累積統計であり、個々の callback を直接記録するものではない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2161,4 +2223,5 @@ UmuOS では `cat /proc/softirqs` で CPU ごとの種別別カウンタを読�
 - 4.6.2 では、IPI をデバイス IRQ と区別し、CPU 間要求と同期の仕組みとして整理する
 - 4.7 では、hard IRQ 後続処理を softirq/tasklet/workqueue/threaded IRQ の実行文脈で区別する
 - 4.7.1 では、softirq の種類、CPU ごとの pending、並列実行と sleep 不可の制約を整理する
+- 4.7.1.1 では、softirq action、CPU ごとの pending state、interrupt context accounting の責務を分ける
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
