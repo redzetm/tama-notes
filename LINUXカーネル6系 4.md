@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.10「割り込み処理、IRQ データ構造、SMP 分配、IRQ dispatch、再通知、ISR、IRQ 割り当て」
-- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、pending IRQ の再通知、現代の ISR、動的 IRQ/vector 割り当て
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IRQ データ構造、SMP 分配、ISR、動的割り当て、IPI」
+- 今回の主題: I/O IRQ の共有・配送、generic IRQ の flow/action、動的 IRQ/vector 割り当て、CPU 間割り込みの用途と配送
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.10 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1913,6 +1913,82 @@ IRQ の行名、device の bus 情報、driver の probe 経路を照合しま�
 - 旧フロッピー IRQ 6 の例は legacy hardware の文脈として扱う
 - UmuOS では QEMU の virtio transport とゲストの driver/IRQ 表示を照合する
 
+## 4.6.2 プロセッサ間割り込み（IPI）
+
+IPI（Inter-Processor Interrupt）は、ある CPU から別の CPU へカーネル処理を依頼・通知するための割り込みです。
+デバイス IRQ がデバイスから届くのに対し、IPI はカーネル内の CPU 間協調を目的に送られます。
+
+x86 では local APIC の仕組みを通じて対象 CPU へ配送されます。
+これはデバイスの物理 IRQ 線を使う通常の I/O IRQ とは異なり、Linux の SMP 層が送信先 CPU と処理内容を指定して利用します。
+
+### 4.6.2.1 IPI が必要になる場面
+
+代表的な用途は次の通りです。
+
+- 再スケジューリング通知: 別 CPU 上の runnable task や scheduler 状態に応じて、対象 CPU に再評価を促す
+- CPU 間関数呼び出し: 対象 CPU 上で関数を実行させる
+- TLB shootdown: ページテーブル更新に伴い、他 CPU の古い TLB entry を無効化する
+- CPU 停止・同期: hotplug や停止処理などで CPU 間の協調を行う
+
+IPI は単なる「別 CPU へのメッセージ」ではありません。
+送信側が共有状態を更新し、対象 CPU がその更新を安全に観測できるようにする同期機構でもあります。
+
+### 4.6.2.2 送信要求と実際の処理を分ける
+
+IPI の多くは、割り込みコマンド自体に任意の関数ポインタや大きな payload を詰めて渡す仕組みではありません。
+送信側はまず共有 queue や per-CPU 状態へ処理要求を記録し、その後 IPI で対象 CPU に「処理がある」と通知します。
+受信側 handler は通知を受けて queue や状態を確認し、必要な work を実行します。
+
+CPU 間関数呼び出しでは、この「要求の記録」と「IPI の通知」を組み合わせ、対象 CPU が指定された callback を実行します。
+TLB shootdown でも、対象 CPU の mask と更新対象の情報を用意してから IPI を送る構造になります。
+
+### 4.6.2.3 固定ベクタ番号を暗記しない
+
+原文の `CALL_FUNCTION_VECTOR` や `RESCHEDULE_VECTOR`、`INVALIDATE_TLB_VECTOR` といった名前・ベクタ番号は、Linux 2.6 系の x86 実装の説明です。
+現代 Linux では、IPI の種類や vector 配置、呼び出し経路はカーネル版・CPU 構成・有効機能に応じて異なります。
+
+研究では、固定番号を他環境へ適用するより、次の流れをソースから追う方が有効です。
+
+1. どの共通 API が IPI を要求するか
+2. 送信先 CPU と payload/queue 状態がどう準備されるか
+3. x86 APIC 層がどの vector を使って通知するか
+4. 対象 CPU の handler がどの共通処理へ分岐するか
+
+### 4.6.2.4 device IRQ との違い
+
+IPI は CPU 間イベントなので、通常の device driver が `request_irq()` で登録する IRQ と同じ流れではありません。
+Linux の SMP helper やアーキテクチャ API が送受信を管理します。
+
+その一方、IPI を受けた CPU では、CPU vector entry、低水準 entry、割り込み文脈管理、復帰処理など、IRQ entry と共通する機構も使われます。
+したがって「I/O IRQ と完全に別の入口」でも「普通の device IRQ と同一」でもなく、用途と送信側が異なる一方で entry 基盤の一部を共有するものと捉えます。
+
+### 4.6.2.5 Linux 6.18 LTS のソースを追う入口
+
+- 共通 SMP 呼び出し: `kernel/smp.c`
+- x86 IPI の送信・受信: `arch/x86/kernel/smp.c`
+- x86 APIC IPI 配送: `arch/x86/kernel/apic/ipi.c`、`arch/x86/kernel/apic/`
+- TLB shootdown: `arch/x86/mm/tlb.c`
+- 再スケジューリング IPI: `kernel/sched/core.c`、`arch/x86/kernel/smp.c`
+
+共通 helper の呼び出し元から送信処理へ進み、対象 vector の handler、受信側処理、共有 queue の取り出しまで順に追います。
+
+### 4.6.2.6 UmuOS / QEMU での観察
+
+IPI の観察には複数の online CPU が必要です。
+QEMU を 1 vCPU で起動している場合は、CPU 間 IPI の配送・受信を比較できません。
+
+x86 の `/proc/interrupts` には `RES`、`CAL`、`TLB` など CPU 間処理に関連する行が現れる場合がありますが、表示は kernel/architecture に依存します。
+複数 vCPU で負荷やプロセス実行を変えながらカウンタを見ると IPI 活動の手掛かりになりますが、個々の送信理由まではカウンタだけで確定できません。
+必要なら tracing event や Linux 6.18.1 の送受信コードを照合します。
+
+### 4.6.2.7 この節で固定したいこと
+
+- IPI は CPU から別 CPU へ処理要求・同期を通知する仕組みである
+- 再スケジュール、CPU 間関数呼び出し、TLB shootdown などで使われる
+- 要求データの準備と IPI 通知は別の処理として考える
+- 固定ベクタ番号は Linux 2.6 の表から現在へ持ち込まず、現行送受信経路を追う
+- UmuOS で CPU 間 IPI を観察するには複数 vCPU が必要で、`/proc/interrupts` は活動の手掛かりに留まる
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1939,4 +2015,5 @@ IRQ の行名、device の bus 情報、driver の probe 経路を照合しま�
 - 4.6.1.8 では、pending IRQ、controller retrigger、イベント数の保持、spurious IRQ を区別する
 - 4.6.1.9 では、device ISR の戻り値、共有 IRQ 判定、threaded IRQ への分離を整理する
 - 4.6.1.10 では、IRQ/vector 確保と handler 登録を分け、現代 PCI/virtio の動的割り当てを読む
+- 4.6.2 では、IPI をデバイス IRQ と区別し、CPU 間要求と同期の仕組みとして整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
