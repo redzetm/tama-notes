@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.2「割り込み処理、I/O 割り込み、割り込みベクタ、IRQ データ構造」
-- 今回の主題: 外部 IRQ と CPU 例外の区別、I/O IRQ の共有・配送、IRQ 番号と CPU ベクタの動的対応、generic IRQ のデータ構造
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.1.3「割り込み処理、I/O 割り込み、IRQ データ構造、SMP 分配」
+- 今回の主題: I/O IRQ の共有・配送、Linux IRQ と CPU ベクタ、generic IRQ のデータ構造、SMP 時の IRQ affinity
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.2 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.1.3 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -1364,6 +1364,74 @@ UmuOS では `/proc/interrupts` を読み、Linux IRQ ごとのカウンタ、�
 - 2.6 系の状態フラグ名や統計閾値を、Linux 6.18 の実装と同一視しない
 - UmuOS の `/proc/interrupts` は内部データ構造の一部を観察する窓口である
 
+#### 4.6.1.3 マルチプロセッサシステムの IRQ 分配処理
+
+複数 CPU のシステムでは、外部 IRQ をどの CPU が処理するかを決める必要があります。
+ただし Linux 6.18 がすべての IRQ を全 CPU へ均等なラウンドロビンで配るわけではありません。
+配送先は IRQ の affinity、割り込みコントローラ、デバイスの MSI/MSI-X 構成、managed IRQ の方針などに基づいて決まります。
+
+#### IRQ affinity は処理可能 CPU の制約
+
+IRQ affinity は、その IRQ をどの CPU 群へ配送してよいかを示す設定です。
+ユーザー空間の管理者は、環境と権限が許す場合に `/proc/irq/<IRQ>/smp_affinity` または `smp_affinity_list` を通じて affinity を確認・変更できます。
+
+ただし、指定した affinity が常にそのまま実効設定になるとは限りません。
+オンライン CPU、managed IRQ、デバイスドライバ、CPU hotplug、カーネル側の制約を反映した effective affinity が使われる場合があります。
+設定可能な IRQ 属性やファイルは構成依存なので、存在と内容を実機で確認します。
+
+#### x86 APIC と Linux IRQ 層の役割
+
+x86 では APIC 系の配送機構が、外部割り込みを選択された CPU の local APIC へ届けます。
+Linux 側では vector 管理と IRQ affinity の情報を使い、割り込みの配送先や CPU vector を構成します。
+これは「各割り込みのたびに全 CPU が受け、誰かが処理する」という方式ではありません。
+通常は配送対象に選ばれた CPU が入口へ入り、他の CPU はその IRQ を受けません。
+
+MSI/MSI-X のデバイスでは、キューや vector の構成に応じて IRQ を複数 CPU へ配置できる場合があります。
+ネットワークやストレージのスケーリングでは、キューと CPU affinity の対応が性能や NUMA 局所性に影響します。
+単一の IRQ を均等にばらまくことだけが最適化ではありません。
+
+#### `irqbalance` とカーネルの自動分配を区別する
+
+旧本文にある `kirqd` は Linux 2.6 系の仕組みです。
+Linux 6.18 の一般的な説明として、同じ名前のカーネルスレッドが定期的に全 IRQ を均等化すると考えてはいけません。
+
+現代のシステムでは、初期 affinity や managed IRQ をカーネルが設定する一方、必要に応じて `irqbalance` などのユーザー空間サービスが IRQ affinity を調整します。
+`irqbalance` が動作しているかどうかはディストリビューションやサービス設定に依存します。
+そのため、IRQ 配置を調べるときは「カーネルが決めた初期状態」と「ユーザー空間が後から調整した状態」を分けます。
+
+#### UmuOS / QEMU での観察
+
+UmuOS で複数 vCPU を有効にしている場合、`/proc/interrupts` の CPU 列を比べると、IRQ がどの CPU で処理されたかを観察できます。
+QEMU の vCPU 数が 1 なら、CPU 間分配や複数 CPU affinity の比較はできません。
+
+調査時は次を照合します。
+
+- ゲストで online になっている CPU 数
+- `/proc/interrupts` の IRQ ごとの CPU カウンタ
+- `/proc/irq/<IRQ>/smp_affinity_list` と、利用できる場合の effective affinity
+- QEMU の vCPU 構成、virtio キュー数、irqbalance 等のサービス状態
+
+カウンタが複数 CPU に分かれていることは処理 CPU の分散を示しますが、分散の理由や最適性までは証明しません。
+設定とデバイス構成を合わせて解釈します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- x86 vector/CPU 配送管理: `arch/x86/kernel/apic/vector.c`
+- I/O APIC 設定: `arch/x86/kernel/apic/io_apic.c`
+- IRQ affinity 共通処理: `kernel/irq/`、`kernel/irq/affinity.c`
+- IRQ affinity の公開属性: `kernel/irq/proc.c`
+- IRQ の per-CPU 統計: `kernel/irq/`、`kernel/irq/internals.h`
+
+デバイス IRQ の affinity 設定から irq domain、x86 vector 割り当て、APIC 配送へ進むと、共通層とアーキテクチャ層の分担を確認できます。
+
+#### この小節で固定したいこと
+
+- SMP 環境の IRQ 配送は、全 CPU への固定ラウンドロビンではない
+- IRQ affinity は配送可能 CPU を制約し、実効値は CPU 状態や managed IRQ 等に左右される
+- `irqbalance` はユーザー空間の調整サービスで、常に存在するカーネル機能ではない
+- MSI/MSI-X の複数 vector/queue 配置は性能や CPU 局所性に関係する
+- UmuOS で CPU ごとの IRQ カウンタを比べるには、複数 vCPU と affinity 設定を確認する
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -1382,4 +1450,5 @@ UmuOS では `/proc/interrupts` を読み、Linux IRQ ごとのカウンタ、�
 - 4.6.1 では、共有 IRQ、generic IRQ 層、irq_chip、hardirq と後続処理の分担を整理する
 - 4.6.1.1 では、Linux IRQ と CPU vector の動的な対応、古い固定ベクタ表の扱いを整理する
 - 4.6.1.2 では、`irq_desc` / `irq_data` / `irqaction` / `irq_chip` の責務分担を整理する
+- 4.6.1.3 では、SMP 時の IRQ 配送を一律ラウンドロビンではなく affinity と実効配置で捉える
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
