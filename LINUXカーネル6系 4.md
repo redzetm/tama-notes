@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.1「ワークキューとデータ構造」
-- 今回の主題: I/O IRQ の共有・配送、CPU 間割り込み、softirq/tasklet/workqueue の実行文脈、workqueue 内部構造
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.2「ワークキュー、データ構造、API」
+- 今回の主題: I/O IRQ の共有・配送、softirq/tasklet/workqueue の実行文脈、work item の queue/flush/cancel と worker pool の使い方
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.1 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.2 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -2621,6 +2621,81 @@ tracefs の workqueue event が利用できる場合は、queue・activate・exe
 - 旧 `cpu_workqueue_struct` の表を現在の driver API と混同しない
 - UmuOS の process list だけでは個々の work item を特定できず、必要なら workqueue trace event を使う
 
+### 4.8.1.2 ワークキュー関数
+
+workqueue API は、workqueue を選び、work item を投入し、必要なら完了を待つための公開入口です。
+旧本文の `create_workqueue()` と per-CPU worker 数の説明をそのまま現在の作成モデルとせず、Linux 6.18 の `alloc_workqueue()`、system workqueue、worker pool の方針で読みます。
+
+#### workqueue を用意する
+
+driver が専用の実行属性や順序制御を必要とする場合は、`alloc_workqueue()` で名前、flags、active work の上限などを指定して workqueue を作ります。
+終了時は、queue 上の work の寿命を整理してから `destroy_workqueue()` で破棄します。
+
+一般的な work では、すでに用意されている system workqueue を使える場合があります。
+ただし、長時間 block する仕事や大量の仕事を共有 system queue に流すと、同じ queue を使う他の処理を遅らせる可能性があります。
+処理時間、並列性、メモリ回収との関係を考えて専用 queue の要否を判断します。
+
+#### work item を queue する
+
+`work_struct` は `INIT_WORK()` 等で初期化し、`queue_work()` で実行を要求します。
+この呼び出しは callback をその場で実行するのではなく、worker pool に work を投入する要求です。
+
+- `queue_work()`: 通常の work item を queue する
+- `queue_delayed_work()`: 指定した delay の後に work を queue する
+- `schedule_work()` 等: system workqueue を使う簡便な helper
+
+遅延時間は「その時刻に必ず開始する」期限ではなく、実行可能になるまでの最小待ち時間として扱います。
+実際の開始時刻は worker の稼働状況や queue の制約に左右されます。
+
+同じ work item が既に pending のときに再 queue すると、既存 work に統合される場合があります。
+一回の queue 要求をイベント一件の保存だと考えず、個々のイベント数が必要なら別の counter や queue で保持します。
+
+#### flush と cancel は異なる同期操作
+
+- `flush_work()` / `flush_workqueue()`: 対象 work の完了を待つために使う
+- `cancel_work_sync()` / `cancel_delayed_work_sync()`: pending work を取り消し、実行中なら完了まで同期する
+- `destroy_workqueue()`: workqueue の利用を終え、関連する worker pool 接続を解放する
+
+flush は work を取り消す操作ではありません。
+cancel は、すでに callback が実行中ならそれが終わるまで待つ同期版を使う場面があります。
+どの work まで flush の対象になるか、呼び出し元が callback 自身かどうかなどの条件は各 API の契約を確認します。
+
+driver teardown では、まず新しい work が queue されないよう起動元を止め、その後に cancel/flush を行い、参照データを解放する順序を作ります。
+work が再 queue される経路を残したまま一度だけ flush しても、終了処理の同期にはなりません。
+
+#### 順序と並列性を queue の性質で決める
+
+通常の workqueue では、work が常に一つずつ順番に実行されるとは限りません。
+同じ work item の再 queue、queue ごとの concurrency、bound/unbound 属性などが実行順と CPU 配置に影響します。
+
+順序を明示的に保ちたいなら ordered workqueue などの選択肢を検討します。
+一方、独立した work を無理に直列化すると throughput を落とすため、依存関係があるのかを先に確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- 公開 workqueue API: `include/linux/workqueue.h`
+- queue/flush/cancel の実装: `kernel/workqueue.c`
+- workqueue flags と属性: `include/linux/workqueue.h`
+- workqueue trace event: `include/trace/events/workqueue.h`
+
+`queue_work()` を呼ぶ driver から投入先 workqueue の属性へ進み、worker 起床、callback 実行、flush/cancel の完了条件を別々に追うと API の保証範囲が分かります。
+
+#### UmuOS での API 利用の観察
+
+UmuOS の通常コマンドから `queue_work()` の戻り値や callback の実行順を直接観察することはできません。
+対象 driver source の API 呼び出しを追い、tracefs で workqueue trace event が利用できる場合は queue/execute/complete の系列を記録します。
+
+`kworker` task が見えることだけでは、どの work item を処理中かは特定できません。
+kernel config、tracefs の有効状態、vCPU 数、再現した I/O 条件を合わせて記録します。
+
+#### この小節で固定したいこと
+
+- workqueue は callback を worker pool に投入する仕組みであり、queue 呼び出し時に同期実行する API ではない
+- delay は実行開始の期限ではなく、workqueue の負荷や制約で開始が遅れる
+- flush は完了待ち、cancel は取り消しと必要な同期であり、意味が異なる
+- teardown では再 queue 元を止めてから work を drain/cancel し、参照データを解放する
+- system workqueue を長時間占有する work に使うと、他の利用者へ影響し得る
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -2658,4 +2733,5 @@ tracefs の workqueue event が利用できる場合は、queue・activate・exe
 - 4.7.2 では、tasklet の同一 instance 直列化、lifecycle、現代の代替機構を区別する
 - 4.8 では、workqueue を worker task 文脈で実行する遅延処理機構として、softirq/tasklet と区別する
 - 4.8.1.1 では、work item・workqueue・pool・worker task の階層と責務を分けて捉える
+- 4.8.1.2 では、queue・delay・flush・cancel の API 契約と work の寿命管理を整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
