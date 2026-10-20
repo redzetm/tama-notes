@@ -3182,3 +3182,18 @@ trace/debug 機能が使える場合も、signal、debug exception、scheduler �
 - 4.9.1.5 では、user return 前の schedule と work state 再確認の関係を整理する
 - 4.9.1.6 では、signal・single-step・旧 VM86 経路を現行 x86-64 の exit path と分けて整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
+
+## 4章のまとめ
+
+Linux の割り込み・例外処理は、CPU が実行を中断して入口へ移るところから始まり、architecture 固有の entry code、generic IRQ/exception 処理、必要な後続 work、復帰先に応じた exit path を経て実行へ戻ります。
+この一連の流れでは、CPU vector と Linux IRQ、hard IRQ と task context、IRQ return と user return をそれぞれ別の層として扱うことが大切です。
+
+復帰時の判断も、単純なレジスタ復元だけではありません。
+kernel return では preemption が安全かを確認し、user return では reschedule、signal、通知や debug 関連の work を処理してから user state を戻します。
+`need_resched` はその場で必ず切り替える命令ではなく、現在の実行文脈と preemption 条件に従って scheduler が処理する要求です。
+
+旧 Linux 2.6/x86-32 の `do_IRQ()`、`resume_userspace`、VM86 処理等は、入口と復帰の考え方を理解する歴史資料として有用です。
+一方、Linux 6.18 LTS の具体的な処理順・関数名・flag 配置は x86-64 entry code、共通処理、設定に基づいて追い直します。
+
+UmuOS では Linux 6.18.1 ゲストを実行し、ログ、`/proc/interrupts`、利用可能な tracing/debug 機能を組み合わせて観測します。
+これらの観測値は内部経路の一部を示すものであり、カウンタやシリアルログだけから CPU vector、handler の全順序、復帰時の schedule 原因まで断定しないことが、実験結果を正しく読むための基準になります。
