@@ -37,11 +37,11 @@ UmuOS では、起動時のカーネルログとシリアル出力が初期化�
 
 ## 今回扱う範囲
 
-- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.5「割り込み・例外復帰と user mode 復帰・再スケジューリング」
-- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の保留 work と再スケジューリング loop
+- 原文対応: 4.1「割り込み信号の役割」、4.2.1〜4.2.4「IRQ、例外、IDT、CPU の入口処理」、4.3「例外および割り込み処理のネスト」、4.4.1〜4.4.2「IDT ゲートと初期化」、4.5〜4.5.2「例外処理」、4.6〜4.6.2「I/O IRQ、IPI」、4.7〜4.7.2「softirq、tasklet」、4.8〜4.8.1.3「ワークキュー」、4.9〜4.9.1.6「割り込み・例外復帰と user mode 復帰・再スケジューリング・signal」
+- 今回の主題: IRQ/例外の入口から復帰まで、kernel return の preemption 条件、user return 前の保留 work、signal と debug event
 - 6.18 LTS の視点: x86-64 の現行入口と Linux 共通 IRQ 管理を分け、古い x86-32 の記述を現行仕様と混同しないこと
 - UmuOS の視点: Linux 6.18.1 ゲストの割り込み経路を、起動ログ・virtio デバイス・`/proc/interrupts` から観測すること
-- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.5 を作成済み。後続節は引き続き小節単位で追加する
+- 現在の進捗: 4.1、4.2.1〜4.2.4、4.3、4.4.1〜4.4.2、4.5〜4.5.2、4.6〜4.6.2、4.7〜4.7.2、4.8〜4.8.1.3、4.9〜4.9.1.6 を作成済み。後続節は引き続き小節単位で追加する
 
 ## 4章の研究観点
 
@@ -3086,6 +3086,55 @@ trace が利用できない場合は、Linux 6.18.1 の build config と entry/s
 - user return 前の reschedule と kernel return の preemption は別の実行条件として追う
 - `/proc/interrupts` だけでは復帰時の context switch の有無や原因を判断できない
 
+#### 4.9.1.6 保留中シグナル、仮想8086モード、シングルステップの処理
+
+user return 前の work には、再スケジューリング以外に signal や通知処理も含まれます。
+これらは user register frame や次に実行する user instruction に影響することがあるため、通常の復帰処理と区別して追います。
+
+#### 保留 signal と user frame
+
+保留 signal があるとき、カーネルは signal mask、disposition、対象 task の状態等を考慮して処理を決めます。
+user handler を実行する場合は、復帰用 user state を準備して user mode に戻り、その後に handler が user code として実行されます。
+既定動作や無視などもあるため、保留 signal があれば必ず handler に入るわけではありません。
+
+signal の配送は user return の直前だけに限った仕組みではなく、signal の生成・保留・選択・frame 構築という複数の段階があります。
+旧本文の `do_notify_resume()` 一つだけを現行 Linux の全 signal 経路とみなさず、common exit work と architecture 固有の signal 処理を分けて確認します。
+
+#### シングルステップと debug exception
+
+single-step は CPU の debug 機能によって命令実行後の debug exception（x86 の `#DB`）等を発生させ、ptrace/debugger や task の状態に応じた処理へつながります。
+したがって、単に user return 時に一度だけ処理される flag と考えるのではなく、debug exception の entry、原因判定、必要な通知や signal、user return の連携として追います。
+
+- x86 debug exception: `arch/x86/kernel/traps.c`
+- x86 ptrace/debug support: `arch/x86/kernel/ptrace.c`
+- generic signal state と配送: `kernel/signal.c`
+- x86 signal frame と復帰: `arch/x86/kernel/signal.c`
+- user return 前の work: `kernel/entry/common.c`
+
+実際の single-step 状態や通知経路は、CPU の debug register/flag、ptrace 利用の有無、kernel configuration によって変わります。
+
+#### VM86 は旧 32-bit x86 の歴史的経路
+
+原文の `EFLAGS.VM` 判定と `save_v86_state()` は、32-bit x86 の仮想8086モードを扱う旧実装です。
+x86-64 の long mode における通常の Linux 6.18 user return では、この VM86 state を保存して復帰する経路を前提にしません。
+そのため、UmuOS の x86-64 ゲストで `save_v86_state()` を探すのではなく、現行の signal/notify/debug 処理と歴史的な VM86 対応を分離します。
+
+#### UmuOS での観察
+
+signal の user-visible 結果は handler、終了 status、または debugger/tracer の挙動から観察できます。
+single-step は ptrace 等で有効化した場合に `#DB` や関連イベントとして追えますが、通常の起動シリアルログや `/proc/interrupts` から配送順序を復元することはできません。
+
+UmuOS が使う Linux 6.18.1 の x86-64 ゲストでは、VM86 を通常の実行経路として扱いません。
+trace/debug 機能が使える場合も、signal、debug exception、scheduler の記録をそれぞれの意味を保って照合します。
+
+#### この小節で固定したいこと
+
+- 保留 signal は disposition 等に従って処理され、handler を実行する場合は user frame を準備する
+- single-step は debug exception と ptrace/debugger 等の処理経路を含む
+- 旧 `do_notify_resume()` を現行の全通知処理の単一入口とみなさない
+- VM86 と `save_v86_state()` は旧 32-bit x86 の記述として分離する
+- UmuOS の通常ログや `/proc/interrupts` だけでは signal/debug の内部経路は分からない
+
 ## この時点での研究メモ
 
 - 4.1 では、割り込みと例外を「異常の一覧」ではなく、実行中の処理からカーネルへ制御を渡す仕組みとして捉える
@@ -3131,4 +3180,5 @@ trace が利用できない場合は、Linux 6.18.1 の build config と entry/s
 - 4.9.1.3 では、need_resched と実際の preemption 可否を preempt/lock/IRQ state から判断する
 - 4.9.1.4 では、user return 前の保留 work と user register frame の準備を整理する
 - 4.9.1.5 では、user return 前の schedule と work state 再確認の関係を整理する
+- 4.9.1.6 では、signal・single-step・旧 VM86 経路を現行 x86-64 の exit path と分けて整理する
 - UmuOS は Linux 6.18.1 ゲストの動作を観測する対象であり、IDT や割り込み処理の実装主体ではない
