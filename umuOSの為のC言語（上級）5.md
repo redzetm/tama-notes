@@ -369,7 +369,7 @@ if (fcntl(fd, F_SETFL, flags) == -1) {
 - `socket()` が返したソケット fd
 
 こうした fd は最初の生成 API が `open()` ではないため、
-「最初から 원하는フラグで `open()` する」という発想だけでは扱いきれません。
+「最初から望むフラグを指定して `open()` する」という発想だけでは扱いきれません。
 
 ここで `fcntl()` が「後から整える」役割を持ちます。
 
@@ -1844,6 +1844,5 @@ int main(void) {
 - `O_EXCL`、`O_APPEND`、`dup2()`、`pread()`、`writev()` は、どれも意味を一括で渡して隙間を減らすための道具として読める
 - ファイルI/Oを正しく扱うには、パス名、fd、open file description、i-node を混同しないことが決定的に重要である
 - 現代的な C17 / Linux の実践では、close-on-exec、`_FILE_OFFSET_BITS=64`、安全なテンポラリファイル作成を含めて考える必要がある
-
 
 
