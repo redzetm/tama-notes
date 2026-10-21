@@ -3197,3 +3197,12 @@ kernel return では preemption が安全かを確認し、user return では re
 
 UmuOS では Linux 6.18.1 ゲストを実行し、ログ、`/proc/interrupts`、利用可能な tracing/debug 機能を組み合わせて観測します。
 これらの観測値は内部経路の一部を示すものであり、カウンタやシリアルログだけから CPU vector、handler の全順序、復帰時の schedule 原因まで断定しないことが、実験結果を正しく読むための基準になります。
+
+
+
+
+
+
+
+
+
