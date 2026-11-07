@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」
-- 今回の主題: SLUB cacheのalignment要件、object slot stride、`SLAB_HWCACHE_ALIGN`と内部断片化・cache lineの考え方
-- 現在の進捗: 8.1〜8.2.9を作成済み。8.2.10以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」
+- 今回の主題: 旧来のslab coloringの原理と、Linux 6.18のSLUBにおけるobject配置・cache aliasing対策との区別
+- 現在の進捗: 8.1〜8.2.10を作成済み。8.2.11以降は未着手
 
 ## 第8章の見取り図
 
@@ -51,7 +51,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.7 | cache内slabの破棄・shrink | 作成済み |
 | 8.2.8 | object descriptorとfree object内のfreelist link | 作成済み |
 | 8.2.9 | object alignmentとSLUBのslot寸法 | 作成済み |
-| 8.2.10〜8.2.15 | cache coloring、local cache、object割り当て・解放、mempool | 未着手 |
+| 8.2.10 | slab coloringの原理とLinux 6.18 SLUBとの差 | 作成済み |
+| 8.2.11〜8.2.15 | local cache、object割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1301,3 +1302,46 @@ s->size = ALIGN(実際に必要な寸法 + metadata/padding, s->align)
 - cache作成時のalignment計算: `mm/slab_common.c` (`calculate_alignment()`、`arch_slab_minalign()`)
 - object size、metadata、padding、slot strideの計算: `mm/slub.c` (`calculate_sizes()`)
 - 実行時cache属性の観測: `/sys/kernel/slab/<cache>/align`、`/sys/kernel/slab/<cache>/object_size`、`/sys/kernel/slab/<cache>/size`
+
+### 8.2.10 スラブの色付け
+
+#### 原文の「色」が表しているもの
+
+第3版で説明されるslab coloringは、同じcacheのslabごとに、最初のobject領域の開始位置を少しずつずらす考え方です。slab内のobject sizeやalignmentが同じであれば、各slabのobjectは同じoffsetに並びます。開始位置を異なるalignment単位だけずらす「色」を与え、cache index/setの選択特性によって特定のindexにアクセスが集中する状況を緩和するのが狙いでした。
+
+旧来の方式を概念的に表すと、slab内の未使用領域をobject領域の前置paddingへ振り分け、slabごとにそのpadding量を変えます。
+
+```text
+slab A: [prefix 0 ][object 0][object 1][object 2]...[unused]
+slab B: [prefix 1 ][object 0][object 1][object 2]...[unused]
+slab C: [prefix 2 ][object 0][object 1][object 2]...[unused]
+                    ^ object列の開始位置をずらす
+```
+
+この「色」はslabを識別するための分類値であって、objectの属性やhardware cache lineそのものではありません。色の候補数は、概念上、slabに残る未使用領域をalignment単位で分割できる数に制約されます。未使用領域がalignmentより小さければ開始位置を変えられず、色付けの効果もありません。
+
+#### Linux 6.18のSLUBではslab coloringを行わない
+
+この旧来の色付け機構をLinux 6.18のSLUBの動作として読み替えてはいけません。現行のSLUBには、旧実装にあった`colour`、`colour_off`、`colour_next`、`colouroff`によってslabごとのobject開始位置を循環的にずらす構造・経路はありません。`allocate_slab()`はページアロケータから得たslabの先頭を基点にdebug用調整等を行い、objectを`s->size`のstrideで配置します。`calculate_sizes()`が決める内部slot寸法やalignmentは重要ですが、それはslabごとに色を変える処理とは別です。
+
+```text
+Linux 6.18 SLUBの概念図
+
+slab base -> object 0 -> object 1 -> object 2 -> ...
+                |<-- s->size -->|
+
+slabごとの可変prefixを使ってobject列を巡回移動する
+「colour_next / colouroff」方式ではない
+```
+
+したがって、旧節の数式やdescriptor fieldは歴史的な仕組みを理解するために留め、Linux 6.18で現在のslab配置を調べる際には`struct kmem_cache`のsize/order設定、`calculate_sizes()`、`allocate_slab()`を追います。Linux 6.18のSLUBがcoloringをしないことは、cache conflictが原理上なくなったという意味ではありません。配置・indexingはarchitectureとhardware cacheの特性に依存します。
+
+#### 用語が似ている別の仕組み
+
+Linux 6.18のページアロケータにも、ページcoloring由来のcache aliasing特性を考慮してページのbatch sizeを決めるコードがあります（`mm/page_alloc.c`）。これはページアロケータのbatchingに関する考慮であり、SLUBがslab内のobject開始offsetに色を割り当てる処理ではありません。また、architectureや構成によって現れる仮想mappingのcolor管理とも区別します。「color」という語だけで、同じアルゴリズムや同じ階層の処理だと判断しないことが大切です。
+
+**Linux 6.18のソースを追う入口**
+
+- slabページからobject列を初期化する経路: `mm/slub.c` (`allocate_slab()`、`setup_object()`)
+- object slotの寸法とalignment: `mm/slub.c` (`calculate_sizes()`)
+- ページ確保batchとcache aliasingへの言及: `mm/page_alloc.c`（ページアロケータのbatch計算）
