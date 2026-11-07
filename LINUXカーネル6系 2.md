@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.7を再整備、次は2.4.8）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8を再整備、次は2.5）
 
 ## 2章の研究観点
 
@@ -930,15 +930,38 @@ Linux 6.18 LTSのソース・文書を追う入口:
 
 #### 2.4.8 アドレス変換バッファ（TLB）
 
-TLB は、ページテーブルの探索結果そのものを覚えておくキャッシュです。
-これがあるおかげで、同じ仮想アドレス範囲への繰り返しアクセスで毎回多段テーブルを引き直さずに済みます。
-しかし逆に、ページテーブルを書き換えたときには TLB の整合性を取らなければなりません。
-ここで出てくるのが TLB flush や shootdown の話です。
+##### TLBが保持するもの
 
-Linux 6.18 LTS では、この TLB 管理がかなり重要です。
-ページテーブルを変えたのに古い変換が CPU 内部へ残っていると、正しい保護も正しい対応付けも成り立たないからです。
-つまり仮想記憶の実装は、「正しいページテーブルを作ること」で終わらず、CPU 内部キャッシュまで含めて整合性を
-保つところまでが仕事になります。
+TLB（Translation Lookaside Buffer）は、最近使われた仮想/linear pageから物理page frameへの変換と、それに付随する権限情報を保持するhardware cacheです。TLB hitなら、MMUは毎回page-table hierarchy全体をwalkせずに変換を使えます。missの場合はhardware page walkなどでtranslationを取得しますが、page-table entryがCPU cacheにある場合もあるため、「毎回DRAMまで取りに行く」とは限りません。TLBはdata/instruction cacheとも、メモリ上のpage tableそのものとも異なります。
+
+多くのCPUではTLBはCPU coreごとに管理され、他coreのTLB entryが自動的にcoherentになるとは限りません。さらにtranslationはaddress spaceやpage size等のcontextに結び付いています。したがって、同じvirtual addressでも異なる`mm`では別のphysical mappingになり得る一方、同じ`mm`を複数CPUが同時に使っている場合は、そのaddress spaceに属する各CPU上の古いtranslationを適切に処理する必要があります。
+
+##### address-space切替とPCID
+
+原文のx86例では、CR3を別のpage-table rootへ切り替えるとlocal TLBが無効化される、と説明しています。これは未taggedな従来動作を理解する入口になりますが、Linux 6.18のx86-64の全動作を表すものではありません。CPUがPCID（Process-Context Identifier）をサポートし、kernelが利用する場合、TLB entryにaddress-space識別子を結び付け、CR3切替時に他contextのentryを保持できるため、毎回の全面flushを避けることがあります。どのentryが再利用可能かはLinuxが管理し、必要なinvalidateを省略してよいかを判断します。
+
+よって、「CR3を書き換えれば必ずTLB全体が空になる」「別processへ切り替わるたびに必ず全entryを捨てる」と一般化しません。PCIDの有無、CR3 loadの形、kernelのTLB generation管理などに依存します。
+
+##### page-table変更とTLB invalidation
+
+page tableを変更してmappingや権限を変えても、CPUに古いtranslationが残っていれば、古いphysical pageへアクセスしたり、新しい権限を適用できなかったりする可能性があります。そのためkernelは、変更範囲や対象address spaceに応じたTLB flush interfaceを使います。SMPでは、対象の`mm`を過去または現在実行しているCPUを追跡し、必要なCPUにもinvalidateを反映します。この他CPUへの反映が一般にTLB shootdownと呼ばれる処理です。全CPU・全entryを常にflushするのではなく、対象範囲、CPU mask、PCID、世代番号などに応じて最小限にする最適化があります。
+
+LinuxのVM subsystemが使う概念的な範囲は、単一page、address range、`mm`全体、kernel mapping全体などです。architecture固有の実装や最適化は異なりますが、software page tableの変更後にCPUが古いtranslationを使わない状態にすることがinterfaceの契約です。page table更新の正しさは、memory上のentryだけでなくTLBの状態が反映されたところまで含みます。
+
+Linux 6.18 LTSのソース・文書を追う入口:
+
+- genericなcache/TLB flush interfaceと契約: `Documentation/core-api/cachetlb.rst`
+- x86のPCID、address-space切替、TLB generationおよびflush実装: `arch/x86/mm/tlb.c`
+- x86のTLB flush helperと対象範囲: `arch/x86/include/asm/tlbflush.h`
+- VMからのTLB invalidation呼び出し: `include/asm-generic/tlb.h`、`mm/mmu_gather.c`
+
+この小節で固定したいこと:
+
+- TLBはtranslationと権限情報のhardware cacheであり、data cacheやpage table本体とは別
+- translationはaddress-space contextに結び付く。同じvirtual addressでも`mm`により物理mappingは異なり得る
+- CR3切替が常にTLB全面flushを意味するわけではなく、PCID等によりentryを保持できる
+- page-table変更後は、影響範囲・address spaceに対応するstale translationをinvalidateする必要がある
+- SMPで同一`mm`を使うCPUへのTLB shootdownは必要性と対象範囲を管理して行い、無条件の全CPU flushではない
 
 #### この節を Linux 6.18 LTS の研究へつなぐ
 
