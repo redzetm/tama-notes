@@ -26,16 +26,17 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」
-- 今回の主題: ベースページとページフレームの考え方、PFNと`struct page`の対応、ページ記述子の現行構成と役割
-- 現在の進捗: 8.1、8.1.1を作成済み。8.1.2以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」
+- 今回の主題: ベースページとページフレーム、PFNと`struct page`、NUMA nodeとlocal allocation、zoneの役割とzonelistによる割り当て先選択
+- 現在の進捗: 8.1〜8.1.3を作成済み。8.1.4以降は未着手
 
 ## 第8章の見取り図
 
 | 原文の節 | 研究する主題 | 進捗 |
 |---|---|---|
 | 8.1、8.1.1 | ページフレーム、`struct page` | 作成済み |
-| 8.1.2〜8.1.4 | NUMA、メモリゾーン、予約ページ | 未着手 |
+| 8.1.2〜8.1.3 | NUMA、メモリゾーン | 作成済み |
+| 8.1.4 | 予約ページとwatermark | 未着手 |
 | 8.1.5〜8.1.9 | ページ割り当て、highmem、buddy、per-CPU cache、zone allocator | 未着手 |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
@@ -144,3 +145,145 @@ static struct page *page_for_valid_pfn(unsigned long pfn)
 - ページフラグとhelper: `include/linux/page-flags.h`、`include/linux/page_ref.h`
 - FLATMEM/SPARSEMEM/VMEMMAPの概念: `Documentation/mm/memory-model.rst`
 - ページフレームの割り当てと解放: `mm/page_alloc.c`
+
+### 8.1.2 不均等メモリアクセスアーキテクチャ（NUMA）
+
+NUMA (Non-Uniform Memory Access) は、CPUとメモリの物理的な位置関係によってアクセス遅延や帯域が変わる構成です。Linuxはハードウェアの資源配置をnodeとして表し、各nodeにCPU、メモリ、またはその両方を関連付けます。node間の距離は一律ではなく、CPUから見て近いメモリと遠いメモリがあります。
+
+```text
+                 CPU 0                         CPU 1
+                   |                              |
+             local access                   local access
+                   v                              v
+          +------------------+  interconnect +------------------+
+          | node 0           |<------------->| node 1           |
+          | CPU 0 + memory   |                | CPU 1 + memory   |
+          +------------------+                +------------------+
+              remote access from either CPU may cost more
+```
+
+Linuxのnodeは物理的なsocketやメモリバンクと必ず一対一になるわけではありません。アーキテクチャによっては、メモリを持たないhardware cellのCPUを別nodeへ関連付けたり、NUMA emulationで一つの物理メモリ領域を複数nodeとして見せたりします。したがって、node IDだけから物理配線や実際のアクセス時間を断定せず、firmware情報、`/sys/devices/system/node/`、距離情報などを確認します。
+
+Linuxのメモリ管理では、nodeごとに`struct pglist_data`（typedef名`pg_data_t`）があり、そのnodeのzone群、zonelist、PFN範囲、メモリ量などを記述します。UMA構成でもnodeを一つ持つ形で扱うため、共通のメモリ管理コードはnodeという単位を利用できます。
+
+```text
+pg_data_t (node)
+    |
+    +-- node_zones[]      node内のzone descriptor
+    +-- node_zonelists[]  割り当て候補zoneの優先順
+    +-- node_start_pfn / node_present_pages
+    +-- kswapdなどnode単位の回収情報
+```
+
+#### local allocationとfallback
+
+NUMAで通常のページ割り当てを行うとき、Linuxは原則として実行元CPUに近いnodeのメモリを優先します。近いメモリを使えば、割り当て後に同じCPUや近いnode上で処理される場合に、remote accessを減らせます。ただし、メモリを使うtaskが別nodeへ移動する、またはlocal nodeの空きが不足する場合には、期待したlocalityが維持されないことがあります。
+
+割り当て要求はzonelistをたどります。候補の順序はzone制約・node距離・policyなどに関わり、local nodeで確保できない場合には条件を満たす別nodeへfallbackすることがあります。一方、指定node以外からの確保を許さない要求もあります。どの動作になるかはGFP flags、NUMA memory policy、cpuset等を含む呼び出し条件で決まり、「常にlocal」「常に別nodeへfallback」と固定的に理解しないことが重要です。
+
+```text
+割り当て要求
+    |
+    v
+要求が許すzone/nodeをzonelistから選ぶ
+    |
+    +-- local nodeに適合する空きがある --> そのnodeから確保
+    |
+    +-- local nodeでは不足
+            |
+            +-- policyが許す候補nodeへfallback
+            +-- fallback禁止／候補なしなら失敗や回収処理へ
+```
+
+メモリ配置とtask配置は別々の仕組みです。メモリpolicyはページをどのnodeから割り当てるかに関わり、CPU affinityやschedulerはtaskがどのCPUで実行されるかに関わります。taskが移動すれば、そのtaskが以前に確保したページがremote memoryになる場合があります。NUMA localityを調べる際はCPU配置だけでなく、ページ配置とmemory policyも併せて観測します。
+
+NUMAの概念を確認するカーネル内部の例です。これはユーザー空間アプリケーションとして実行するコードではなく、nodeごとの統計にアクセスするカーネルコードの形を示します。
+
+```c
+#include <linux/mmzone.h>
+#include <linux/numa.h>
+#include <linux/printk.h>
+
+static void inspect_online_nodes(void)
+{
+        int nid;
+
+        for_each_online_node(nid) {
+                pg_data_t *pgdat = NODE_DATA(nid);
+
+                pr_info("node %d: present pages=%lu\n",
+                        nid, pgdat->node_present_pages);
+        }
+}
+```
+
+実際のカーネルコードでは初期化時期、memory hotplugとの同期、統計値の意味を確認します。`node_present_pages`はnodeに存在するページ数で、予約済み領域やallocatorが管理するページ数と同じ意味ではありません。
+
+**ソースと観測の入口**
+
+- node descriptorとnode iteration: `include/linux/mmzone.h`、`include/linux/numa.h`
+- nodeとzoneの設計: `Documentation/mm/physical_memory.rst`
+- NUMAのLinux model、zonelistとfallback: `Documentation/mm/numa.rst`
+- memory policy: `Documentation/admin-guide/mm/numa_memory_policy.rst`
+- zonelist構築とページ割り当て: `mm/page_alloc.c`
+- 実行環境のnode情報: `/sys/devices/system/node/`、`numactl --hardware`（導入済みの場合）
+
+### 8.1.3 メモリゾーン
+
+node内の物理メモリは、アドレス範囲や利用上の制約に応じてzoneに分けられます。zoneは単なる「メモリの用途別ラベル」ではありません。DMA可能範囲、kernelが常時直接アクセスできる範囲、移動可能ページとして管理する範囲などの制約を、allocatorが選択に反映するための単位です。
+
+第3版のx86-32説明に出てくる「DMAは先頭16 MiB」「NORMALは896 MiBまで」「それより上はHIGHMEM」という境界は、当時の特定構成に結び付いた値です。Linux 6.18の一般仕様として扱えません。zoneの有無と範囲はarchitecture、kernel config、物理アドレス空間、起動引数、memory hotplug等で変わります。
+
+| zone | Linux 6.18での意味 | 読むときの注意 |
+|---|---|---|
+| `ZONE_DMA` | ごく限られたDMA addressabilityしか持たないdevice向けの制約メモリ | 存在や範囲はarchitecture/config依存。古いISAの16 MiB境界を一般化しない |
+| `ZONE_DMA32` | 32-bit DMA maskで到達可能なメモリが必要な場合のzone | 一部の64-bit architectureで使われる。DMA APIで要件を指定することとzone名を直接選ぶことは別 |
+| `ZONE_NORMAL` | kernelが通常のkernel mappingを通じてアクセスできる通常メモリ | 常時有効な基本zone。通常のkernel allocationの中心 |
+| `ZONE_HIGHMEM` | kernelのpermanent mappingに全体を含められず、一時mappingが必要なメモリ | 主に一部の32-bit構成に存在。64-bitなら必ず空、と一般化するよりconfig/architectureで判断する |
+| `ZONE_MOVABLE` | 主に移動可能なページを集め、memory offliningなどを行いやすくするzone | 全ページが無条件に移動可能とは限らず、pinned page等の制約がある |
+| `ZONE_DEVICE` | device memoryに`struct page`等のmemory mapサービスを提供するzone | 通常RAMやbuddy管理の通常zoneと同一視しない |
+
+```text
+物理アドレス空間の概念図（zoneの境界は構成依存）
+
+node 0:  +-------------------+-------------------+------------------+
+         | DMA / DMA32       | NORMAL            | MOVABLE          |
+         +-------------------+-------------------+------------------+
+                    node 1:  +-------------------+------------------+
+                             | NORMAL            | MOVABLE          |
+                             +-------------------+------------------+
+
+別途: HIGHMEM（構成依存） / DEVICE memory（通常RAMとは異なる属性）
+```
+
+#### zoneのdescriptorとページ数
+
+各`struct zone`は、開始PFN、範囲、存在するページ数、buddy allocatorが管理するページ数、watermark、per-CPU page listなどを保持します。これらの値は同義ではありません。
+
+| `struct zone`の情報 | 意味 |
+|---|---|
+| `zone_start_pfn` | zoneの開始位置をPFNで表す |
+| `spanned_pages` | zoneが覆うPFN範囲の大きさ。範囲内のmemory holeも含む |
+| `present_pages` | zone範囲内に実在する物理ページ数。holeを除く |
+| `managed_pages` | page allocatorが管理するページ数。予約や未管理領域等を含めない |
+| `_watermark[]` | 割り当て可否や回収判断で用いる空きページのしきい値 |
+| `lowmem_reserve[]` | 低位zoneの枯渇を防ぐためのzone間reserve情報 |
+| `per_cpu_pageset` | CPUごとのページキャッシュを保持し、共有zone lockへの競合を抑える |
+| `free_area[]` | buddy allocatorがorderごとに管理するfree block情報 |
+| `zone_pgdat` | zoneが属するnode descriptorへの参照 |
+
+特に、`spanned_pages`と`present_pages`の差はmemory holeを含む構成で意味を持ち、`present_pages`と`managed_pages`の差には予約・allocator管理外のページ等が関係します。したがって、zoneの容量を一つのフィールドだけで代表させず、何を数えているかを読み分けます。
+
+#### `zonelist`がzoneとnodeの候補順を表す
+
+メモリ割り当て要求は、必要なzone上限や割り当て制約を踏まえてzonelistを走査します。`struct zonelist`は単なる全zoneの固定配列ではなく、割り当ての優先候補とfallback候補をたどるための構造です。Linux 6.18では通常のfallback用と、`__GFP_THISNODE`向けのfallbackを制限したzonelistが用意されます。
+
+たとえばDMA制約を満たさない高位zoneのページを、DMA可能であるかのように返すことはできません。逆に、制約が許せば要求元node以外のzoneへfallbackできる場合があります。実際の候補選択はzone index、GFP flags、NUMA policy、cpuset、watermarkや回収状態を含むため、ゾーン名だけで割り当て結果を断定しないようにします。
+
+**Linux 6.18のソースを追う入口**
+
+- zone typeと`struct zone`、`struct zonelist`、`struct pglist_data`: `include/linux/mmzone.h`
+- GFP flagsからzone/node候補を選ぶhelper: `include/linux/gfp.h`
+- zonelist構築、watermark判定、allocator経路: `mm/page_alloc.c`
+- zone/nodeの概念と構成例: `Documentation/mm/physical_memory.rst`
+- DMA bufferの確保要件: `Documentation/core-api/dma-api.rst`
