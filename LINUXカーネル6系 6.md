@@ -23,10 +23,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」、6.4「統計情報の更新」および6.4.1〜6.4.4、6.5「ソフトウェアタイマと遅延関数」および6.5.1〜6.5.3
-- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻補正、CPU時間会計、load average、perf、lockup watchdog、timer wheel・hrtimer・sleep・busy-waitの使い分け
+- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」、6.4「統計情報の更新」および6.4.1〜6.4.4、6.5「ソフトウェアタイマと遅延関数」および6.5.1〜6.5.3、6.6「時間管理関連のシステムコール」および6.6.1〜6.6.4
+- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻補正、CPU時間会計、load average、perf、lockup watchdog、timer wheel・hrtimer・sleep・busy-waitの使い分け、ユーザー向け時刻・タイマAPI
 - 6.18 LTSの視点: 旧式の全体割り込み・CPU別割り込みという固定図ではなく、共通時間管理層と各CPUのclockevent、設定に応じたtick運用を追う
-- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3、6.4、6.4.1〜6.4.4、6.5、6.5.1〜6.5.3を作成。6.6以降は未着手
+- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3、6.4、6.4.1〜6.4.4、6.5、6.5.1〜6.5.3、6.6、6.6.1〜6.6.4を作成。第6章の全節を作成済み
 
 ## 6章の見取り図
 
@@ -37,7 +37,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 | 6.3 | 時刻と日付の更新 | 作成済み |
 | 6.4、6.4.1〜6.4.4 | 統計情報、負荷、プロファイリング、watchdog | 作成済み |
 | 6.5、6.5.1〜6.5.3 | カーネルタイマ、待機、短時間遅延 | 作成済み |
-| 6.6、6.6.1〜6.6.4 | 時間管理関連のシステムコール | 未着手 |
+| 6.6、6.6.1〜6.6.4 | 時間管理関連のシステムコール | 作成済み |
 
 ## 6章を読むための基本モデル
 
@@ -705,6 +705,166 @@ busy-wait関数は較正値やアーキテクチャ依存の実装に基づく�
 - `nanosleep()` はtaskをsleepさせ、`udelay()` はCPUをbusy-waitさせる
 - 高分解能の期限であっても、期限満了時にユーザーtaskが即座に実行される保証とは異なる
 
+## 6.6 時間管理関連のシステムコール
+
+ユーザー空間から時間を扱うAPIには、時刻を読む・設定するAPI、時計を調整するAPI、一定時間後に通知するタイマAPI、指定時間だけtaskを休止させるAPIがあります。
+Linux 6.18 LTSでは、APIの名前から「必ずシステムコール命令でカーネルへ入る」とは限りません。
+たとえば時刻の読み取りは、対応するアーキテクチャと環境ではvDSOがユーザー空間で高速に処理する場合があります。
+一方、時刻の設定やタイマの作成など状態を変更する操作は、カーネルの検査・更新処理を必要とします。
+
+```text
+アプリケーションの時間要求
+       |
+       +--> 読み取り: clock_gettime() / time()
+       |       +--> vDSOで処理できる場合がある
+       |       +--> それ以外はシステムコール経路
+       |
+       +--> 設定・補正: clock_settime() / clock_adjtime()
+       |       +--> 権限検査を経てtimekeepingへ
+       |
+       +--> 期限通知: setitimer() / timer_create() / timerfd
+               +--> カーネルタイマ・hrtimer等からsignalやfd通知
+```
+
+### 6.6.1 `time()`、`gettimeofday()`、`clock_gettime()`
+
+`time()` と `gettimeofday()` は、UTCの壁時計時刻を取得する歴史あるAPIです。
+ただし、新しいプログラムで時計の性質を明示するには `clock_gettime()` を使います。
+`gettimeofday()` のtimezone引数は現在のtimezone設定を提供する仕組みとして使うものではなく、timezone変換はユーザー空間のライブラリで扱います。
+
+主な時計の選び方は次のとおりです。
+
+- `CLOCK_REALTIME`: UTCの壁時計。ログや外部に保存する時刻に使うが、時刻設定・同期により前後へ変化し得る
+- `CLOCK_MONOTONIC`: 壁時計の変更により後退しない経過時間。処理時間や相対timeoutの計測に使う
+- `CLOCK_BOOTTIME`: サスペンド中も含めた起動後の経過時間
+- `CLOCK_MONOTONIC_RAW`: NTP等の周波数補正を受けない生の経過時間基準。一般的なtimeout選択の代替として無条件に使うものではない
+- `CLOCK_TAI`: leap secondを含むUTCとは別のTAI時刻基準。利用環境でTAI offsetが適切に管理されていることを確認する
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <time.h>
+
+int main(void)
+{
+        struct timespec wall;
+        struct timespec elapsed;
+
+        if (clock_gettime(CLOCK_REALTIME, &wall) == -1)
+                return 1;
+        if (clock_gettime(CLOCK_MONOTONIC, &elapsed) == -1)
+                return 1;
+
+        /* wall: UTCの壁時計時刻、elapsed: 単調増加する経過時間基準 */
+        return 0;
+}
+```
+
+この例は時計の性質を示すための最小例です。エラー時には実際のプログラムでは `errno` を調べて処理します。
+二つの値は異なる時計基準なので、相互に引き算して経過時間を求めてはいけません。
+一つの処理の開始時と終了時を同じ `CLOCK_MONOTONIC` で取得し、その差を計算します。
+
+`clock_getres()` はAPIが返す時計分解能を調べるもので、実際の処理がその周期でスケジュールされることや、その精度でcallbackが実行されることを保証しません。
+また、`clock_gettime()` の呼び出しがvDSOで処理されるか、カーネルへのtrapを伴うかはアーキテクチャ・clock ID・実行環境に依存します。
+
+**ソースコードの入口**
+
+- ユーザー空間のvDSO実装・データ: `kernel/vdso/`、アーキテクチャ固有の `arch/*/entry/vdso/`
+- timekeepingの読み取りAPI: `include/linux/timekeeping.h`、`kernel/time/timekeeping.c`
+- システムコール側の時計処理: `kernel/time/posix-stubs.c`、`kernel/time/posix-timers.c`
+
+### 6.6.2 `adjtimex()`、`clock_adjtime()`と時刻設定
+
+時刻同期では、「壁時計を設定して大きく変更する」操作と、「進み方を調整して誤差をなめらかに補正する」操作を区別します。
+NTPクライアントなどの時刻管理サービスは、外部時刻源との差を計測し、適切な補正をユーザー空間からカーネルへ依頼します。
+カーネルは要求された補正状態を管理し、timekeepingに反映します。
+
+`adjtimex()` はLinuxで利用できる従来APIで、時刻の位相・周波数補正や同期状態の取得・設定に使われます。
+`clock_adjtime()` は時計IDを指定して調整するAPIです。
+これらは `clock_settime()` のように現在時刻を単純に置き換える操作と目的が異なります。
+内部の詳細は6.3で扱ったtimekeepingとNTP stateの更新へつながります。
+
+`clock_settime(CLOCK_REALTIME, ...)` や `settimeofday()` は壁時計を設定するAPIです。
+システム時刻を設定・調整する権限は通常 `CAP_SYS_TIME` に関係し、一般ユーザーが任意にシステム時刻を変更できるわけではありません。
+壁時計の変更は `CLOCK_REALTIME` ベースの処理に影響しますが、`CLOCK_MONOTONIC` による経過時間の性質とは区別します。
+
+これらのAPIを呼び出してもRTCが必ず同時に書き換わるわけではありません。
+システム時刻とRTCの同期方針は、カーネル構成や時刻同期サービスによって別途決まります。
+また、Linux固有の時刻調整APIに依存するプログラムは、可搬性を必要とする場合に注意が必要です。
+
+**ソースコードの入口**
+
+- `adjtimex()` / `clock_adjtime()` のシステムコール処理: `kernel/time/ntp.c`、`kernel/time/posix-timers.c`
+- NTP調整状態: `kernel/time/ntp.c`
+- 壁時計の設定とtimekeeping: `kernel/time/timekeeping.c`
+- RTCへの同期機構: `kernel/time/ntp.c`、`drivers/rtc/`
+
+### 6.6.3 `setitimer()`、`alarm()`とinterval timer
+
+`setitimer()` は一つのプロセスに対して設定する従来型interval timerです。
+三種類のtimerは、期限を測る時計基準と配送するsignalが異なります。
+
+| 種類 | 期限の基準 | 期限満了時のsignal |
+|---|---|---|
+| `ITIMER_REAL` | 実経過時間 | `SIGALRM` |
+| `ITIMER_VIRTUAL` | プロセスのuser CPU time | `SIGVTALRM` |
+| `ITIMER_PROF` | user + system CPU time | `SIGPROF` |
+
+`alarm()` は実経過時間を使った一回限りの `SIGALRM` 通知を設定する簡易APIです。
+`alarm()` と `ITIMER_REAL` は同じプロセス内の実時間タイマ資源を共有するため、独立した二つのタイマとして併用できません。
+
+このAPIは、タイマの期限が到来したときに同期的に処理を実行する仕組みではなく、プロセスへsignalを配送します。
+signalはブロック・保留されることがあり、周期満了が複数回起きても、通常のsignal配送だけでは各満了を一回ずつ確実に数えられない場合があります。
+また、POSIXでは `setitimer()` がobsolete扱いであり、新規設計では用途に応じてPOSIX timerやtimerfdなどを検討します。
+
+Linux 6.18の実装は、原文の `task_struct` にあるtick単位のカウンタや、`ITIMER_REAL` 用 `timer_list` をそのまま使う説明とは異なります。
+実時間タイマにはhrtimerが使われ、CPU時間ベースのtimerはCPU時間会計と連携します。
+
+### 6.6.4 POSIX timerとPOSIX clock
+
+POSIX clock APIは時計基準の読み取り・分解能取得などを行い、POSIX timer APIは指定したclockを基準に期限を設定します。
+代表的なAPIには `clock_gettime()`、`clock_getres()`、`clock_nanosleep()`、`timer_create()`、`timer_settime()`、`timer_gettime()`、`timer_getoverrun()`、`timer_delete()` があります。
+
+POSIX timerは `timer_create()` の `sigevent` 設定に応じて、signalなどで期限を通知できます。
+timerはスレッドまたはプロセスへ通知先を設定でき、`CLOCK_REALTIME`、`CLOCK_MONOTONIC`、`CLOCK_BOOTTIME` など対応するclockを基準にできます。
+利用できるclock IDや通知方式は、APIとカーネル構成に依存します。
+
+期限満了時にユーザー空間がすぐ動くわけではありません。
+カーネルがtimerを満了扱いにして通知を準備した後、signal配送やスケジューリングを経て、対象taskが実行されます。
+周期timerの複数回満了がsignal配送の遅れなどでまとめられた場合には、`timer_getoverrun()` で追加の満了数を確認できる場合があります。
+ただし、これは任意の期限ごとにアプリケーションコードが一回ずつ実行されたことを意味しません。
+
+```text
+POSIX clockを選ぶ
+      |
+timer_create(clockid, sigevent)
+      |
+timer_settime(絶対期限または相対期限、周期)
+      |
+期限満了 -- hrtimer等 --> signal / 指定された通知
+                               |
+                         ユーザーtaskが後で処理
+```
+
+ファイルディスクリプタを使ったevent loopでは、`timerfd_create()`、`timerfd_settime()` を使う選択肢もあります。
+timerfdはPOSIX timerそのものではなく、timer期限をreadableなファイルディスクリプタとして通知し、`poll` / `epoll` と統合するLinux APIです。
+
+**ソースコードの入口**
+
+- POSIX clock・timer syscall: `kernel/time/posix-timers.c`
+- interval timer: `kernel/time/itimer.c`
+- timerのhrtimer基盤: `kernel/time/hrtimer.c`
+- timerfd: `fs/timerfd.c`
+- ユーザー空間のclock API: `include/linux/time.h`、`include/uapi/linux/time.h`
+
+### 6.6で区別しておきたいこと
+
+- 時刻取得APIはvDSOで処理される場合があり、API呼び出しとカーネルへのシステムコール進入は同義ではない
+- 壁時計の取得・設定と、単調増加する経過時間の計測ではclock IDを使い分ける
+- `adjtimex()` 系の補正と `clock_settime()` / `settimeofday()` の時刻設定は異なる操作
+- `setitimer()` は従来型のsignal timerであり、Linux 6.18の内部実装を旧 `timer_list` の説明から推測しない
+- POSIX timerやtimerfdの期限満了は通知の契機であり、ユーザー処理が期限時刻に必ず実行される保証ではない
+- signal通知では満了回数とsignalの配送回数が一致しない場合があり、必要ならoverrunや別の通知方式を検討する
+
 ## Linux 6.18 LTSのソースを追う入口
 
 - 時計源の選択・登録: `kernel/time/clocksource.c`
@@ -719,6 +879,9 @@ busy-wait関数は較正値やアーキテクチャ依存の実装に基づく�
 - timer wheel: `kernel/time/timer.c`
 - hrtimer: `kernel/time/hrtimer.c`
 - delay / sleep API: `include/linux/delay.h`
+- POSIX clock・timer: `kernel/time/posix-timers.c`
+- interval timer: `kernel/time/itimer.c`
+- timerfd: `fs/timerfd.c`
 
 ## UmuOSでの観測上の注意
 
@@ -728,3 +891,19 @@ busy-wait関数は較正値やアーキテクチャ依存の実装に基づく�
 - `/proc/timer_list` の内容はカーネル構成や権限に依存する。存在しない場合もある
 - 仮想マシンでは、ゲストから見えるタイマデバイスが物理ホストの実デバイスと一致するとは限らない
 - タイマ期限の測定とcallbackが実行される時刻は別であり、負荷・割り込み遅延・taskスケジューリングの影響を受ける
+
+## 第6章のまとめ
+
+Linux 6.18 LTSの時間管理は、一つの周期割り込みや一つのタイマデバイスで全てを実現する構造ではありません。
+clocksourceが経過時間の基準を与え、timekeepingが複数の時計を提供し、clockeventとtimer機構が期限を処理します。
+その上に、CPU会計・load average・perf・watchdogといった統計・診断機能、ユーザー空間の時刻取得・タイマAPIが接続されます。
+
+第6章を通して、次の役割を分けて理解します。
+
+- **時刻の基準**: clocksourceとtimekeeping
+- **期限の通知**: clockevent、timer wheel、hrtimer
+- **時間の種類**: realtime、monotonic、boottimeなど
+- **実行時間の会計・診断**: task/CPU統計、load average、perf、lockup watchdog
+- **ユーザー空間API**: 時計の取得・設定・補正、interval timer、POSIX timer、timerfd
+
+Linuxソースを調べるときは、デバイス固有の割り込み入口だけを追うのではなく、共通時間管理APIからclocksource・clockevent・タイマ基盤へ進み、必要な場合にアーキテクチャ固有コードへ降りていくと、現行の責務分担をつかみやすくなります。
