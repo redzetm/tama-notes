@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1を再整備、次は2.5.2）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1〜2.5.3を再整備、次は2.5.4）
 
 ## 2章の研究観点
 
@@ -1045,31 +1045,123 @@ Linux 6.18 LTSのソースを追う入口:
 
 #### 2.5.2 ページテーブルの処理とエントリ操作
 
-元の本文では pte_t、pmd_t、pgd_t や、set_pte、pte_present、pte_write といった多数の型やマクロが出てきます。
-これも同じで、単に書き方を増やしているわけではありません。
-**ページテーブルエントリは、アドレスと保護ビットをひとまとめにした極めてハードウェア寄りの値**なので、
-そのまま生の整数としてあちこちで操作すると、可読性も安全性も落ちます。
+##### entryの型はlevelと意味を示す
 
-そこで Linux は、型とヘルパを挟んで意味を明確にしています。
-このエントリは存在するのか、書き込み可能か、dirty か、young か、large page か、といった問いを専用のマクロや関数で
-読むようにしておくと、アーキテクチャ差も閉じ込めやすくなります。
+Linuxは各page-table levelのentryを整数そのものではなく、意味を持つ型で扱います。
 
-Linux 6.18 LTS を読む際にも、この感覚はそのまま重要です。
-最新コードでは構造や名前が多少変わっていても、「ページテーブルエントリは生のビット列であり、それを意味付きの操作で包んで扱う」
-という設計思想は変わりません。
-低レイヤを読むときほど、この種の抽象化はむしろ必要です。
+| 型 | 表すentry |
+|---|---|
+| `pgd_t` / `p4d_t` / `pud_t` / `pmd_t` | 各上位levelのentry |
+| `pte_t` | 最終page-table levelのentry。通常はbase page mappingを表す |
+| `pgprot_t` | page mappingに設定するprotection属性 |
+
+これらの型の内部表現やbit幅はarchitectureとmodeに依存します。例えばx86-32のPAE有無でentry幅が変わり、x86-64のentryもCの`unsigned long`へそのまま読み替えるべきではありません。`__pte()`や`pte_val()`等の変換helperもありますが、用途を限定して使い、通常のコードではarchitecture helperを通じて意味を扱います。raw valueへ直接bit操作すると、software-defined bits、PROT_NONE、swap entry、暗号化bitなどの解釈を壊す可能性があります。
+
+##### 状態の判定は専用helperで読む
+
+`pte_none()`はentryが未設定か、`pte_present()`はLinuxの定義上presentなmappingか、`pte_write()`はwrite属性を持つか、`pte_dirty()`や`pte_young()`はdirty/accessed状態を持つか、といった性質を調べます。`pte_present()`の意味はhardwareのPresent bitをそのまま読むことと同じではありません。例えばx86のPROT_NONE mappingはhardware accessを禁止しつつLinux上はpresentとして扱われます。`pte_pfn()`はpresent entryのPFNを取り出す用途で、entryがpresentであるという前提が必要なhelperもあります。全てのnon-present entryを「空」と解釈してはいけません。Linuxはnon-present PTEにswapやprotection marker等のsoftware stateを表現する場合があります。
+
+読み取り側の短い例です。
+
+```c
+pte_t pte = ptep_get(ptep);
+bool present = pte_present(pte);
+bool writable = pte_write(pte);
+unsigned long pfn = 0;
+
+if (present)
+        pfn = pte_pfn(pte);
+```
+
+この断片はhelperの役割を示す概念例です。`present`はLinux上のentry状態、`writable`はPTEのwrite属性であり、どちらもそのaccessが現時点で実際に許可されることを単独で保証しません。実際のMM codeでentryを読む場合は、その場所のpage-table lock、RCU、mappingの寿命、architecture要件を確認します。VMA permission、fault理由、上位levelやCPU保護状態も含む実効アクセス可否とは区別します。
+
+比較・判定のhelperにも意味上の違いがあります。`pte_same()`は二つのPTEが同じかをarchitecture定義に従って比べ、`pmd_leaf()`等はそのlevelのentryが下位table pointerでなくleaf mappingかを調べるために使われます。原文の`pmd_large()`など古いmacro名を、現行の全architecture共通APIだと決めつけず、Linux 6.18の呼び出し側と`asm/pgtable.h`を確認します。
+
+##### entryの更新は単なる代入ではない
+
+PTEを設定・変更・消去する場合も、`set_pte_at()`、`ptep_get_and_clear()`等のarchitecture-aware helperを使います。architectureによってはentry更新のatomicityや順序、hardwareが更新するaccessed/dirty bit、paravirtualization、page-table lock、TLB invalidationとの連携が必要です。単純な`*ptep = pte`や整数代入で置き換えてよいとは限りません。
+
+原文にあるPAE用の`set_pte_atomic`説明は、特定の32-bit PAE環境におけるentry幅と更新要件を説明する歴史的文脈です。Linux 6.18でもatomic update helperはarchitectureごとに提供されますが、その名前・適用条件・保証は実装とcall siteで確認します。entryを変えた後に古いtranslationが残り得る場合はTLB flush interfaceも必要で、helperで値を書き換えればCPUのtranslation cacheまで自動的に整合する、とは限りません。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- generic index・page-table traversal helper: `include/linux/pgtable.h`
+- generic page-table allocation/freeとentry操作の呼び出し側: `mm/memory.c`
+- x86のentry型・bit・hardware helper: `arch/x86/include/asm/pgtable.h`、`arch/x86/include/asm/pgtable_types.h`
+- PTE更新後のTLB invalidation: `include/asm-generic/tlb.h`、`arch/x86/include/asm/tlbflush.h`
+
+この小節で固定したいこと:
+
+- `pte_t`等はarchitecture依存のentry表現を包む型で、raw integerとの無条件な相互変換を避ける
+- `pte_none()`、`pte_present()`、`pte_write()`等は別の性質を判定し、non-presentは必ずしもemptyではない
+- PTE helperの判定はVMAや実効permission全体の判定と同じではない
+- entryの設定・消去はarchitecture-aware helper、適切なlock/atomicityと更新規約に従う
+- page-table entryの更新とTLB invalidationは別の処理としてcall siteで追う
 
 #### 2.5.3 物理メモリレイアウト
 
-元の本文では、RAM のうちどこが使えてどこが使えないか、カーネルをどこへ置くか、低位メモリと高位メモリをどう見るかを説明しています。
-これは、OS が単純な連続 RAM ではなく、ファームウェアが示す利用可能領域、予約領域、デバイス用領域を含む物理メモリ配置を扱うことを示しています。
+##### 物理アドレス空間はRAMの一覧ではない
 
-Linux 6.18 LTS では、起動時に firmware 等から得たメモリ範囲を基に、`memblock` などを用いて予約領域と利用可能領域を整理し、その後のページアロケータへ引き継ぎます。
-x86-64 では direct map が物理 RAM の主要部分をカーネル仮想アドレスへ対応付けますが、すべての物理アドレスが通常メモリとして直接アクセス可能とは限りません。
-予約領域、MMIO、NUMA、暗号化メモリなど、実際の構成と mapping の条件を確認します。
+CPUが扱う物理アドレス空間には、RAMだけでなく、デバイスのMMIO領域、ファームウェア用の領域、予約領域などが含まれます。したがって、「物理アドレスが存在する」ことと「そのアドレスを一般のページとして割り当てられる」ことは別です。OSは起動時に得た情報から、どの範囲をRAMとして扱い、どこを予約するかを確定させます。
 
-原文中の BIOS memory map、1MB 境界、896MB などの値は、当時の PC/x86-32 の説明に属します。
-Linux 6.18 のすべてのアーキテクチャや x86-64 の固定境界として読み替えず、現行の boot protocol と物理メモリ初期化経路を確認します。
+原文の2.5.3は、PC/BIOSとLinux 2.6/x86-32を前提に、BIOS memory mapや1MiB境界を説明しています。Linux 6.18のx86では、起動方式に応じてboot protocolやEFIなどから渡される情報を使い、アーキテクチャ固有の初期化処理が物理範囲を整理します。BIOSのE820 mapはその歴史的な流れを理解する入口ですが、現在の全環境を「カーネルがBIOSを直接呼び出して調べる」と一般化してはいけません。
+
+物理範囲には、使用可能RAM、firmwareが予約する範囲、ACPI関連領域、デバイス用領域など異なる性質があります。範囲の意味や、初期化後に再利用可能になるかは種類と利用箇所によって異なります。メモリマップは物理アドレス空間の地図であり、そこに載るすべての範囲が同じ扱いを受けるわけではありません。
+
+##### 起動時の範囲情報からページ割り当てへ
+
+Linux 6.18では、ページアロケータが通常の割り当てを始める前に、起動初期のコードがメモリ範囲と予約範囲を記録し、カーネルが安全に使える物理メモリを絞り込みます。初期化中に使われる`memblock`は、概念的には利用可能なmemory regionと、重ねて管理するreserved regionを扱います。カーネルイメージ、初期化データ、initrd、起動データ、各種予約など、後から通常ページとして割り当ててはならない範囲もここで考慮します。
+
+```text
+boot protocol / firmware information
+                 │
+                 v
+architecture-specific early setup
+                 │  RAM範囲・予約範囲を整理
+                 v
+             memblock
+                 │  初期化に必要な範囲を確保・予約
+                 v
+ node / zone / page metadata の初期化
+                 │
+                 v
+       buddy page allocator へ引き継ぐ
+```
+
+この図は処理の役割を示す概念図で、すべてのarchitectureで同じ関数順やデータ形式になるという意味ではありません。`memblock`は起動初期の用途に適したallocator・範囲管理機構であり、通常運用時のページ割り当てを担うbuddy allocatorとは役割が異なります。初期化処理が終わると、利用可能と確定したページがページアロケータへ渡されます。逆に、予約範囲はその理由や解放条件が満たされない限り、通常の空きページとして扱われません。
+
+ここで追うべきなのは、単一の「RAM容量」ではなく、少なくとも次の区別です。
+
+| 対象 | 意味 |
+|---|---|
+| 物理アドレス範囲 | CPU物理アドレス空間上の区間。RAM以外の領域も含み得る |
+| 利用可能メモリ | カーネルがRAMとして管理し、予約等を除いた後にページとして利用できる範囲 |
+| reserved memory | カーネルイメージやfirmware、デバイス等のため、一般のページ割り当てから除外する範囲 |
+| direct map | 物理メモリの一部をカーネル仮想アドレスへ対応付ける仕組み。物理アドレス空間の全域をRAMとして扱うこととは異なる |
+
+カーネル自身が占有する範囲も予約対象です。原文にある`_text`、`_etext`、`_edata`、`_end`は、当時のカーネルイメージ内のコード・データ境界を説明するためのlinker symbolです。現行カーネルにもイメージ配置を追うためのlinker symbolはありますが、シンボル名、配置、物理アドレスはarchitectureやbuild configuration、起動方式に依存します。原文の「物理アドレス0x00100000から配置」「カーネルは3MB未満」といった数値をLinux 6.18の固定仕様として使わず、対象architectureのlinker scriptと起動経路で確認します。
+
+##### low memory / high memoryを現行の配置と混同しない
+
+原文にある1MiBの境界や、後続節の896MiBという値は、旧PC/x86-32のメモリ地図やカーネル仮想アドレス空間の制約を説明するものです。特に32-bit環境では、物理メモリの一部をカーネル仮想アドレスへ常時直接mappingできず、直接mappingできるlow memoryと、必要に応じて一時mappingするhigh memoryを区別する必要がありました。
+
+x86-64では、旧x86-32の「896MiBを境にする」モデルをそのまま当てはめません。direct mapや利用可能な物理範囲は、architecture、CPU、設定、起動時のメモリマップに依存します。またdirect mapがあることは、すべての物理アドレスがRAMであることや、どの物理ページにも常に同じ形でアクセスできることを意味しません。NUMA nodeやzoneは、メモリの位置や割り当て制約を扱う別の分類軸であり、firmware mapの「使用可能/予約」と同じ分類ではありません。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86 boot protocolとbootloaderから渡される情報: `Documentation/arch/x86/boot.rst`
+- x86のE820 memory map処理: `arch/x86/kernel/e820.c`
+- x86起動時のmemory setup: `arch/x86/kernel/setup.c`、`arch/x86/mm/init_64.c`
+- early memory region管理と`memblock`: `mm/memblock.c`、`include/linux/memblock.h`
+- 通常ページ割り当てとnode/zoneの初期化: `mm/page_alloc.c`
+
+この小節で固定したいこと:
+
+- 物理アドレス空間全体をRAMや割り当て可能ページと同一視しない
+- firmware/boot情報の範囲を、architecture固有のearly setupと`memblock`が整理し、通常のページアロケータへ引き継ぐ
+- カーネルイメージやinitrd等の予約範囲は、通常ページとして再利用できる時点まで空きページ扱いしない
+- direct mapはカーネル仮想アドレスから物理メモリへアクセスするためのmappingで、物理範囲の種類そのものではない
+- 1MiBや896MiBは旧x86-32の説明上の値であり、Linux 6.18の共通境界ではない
 
 #### 2.5.4 プロセスのページテーブル
 
