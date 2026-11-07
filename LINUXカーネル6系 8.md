@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」
-- 今回の主題: `alloc_pages()`系API、GFP flags、割り当て経路、高位メモリと一時kernel mapping
-- 現在の進捗: 8.1〜8.1.6を作成済み。8.1.7以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3
+- 今回の主題: `alloc_pages()`系API、高位メモリmapping、buddy allocatorのorder別free area、block split/merge、migratetype
+- 現在の進捗: 8.1〜8.1.7.3を作成済み。8.1.8以降は未着手
 
 ## 第8章の見取り図
 
@@ -39,7 +39,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1.4 | 空きページのwatermarkとGFP allocation context | 作成済み |
 | 8.1.5 | ページフレームの割り当て・解放API | 作成済み |
 | 8.1.6 | HIGHMEMとkernel temporary mapping | 作成済み |
-| 8.1.7〜8.1.9 | buddy、per-CPU cache、zone allocator | 未着手 |
+| 8.1.7、8.1.7.1〜8.1.7.3 | buddy systemの構造、割り当て、解放 | 作成済み |
+| 8.1.8〜8.1.9 | per-CPU page cache、zone allocator | 未着手 |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
@@ -521,3 +522,96 @@ static int copy_page_prefix(struct page *page, void *dst, size_t len)
 - HIGHMEMの概念とmappingの制約: `Documentation/mm/highmem.rst`
 - `CONFIG_HIGHMEM`のarchitecture依存: `arch/*/Kconfig`、`include/linux/gfp_types.h`
 - 非連続ページ群のvirtual mapping: `mm/vmalloc.c`、`Documentation/core-api/mm-api.rst`
+
+### 8.1.7 バディシステム
+
+buddy allocatorは、zone内の空き物理ページを2のべき乗個のblockとして管理するページアロケータです。連続したページが必要な要求に対して、十分な大きさのfree blockを分割して渡し、解放時には空いている相方blockを段階的に併合します。
+
+この管理は外部断片化を抑え、異なるorderの連続ページ要求を扱いやすくしますが、断片化を完全になくすわけではありません。空きページの合計が大きくても、要求order以上の連続blockがなければ確保できないことがあります。GFP条件が許す場合はmemory compactionなどが高order確保を支援しますが、それでも失敗し得ます。
+
+#### orderとblockの大きさ
+
+ページアロケータの`order`は、blockに含まれるベースページ数を`2^order`で表します。
+
+| order | block内のベースページ数 | blockの大きさ |
+|---:|---:|---|
+| 0 | 1 | `PAGE_SIZE` |
+| 1 | 2 | `2 × PAGE_SIZE` |
+| 2 | 4 | `4 × PAGE_SIZE` |
+| 3 | 8 | `8 × PAGE_SIZE` |
+| k | `2^k` | `2^k × PAGE_SIZE` |
+
+第3版の表にある「11個の固定リスト」「最大1,024ページ」は、その時代・構成における上限を反映しています。Linux 6.18では`MAX_PAGE_ORDER`と`NR_PAGE_ORDERS`によりorder範囲が定まり、architecture configurationで最大orderが変わり得ます。ソース既定値が10の構成ではorder 0〜10の配列ですが、値を全構成共通のABIと見なさないようにします。
+
+#### 8.1.7.1 データ構造
+
+buddyのfree blockはzoneごとの`struct zone`が持つ`free_area[]`で管理されます。配列の各要素は一つのorderを表し、その中にmigratetypeごとのfree listとfree block数があります。空きblockの先頭`struct page`には、buddyとしての状態やorderを識別する情報が設定されます。
+
+```text
+struct zone
+    |
+    +-- free_area[0] -- order 0 lists[移動種別ごと]
+    +-- free_area[1] -- order 1 lists[移動種別ごと]
+    +-- free_area[2] -- order 2 lists[移動種別ごと]
+    +-- ...
+    +-- free_area[MAX_PAGE_ORDER]
+```
+
+Linux 6.18のmigratetypeには、代表的な`MIGRATE_UNMOVABLE`、`MIGRATE_MOVABLE`、`MIGRATE_RECLAIMABLE`のほか、`MIGRATE_HIGHATOMIC`、構成に応じた`MIGRATE_CMA`や`MIGRATE_ISOLATE`があります。割り当て時のGFP flags等から求めた移動特性を使い、できるだけ異なる寿命・移動性のページを分けておくことで、大きな連続blockを作りやすくします。一部のtype間ではfallbackが許されますが、すべてのfree listを無条件に混ぜるわけではありません。
+
+#### 8.1.7.2 ブロックの割り当て
+
+要求orderと同じorderのfree blockがなければ、buddy allocatorはより大きなorderを探します。大きなblockを見つけると、必要なblockを取り出し、余った半分を小さいorderのfree listへ戻す操作を繰り返します。
+
+```text
+order 3: [                 8 pages                 ]
+                         split
+                         /    \
+order 2: [   4 pages   ]       [   4 pages   ]  <- free list
+           split
+           /    \
+order 1: [2 pages] [2 pages]  <- requested block + free buddy
+```
+
+たとえばorder 3の8ページblockからorder 1の2ページを要求した場合、まず8ページを4+4へ分け、必要側をさらに2+2へ分けます。要求された2ページを返し、余ったorder 2の4ページとorder 1の2ページはそれぞれ対応するfree listへ戻します。Linux 6.18ではこのような分割処理に`expand()`や`page_del_and_expand()`が関わります。
+
+free listから要求order以上のblockを検索する代表的な入口は`__rmqueue_smallest()`です。実際にはmigratetype、fallback policy、pageblockの状態や割り当て制約も確認されます。
+
+#### 8.1.7.3 ブロックの解放とbuddy併合
+
+blockを解放すると、allocatorは同じzone・同じorderで隣り合うbuddy blockが空いているか調べます。PFNで表すと、候補buddyの位置は概念的に次式で求められます。
+
+```text
+buddy_pfn = pfn XOR (1 << order)
+```
+
+order番目のbitを反転することで、同じ大きさの相方blockを求めます。相方がfreeで、zone境界やmigratetypeなどの併合条件を満たせば、二つのblockを一つにまとめ、orderを一つ上げてさらに併合可能か調べます。
+
+```text
+解放されたorder 0 block
+          |
+          +-- buddyもfree? -- yes --> order 1へ併合
+                                  |
+                                  +-- そのbuddyもfree? -- yes --> order 2へ
+          |
+          +-- 条件を満たさない --> 現orderのfree listへ登録
+```
+
+併合は、同じ大きさで隣接して見えるだけでは成立しません。blockがbuddyとして整列していること、同じzoneに属すること、pageblock isolationやCMA等のmigratetype条件を破らないことが必要です。Linux 6.18の`__free_one_page()`はこれらを確認しながらorderを上げ、最終的なfree blockを適切なlistへ登録します。
+
+**読み取り上の要点**
+
+- `free_area[order]`はzoneごとのorder別free block管理を表す
+- `order`は要求した連続ページ数の対数で、ページ数は`1 << order`
+- 大きなblockは分割され、解放時に条件を満たすbuddy同士が併合される
+- 空き総量と高orderの連続blockの有無は別の情報
+- migratetypeとcompactionは、将来の連続block確保可能性に関わる
+- DMA device向けの物理連続性・addressabilityは、buddyだけで解決せずDMA APIの要件を確認する
+
+**Linux 6.18のソースを追う入口**
+
+- `MAX_PAGE_ORDER`、`NR_PAGE_ORDERS`、`struct free_area`、migratetype: `include/linux/mmzone.h`
+- zone内order別free area: `include/linux/mmzone.h` (`struct zone::free_area`)
+- free blockの検索・split: `mm/page_alloc.c` (`__rmqueue_smallest()`、`expand()`)
+- buddyの探索とblock merge: `mm/page_alloc.c` (`find_buddy_page_pfn()`、`__free_one_page()`)
+- fragmentationとcompactionの観測: `/proc/buddyinfo`、`/proc/pagetypeinfo`、`mm/compaction.c`
