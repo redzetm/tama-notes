@@ -23,9 +23,9 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 
 ## 今回扱う範囲
 
-- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」
-- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則
-- 現在の進捗: 7.1〜7.2.2を作成。次は7.3「スケジューラが使用するデータ構造」を節単位で扱う
+- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」
+- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報
+- 現在の進捗: 7.1〜7.3.2を作成。次は7.4「スケジューラが使用する関数」を節単位で扱う
 
 ## 7章の見取り図
 
@@ -33,7 +33,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 |---|---|---|
 | 7.1、7.1.1〜7.1.2 | 方針、プリエンプション、実行時間配分 | 作成済み |
 | 7.2、7.2.1〜7.2.2 | 通常taskとリアルタイムtaskのスケジューリング | 作成済み |
-| 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 未着手 |
+| 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 作成済み |
 | 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 未着手 |
 | 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 未着手 |
 | 7.6、7.6.1〜7.6.4 | nice、affinity、リアルタイム関連API | 未着手 |
@@ -267,6 +267,144 @@ deadline policyにも利用可能な帯域や受け入れ可能性の制約が�
 - RT priorityの大小とnice値は別の尺度であり、数値を直接比較しない
 - `SCHED_RR` のtimesliceと通常taskのCPU share・実行粒度は別の概念
 - deadline schedulingは設定だけで期限達成を保証せず、帯域の admission controlと実システム条件が関係する
+
+## 7.3 スケジューラが使用するデータ構造
+
+スケジューラのデータ構造を読むときは、システム全体のtask一覧と、CPUが次に実行する候補を管理するrunqueueを区別します。taskが存在することと、今CPU上で実行可能であることは同じではありません。sleep中のtaskも `task_struct` として存在しますが、実行待ちのqueueに登録されているとは限りません。
+
+Linux 6.18では、taskごとの状態やスケジューリング属性を `task_struct` が持ち、CPUごとの `struct rq` がそのCPUの実行状態と各classのqueueをまとめます。fair、RT、deadlineはそれぞれ固有のentityとqueue情報を使い、共通の `rq` がクラス間の選択やCPUごとの会計を支えます。
+
+### 7.3.1 runqueueデータ構造
+
+SMPシステムでは、各CPUに対応するrunqueueがあります。`kernel/sched/sched.h` ではCPUごとのrunqueue配列が `runqueues` として宣言され、`cpu_rq(cpu)` や `this_rq()` などの内部macroから参照されます。taskがrunnableとしてqueueされると、原則として実行可能CPUのうち一つのrunqueueに所属し、そのCPUで実行されます。負荷分散やwake-up placementなどにより、条件を満たすCPUへ移動することがあります。
+
+```text
+CPU 0: struct rq
+  ├─ cfs_rq: fair classのtask / scheduling entity
+  ├─ rt_rq:  FIFO・RR task
+  └─ dl_rq:  deadline task
+
+CPU 1: struct rq
+  ├─ cfs_rq
+  ├─ rt_rq
+  └─ dl_rq
+```
+
+`struct rq`は、単なるtaskの連結リストではありません。Linux 6.18の実装では、たとえば実行可能数 `nr_running`、runqueue lock、現在の実行task `curr`、idle/stop taskへの参照、CPU番号、スケジューラ時計、負荷・utilization情報、各クラスの `cfs_rq`・`rt_rq`・`dl_rq` などを持ちます。設定によりNUMA、NO_HZ、core scheduling、sched_extなどに関係するメンバも含まれるため、全ビルドで同一の構造体レイアウトとは限りません。
+
+各クラスのqueueも同じ構造ではありません。
+
+- fair classの `cfs_rq` は、fair scheduling entityの重み・実行会計・選択用timelineなどを扱う
+- RT classの `rt_rq` は、優先度ごとのqueueや、最優先度・push可能taskなどを扱う
+- deadline classの `dl_rq` は、deadline順のtreeや実行帯域情報を扱う
+
+fair group schedulingやcgroupなどが有効な場合は、taskだけでなくtask groupを表すentityと階層的なrunqueueが関係します。したがって「CPUごとに一つの単純なリストがあり、そこからtaskを取り出す」という図は、全体の入口としては使えても現行データ構造の説明としては不十分です。
+
+runqueueの更新やtask移動は並行するCPUから同時に操作され得ます。そのため、queueを保護するlockと、複数CPUのrunqueue lockを取得する順序が重要です。lockの保持条件や関数の前提はソース内のコメントとlockdepの情報を合わせて読み、構造体メンバだけから同期規則を推測しないようにします。
+
+### 7.3.2 プロセスディスクリプタ
+
+Linux 6.18の `task_struct` は、taskの実行状態・優先度・所属CPU・affinityなどを管理する大きな構造体です。スケジューラ関連フィールドの一部を抜き出すと、次のような関係になります。
+
+```c
+struct task_struct {
+        unsigned int __state;
+        int on_cpu;
+        int on_rq;
+
+        int prio;
+        int static_prio;
+        int normal_prio;
+        unsigned int rt_priority;
+
+        struct sched_entity se;
+        struct sched_rt_entity rt;
+        struct sched_dl_entity dl;
+        const struct sched_class *sched_class;
+
+        unsigned int policy;
+        int nr_cpus_allowed;
+        const cpumask_t *cpus_ptr;
+        cpumask_t cpus_mask;
+        /* ほかのtask状態・資源への参照など */
+};
+```
+
+これはLinux 6.18の構造を読むための抜粋であり、完全な定義や固定ABIではありません。設定によって追加のfieldがあり、field配置もカーネルのビルドで変わり得ます。実際の定義は `include/linux/sched.h` を確認します。
+
+主なfieldの読み方は次のとおりです。
+
+- `__state`: sleepなどtaskの状態を示す。runnable/queuedかどうかは `on_rq` など別の情報とも合わせて読む
+- `on_cpu`: CPU上で実行中かを表すscheduler内部状態
+- `on_rq`: runqueueへの所属状態を表すscheduler内部状態。値の意味は定義と遷移処理を確認する
+- `prio`、`static_prio`、`normal_prio`: scheduler内部の優先度情報。数値が小さいほど高い優先度を表す領域があるが、クラス間のpolicy選択をこれ一つで説明しない
+- `rt_priority`: RT policyで使うリアルタイム優先度
+- `se`、`rt`、`dl`: fair、RT、deadlineの各classで必要となるentity状態
+- `sched_class`: taskが属する内部scheduler classへの参照
+- `policy`: `SCHED_NORMAL`、`SCHED_FIFO`、`SCHED_DEADLINE`などのユーザー向けpolicy
+- `cpus_ptr` / `cpus_mask`: taskが実行可能なCPUの制約を表すaffinity情報
+
+fair classの `sched_entity` にも、スケジューリングに必要な実行会計・重み・tree node・EEVDF関連値などがあります。現行の定義には `load`、`run_node`、`deadline`、`min_vruntime`、`min_slice`、`sum_exec_runtime`、`vruntime` などが含まれます。EEVDFを追う際は、名前に `deadline` が含まれるfieldだけで判断せず、fair class内部のvirtual deadlineと `SCHED_DEADLINE` policyの実時間deadlineを区別します。
+
+#### taskのaffinityと実行CPUを観測するCコード
+
+次の例は、呼び出し元taskが現在どのCPUで動いているかと、実行可能なCPUのmaskを表示します。これはカーネル内部の `rq` を直接読むものではなく、CPU affinityのユーザー向けinterfaceから配置制約を確認する例です。
+
+```c
+#define _GNU_SOURCE
+#include <sched.h>
+#include <stdio.h>
+
+int main(void)
+{
+        cpu_set_t allowed;
+        int current_cpu;
+
+        current_cpu = sched_getcpu();
+        if (current_cpu == -1) {
+                perror("sched_getcpu");
+                return 1;
+        }
+
+        if (sched_getaffinity(0, sizeof(allowed), &allowed) == -1) {
+                perror("sched_getaffinity");
+                return 1;
+        }
+
+        printf("observed CPU: %d\nallowed CPUs:", current_cpu);
+        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+                if (CPU_ISSET(cpu, &allowed))
+                        printf(" %d", cpu);
+        }
+        putchar('\n');
+        return 0;
+}
+```
+
+`sched_getcpu()` が返すCPUは呼び出し時点の観測値であり、直後も同じCPUに留まる保証ではありません。affinity maskは実行可能CPUの制約を示しますが、taskが次にどのCPUを選ばれるかやrunqueueの内部状態までは示しません。
+
+#### Linux 2.6のfield説明を現行構造へ読み替える
+
+原文の `run_list`、`array`、`sleep_avg`、`time_slice`、`first_time_slice`、`expired` などは、2.6 O(1) schedulerのデータ構造とアルゴリズムを説明するfieldです。Linux 6.18の `task_struct` に同じ名前・意味で存在するものとして追わないようにします。
+
+また、原文にあるfork時の残り `time_slice` を親子で分割するコードは、現行のfair schedulerの実装を表すコードではありません。現在もtask生成時にスケジューラ初期化は行われますが、fair/RT/deadlineの状態やclassごとのaccountingを整える処理として、`sched_fork()`、`wake_up_new_task()`等の呼び出し経路をLinux 6.18のソースで調べます。
+
+**ソースコードの入口**
+
+- `task_struct` とtaskのスケジューリングfield: `include/linux/sched.h`
+- `sched_entity`、classごとのqueue、`struct rq`: `kernel/sched/sched.h`
+- fair classのentityと`cfs_rq`: `kernel/sched/fair.c`、`kernel/sched/sched.h`
+- RT classのqueue: `kernel/sched/rt.c`、`kernel/sched/sched.h`
+- deadline classのentityとqueue: `kernel/sched/deadline.c`、`kernel/sched/sched.h`
+- fork後のscheduler初期化: `kernel/sched/core.c`
+
+### 7.3で区別しておきたいこと
+
+- task一覧とCPUごとのrunqueueは別の管理目的を持つ
+- `TASK_RUNNING`、`on_rq`、`on_cpu`は関連するが同じ状態を表すfieldではない
+- Linux 6.18のrunqueueはclass固有queueの集合であり、2.6のactive/expired priority arrayではない
+- `task_struct` は内部実装であり、field配置や利用可能なfieldは構成依存で、ユーザー空間ABIではない
+- fair classのvirtual deadlineと `SCHED_DEADLINE` の期限・runtime契約を混同しない
 
 ## Linux 6.18 LTSのソースを追う入口
 
