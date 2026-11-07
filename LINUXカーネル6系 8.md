@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」
-- 今回の主題: SLUBがslab用folioをページアロケータから得て初期化し、解放・回収時に返す経路とreclaim accounting
-- 現在の進捗: 8.1〜8.2.5を作成済み。8.2.6以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」
+- 今回の主題: 空きobjectの探索からCPU partial・node partial・新規slabへ至るSLUB割り当て経路とNUMA/GFP制約
+- 現在の進捗: 8.1〜8.2.6を作成済み。8.2.7以降は未着手
 
 ## 第8章の見取り図
 
@@ -47,7 +47,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.3 | slab descriptorとslab単位の状態 | 作成済み |
 | 8.2.4 | 汎用cache・特定用途cacheとcache merge | 作成済み |
 | 8.2.5 | slab allocatorとpage allocatorの確保・返却連携 | 作成済み |
-| 8.2.6〜8.2.15 | slab割り当て、object配置・割り当て・解放、mempool | 未着手 |
+| 8.2.6 | cacheへのslab割り当てとSLUBのfallback | 作成済み |
+| 8.2.7〜8.2.15 | slab回収、object配置・割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1102,3 +1103,65 @@ SLUBがslabを破棄するときは`__free_slab()`がslab属性を解除し、sl
 - cache flagsに基づくpage accounting: `mm/slub.c` (`account_slab()`、`unaccount_slab()`)
 - slabの破棄とページ返却: `mm/slub.c` (`free_slab()`、`__free_slab()`)
 - 下位のページ確保・解放: `mm/page_alloc.c` (`__alloc_frozen_pages_noprof()`、`free_frozen_pages()`)
+
+### 8.2.6 キャッシュへのスラブの割り当て
+
+cacheに空きobjectが必要になるたびに新しいslabを作るわけではありません。Linux 6.18のSLUBは、まず現在CPUのfreelist等からobjectを得ようとし、空ならCPU partialやnode partialから既存slabを再利用します。それでも使えるobjectがなければ、新しいslab用folioをページアロケータから確保します。
+
+```text
+kmem_cache_alloc(cache, gfp)
+        |
+        v
+CPU-local freelist / sheafからobjectを確保
+        |
+        +-- success --> objectを返す
+        |
+        +-- miss
+              |
+              v
+        CPU partial slabを確認
+              |
+              +-- hit --> slabをCPU側へactivateしてobjectを得る
+              |
+              +-- miss
+                    v
+             node partial slabを探索
+               preferred nodeを優先し、条件に応じ他nodeも探索
+                    |
+                    +-- hit --> CPU側へactivateしてobjectを得る
+                    |
+                    +-- miss --> new_slab()
+                                   |
+                                   v
+                            page allocatorからfolio
+```
+
+この図は概念経路で、細部は構成・context・NUMA policyにより変わります。CPU sheavesを使うcacheではそこから始まる場合があります。また、debug cacheではfreelistを一括してCPU側へ移さず、objectを個別に検証しながら割り当てる経路を使うことがあります。
+
+#### partial slabの再利用
+
+新しいslabを作る前に、SLUBは使用可能なpartial slabを探します。現在nodeのpartial管理から候補を得るほか、NUMA構成では距離や割り当て条件に従い別nodeのpartial slabを探索することがあります。`__GFP_THISNODE`等でnodeが強く制約される場合はfallbackできる範囲が狭くなります。得たslabのfreelistをCPU-local側へactivateすると、以降の複数object確保を高速pathで処理できます。
+
+CPU partialはnode partialとは異なり、CPU近傍に一時保持されるslabです。候補がnodeや`pfmemalloc`条件に合わない場合、deactivateや別のpartial管理への返却が必要になることもあります。よって、cache全体にfree objectが存在していても、特定の要求から直ちに利用可能とは限りません。NUMA node制約、GFP context、CPU-local stateや同期状態が実際の探索を左右します。
+
+#### 新しいslabの作成とorder fallback
+
+既存slabから割り当てられない場合に`new_slab()`が呼ばれ、8.2.5で見た`allocate_slab()`経由で新しいslab用folioを確保します。成功するとSLUBは`struct slab`の所属cache、object数、inuse、freelistなどを初期化し、初回objectを取り出した後の状態をCPU側またはpartial管理へ接続します。
+
+cacheの通常orderでページ確保に失敗した場合、SLUBは最小orderを試すことがあります。orderが下がるとslab内のobject総数も減るため、確保回数や管理効率とのtradeoffが生じます。order選択はcacheのsize/alignment、debug metadata、kernel設定および実際のfragmentationに左右され、古典的なslabの`cache_grow()`が常に固定数ページを補充するモデルとは異なります。
+
+| 条件・段階 | SLUBでの動き |
+|---|---|
+| CPU localに空きがある | page allocatorやnode listへ行かずobjectを返す |
+| CPU localが空 | CPU partial、次にnode partial等から再利用を試みる |
+| partial slabの条件不一致／候補なし | GFP・NUMA制約に従い新しいslabを要求する |
+| 通常orderのfolio確保に失敗 | 最小order fallbackを試す場合がある |
+| fallbackも失敗 | 適切な失敗処理を経てallocation失敗を呼び出し側へ返す |
+
+**Linux 6.18のソースを追う入口**
+
+- `kmem_cache_alloc()`からSLUBへ: `mm/slub.c` (`slab_alloc_node()`、`__slab_alloc_node()`)
+- CPU-local fast/slow allocationとmiss後の経路: `mm/slub.c` (`___slab_alloc()`)
+- CPU partial・node partial探索: `mm/slub.c` (`get_partial()`、`get_partial_node()`、`get_any_partial()`)
+- 新規slab確保と初期化: `mm/slub.c` (`new_slab()`、`allocate_slab()`、`alloc_slab_page()`)
+- ページ確保・order fallbackの前提: `mm/page_alloc.c` (`__alloc_frozen_pages_noprof()`)、8.2.5
