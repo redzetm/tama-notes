@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」
 - 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入を作成。続きは 5.3.1 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1を作成。続きは 5.3.1.1 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1273,3 +1273,46 @@ bottom half の無効化はローカル CPU に対する制御です。他 CPU �
 - スピンロックと IRQ / bottom-half suffix: `Documentation/locking/spinlocks.rst`
 - 同期 API の宣言と利用契約: `include/linux/` の各ロックヘッダー、および `Documentation/locking/`
 - 個別データの保護規則: 対象構造体の定義から全 read / write access とロック取得箇所を追う
+
+### 5.3.1 スピンロック、セマフォおよび割り込み禁止の選択
+
+#### 「どの文脈が触るか」から保護を決める
+
+共有データを守る方法は、アクセス元が system call か IRQ かという名前だけでは決まりません。同じ CPU で割り込まれて再入するか、複数 CPU から並行してアクセスされるか、競合時に task を sleep させられるか、PREEMPT_RT で意味が変わるかを確認します。古い本文の「単一 CPU」と「マルチ CPU」の表は候補を考える入口として有用ですが、Linux 6.18 のロックが取得時に一律で IRQ・softirq・プリエンプションを禁止するという意味には読み替えません。
+
+| 主なアクセス文脈 | 保護を考えるときの軸 |
+|---|---|
+| task と task | sleep 可能な区間なら mutex などの sleeping lock。atomic context なら sleep しないロックを検討する |
+| task と hard IRQ | SMP 排他に共有ロックが必要。同じ CPU 上の再入も防ぐ必要があり、非 RT では task 側の `spin_lock_irqsave()` が典型。PREEMPT_RT の IRQ 実行方式とロック型を別途確認する |
+| task と softirq | softirq と共有する task 側区間では、用途に応じて `spin_lock_bh()` を使う。別 CPU の softirq に対する排他はロックが担う |
+| hard IRQ 同士 | IRQ handler はsleepできない。共有ロックを使う場合、同一 CPU のネストと別 CPU からの並行実行の双方を調べる |
+| softirq 同士 | 同じ種類の softirq が CPU をまたいで並行実行し得る。ローカル BH 制御だけで全 CPU の共有状態を直列化しない |
+| 読み取り主体の共有状態 | 共有の仕方と待てる文脈に応じて rwlock、rwsem、seqlock、RCU などを比較し、寿命管理や再試行も含めて設計する |
+
+これは候補の一覧であり、行だけ見てロックを機械的に決める表ではありません。たとえば IRQ handler がロックを取る経路では、そのロック待ちの間に sleep できないため、task 側だけを mutex で保護する設計は成立しません。逆に、task 間だけの保護に割り込み禁止や raw spinlock を加える必要は通常ありません。アクセス経路ごとに同じ保護規約を守ることが前提です。
+
+#### ローカル制御と CPU 間ロックの役割を分ける
+
+`local_irq_disable()` は呼び出し CPU のマスク可能な hard IRQ を抑止し、`local_bh_disable()` はローカルの bottom half の実行を抑止します。どちらも他 CPU での並行アクセスを止めません。共有する CPU 間の相互排他はロックや用途に合った同期機構が担います。
+
+非 PREEMPT_RT では `spin_lock_irqsave()` の組み合わせにより、ロックで CPU 間を排他しながら、保存したローカル IRQ 状態を復元できます。`spin_lock_bh()` は task と bottom half の同一 CPU 上の競合を扱う選択肢です。一方、PREEMPT_RT では `spinlock_t` の IRQ suffix が CPU の IRQ 状態を無効化せず、`spinlock_t` 自体のブロック特性も変わります。hard IRQ と共有するデータの実際の保護方法は、threaded IRQ を含む実行形態と `Documentation/locking/locktypes.rst` の契約を確認して決めます。
+
+#### atomic・RCU をロックの代用と決めつけない
+
+atomic API は単一の値に対する個別操作を不可分にできますが、複数フィールドからなる不変条件をまとめて保護するものではありません。ポインタの公開や解放後の回収を扱う場合も、単なる atomic ポインタ操作では寿命が保証されません。RCU などの公開・参照・回収プロトコルを含めて選びます。
+
+読み取りが多い場合も、読み手を増やせば速いと先に決めないようにします。`rwlock_t` は読み手も原子的なロック操作を行い、`rw_semaphore` はsleep可能な task context 向けです。seqlock の読者は再試行を受け入れる必要があり、RCU では更新後の回収まで設計します。これらの適否は、保護データの更新頻度・読み取りの長さ・実行文脈で判断します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- 実行文脈とロック種別の規則: `Documentation/locking/locktypes.rst`
+- IRQ と共有するスピンロックの考え方: `Documentation/locking/spinlocks.rst`
+- IRQ / bottom-half 制御 API: `include/linux/irqflags.h`、`include/linux/bottom_half.h`
+- PREEMPT_RT のロックと割り込み suffix: `Documentation/locking/locktypes.rst` の `spinlock_t and PREEMPT_RT`
+
+#### この小節で固定したいこと
+
+- 同期方式を選ぶ前に、共有状態・全アクセス文脈・再入可能性・SMP 並行性・sleep 可否を洗い出す
+- ローカル IRQ / bottom-half 禁止はCPU局所の制御であり、CPU間ロックの代わりではない
+- atomic は複数フィールドの不変条件やポインタ寿命を自動では守らない
+- PREEMPT_RT では `spinlock_t` と IRQ suffix の意味が変わるため、非 RT の表や慣習をそのまま適用しない
