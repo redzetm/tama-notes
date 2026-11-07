@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」
-- 今回の主題: SLUBのobject割り当て経路、CPU-local fast pathからpartial slab・新規slab確保への遷移、GFP/NUMA条件
-- 現在の進捗: 8.1〜8.2.12を作成済み。8.2.13以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」
+- 今回の主題: `kmem_cache_free()`のhookとfree fast path、remote free、partial slab化・slab破棄、即時再利用されない条件
+- 現在の進捗: 8.1〜8.2.13を作成済み。8.2.14以降は未着手
 
 ## 第8章の見取り図
 
@@ -54,7 +54,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.10 | slab coloringの原理とLinux 6.18 SLUBとの差 | 作成済み |
 | 8.2.11 | per-CPU object cacheとSLUBのCPU-local状態 | 作成済み |
 | 8.2.12 | object割り当てのfast/slow pathと新規slab確保 | 作成済み |
-| 8.2.13〜8.2.15 | object解放、汎用object、mempool | 未着手 |
+| 8.2.13 | objectの解放とSLUB freelist/slab状態の更新 | 作成済み |
+| 8.2.14〜8.2.15 | 汎用object、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1459,3 +1460,53 @@ objectをfreelistから取り出した後も、SLUBは初期化要求、KASAN/KM
 - CPU/node partial slab取得: `mm/slub.c` (`get_partial()`、`get_partial_node()`)
 - 新規slabとorder fallback: `mm/slub.c` (`new_slab()`、`allocate_slab()`、`alloc_slab_page()`)
 - post-allocation hooks: `mm/slub.c` (`slab_pre_alloc_hook()`、`slab_post_alloc_hook()`)
+
+### 8.2.13 スラブオブジェクトの解放
+
+#### API契約とfree前の処理
+
+専用cacheから取得したobjectは、対応するcacheへ`kmem_cache_free(cache, object)`で返します。objectを複数回freeしたり、異なるcacheへ返したり、利用中のobjectを解放した後も参照したりしてはいけません。SLUBは必要に応じてcache/objectの整合性を診断しますが、free APIは任意の不正pointerを安全に受け入れる一般的な検査APIではありません。
+
+Linux 6.18の`kmem_cache_free()`はobjectからslab/cache情報を特定して`slab_free()`へ進みます。free hookではkmemleak・KMSAN・KCSANやdebug検査、KFENCE、KASANなどの処理を行い、KASAN quarantineやRCU debugなどで再利用を遅らせる場合は通常のfree list更新を行わずに戻ることがあります。`SLAB_TYPESAFE_BY_RCU`を使うcacheでは、objectのメモリ再利用とobjectを指す参照の寿命を混同せず、該当cacheのRCU規約に従います。
+
+#### free fast path: CPU-localへ戻す
+
+通常経路では、slabが現在のCPUのactive slabと一致し、fast pathが使える場合、object内のfreepointerを現在のCPU freelist先頭へつなぎ、`freelist`と`tid`を更新します。共通slab listのlockを取らずに済むため、objectを同じCPUのallocationで再利用できる可能性が高くなります。
+
+構成上CPU sheafを利用できる場合、同じNUMA node条件を満たすobjectは、まずsheafへ戻される経路もあります。sheafが満杯などで受け入れられなければ通常のSLUB free pathに進みます。つまり、free先は常に一つの固定された「CPU object array」ではなく、CPU sheaf、active slabのper-CPU freelist、slab本体のfreelist/partial管理のいずれかになり得ます。
+
+#### remote freeとslab状態遷移
+
+解放対象が現在CPUのactive slabではない場合はremote freeとしてslow pathに進み、対象slabのfreelistとin-use countを更新します。並行するallocation/freeやslab list操作との整合性は、slab stateのatomic更新と必要なnode list lockで保たれます。
+
+```text
+free(object)
+   |
+   +-- free hooksで検査・poison/quarantine等
+   |
+   +-- CPU sheafへ格納可能か
+   |
+   +-- objectのslab == current CPUのactive slab?
+   |       +-- yes: CPU freelistへ接続 (fast path)
+   |       +-- no: slab freelist / inuseを更新 (slow/remote path)
+   |
+   +-- slabがfullからpartialへ移るか、emptyになるかを判定
+           +-- 維持: CPU partialまたはnode partialへ
+           +-- 空で保持下限を超過: slabページをpage allocatorへ返却
+```
+
+slabがfullだったところへ最初のobjectが戻ると、そのslabはpartial slabとして再利用可能になります。CPU partial機能が有効で該当条件を満たせばCPU-local partial listへ入り、それ以外ではnode単位のpartial listへ移るか、既存のlist状態を保ったままfreelistだけ更新します。debug設定では、通常のlockless更新とは異なる検査・list管理経路を使います。
+
+slab内の全objectがfreeになっても、そのslabページが必ず直ちにpage allocatorへ返るわけではありません。SLUBはnode partial slabの保持量やcacheの保持方針を考慮し、再利用のために空slabを残すことがあります。`kmem_cache_node::nr_partial`が`kmem_cache::min_partial`以上である場合などに、empty slabをpartial listから外して破棄し、ページをpage allocatorへ返します。管理単位は旧実装のcache-wide `free_objects` / `free_limit`の単純なしきい値ではなく、per-node slab list、CPU partial、各slabの状態などです。
+
+#### 解放と再利用の時間差
+
+`kmem_cache_free()`が戻った後、同じpointerが直ちに次のallocationで返るとは限りません。CPU-local freelistやsheafに保持される、別CPUがfreeしたslabに入る、KASAN quarantine/RCU処理で遅延する、あるいはslabそのものが破棄されるなど、構成と実行経路で再利用時点が異なります。objectの寿命管理はallocatorの格納先に依存させず、利用側の参照同期と解放規約によって保証します。
+
+**Linux 6.18のソースを追う入口**
+
+- 公開APIとobject/slab特定: `mm/slub.c` (`kmem_cache_free()`、`virt_to_slab()`)
+- free前hookと遅延再利用: `mm/slub.c` (`slab_free_hook()`、`slab_free_freelist_hook()`)
+- sheaf/CPU-local fast free: `mm/slub.c` (`slab_free()`、`do_slab_free()`)
+- remote freeとslab state更新: `mm/slub.c` (`__slab_free()`、`free_to_partial_list()`)
+- CPU partialへ保持: `mm/slub.c` (`put_cpu_partial()`)
