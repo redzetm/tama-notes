@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」、5.3.1.3「遅延処理がアクセスするデータの保護」
 - 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.2を作成。続きは 5.3.1.3 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.3を作成。続きは 5.3.1.4 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1426,3 +1426,79 @@ PREEMPT_RT では、多くの IRQ handler が threaded IRQ として実行され
 - `local_irq_disable()` は他 CPU を止めない。SMP の共有状態には CPU 間ロックが必要
 - 非 RT で task と hard IRQ が同じロックを使う典型例は `spin_lock_irqsave()`。全経路が同じロックを使う
 - PREEMPT_RT では IRQ の thread 化と `spinlock_t` suffix の意味が変わる。hard IRQ と共有する箇所だけ `raw_spinlock_t` を検討し、安易に置換しない
+
+#### 5.3.1.3 遅延処理がアクセスするデータの保護
+
+##### 「遅延処理」の実装形態を特定する
+
+「遅延処理」は一つの実行文脈を指す名前ではありません。Linux 6.18 では softirq、tasklet、workqueue、threaded IRQ などで後続処理を実行できますが、sleep の可否、CPU 間並行性、再入性はそれぞれ異なります。同期方法を決める前に、具体的な callback がどの仕組みで起動され、どの CPU・task 文脈で実行されるかを確認します。
+
+| 実行機構 | データ保護を考えるときの要点 |
+|---|---|
+| softirq | 同じ softirq 種別が異なる CPU で並行実行され得る。CPU 間で共有する状態には適切な同期が必要 |
+| tasklet | 同一 tasklet object の callback は同時に並行実行されない性質があるが、別 tasklet object や他の文脈との共有は別途保護する。既存コードの読解対象として扱う |
+| 通常の workqueue | worker task の文脈。複数 work item や複数 worker が並行し得るため、共有データを使う全 task と同じ同期規約が必要 |
+| threaded IRQ | thread function は task 文脈で動き、sleep 可能な設計を取り得る。primary handler と共有する状態は両方の文脈を考える |
+| `WQ_BH` | workqueue API を用いるが bottom-half 文脈で実行される。通常の worker workqueue のように sleep できるとは限らない |
+
+単一 CPU でも task と遅延処理が同じ状態へアクセスするなら、プリエンプションや割り込みによる再入を考慮します。SMP ではさらに同じ softirq 種別や複数の work item が別 CPU で同時に動く可能性があります。「同じ種類の遅延処理だから常に直列」とは判断せず、機構の契約と登録単位を確認します。
+
+##### task と softirq の共有
+
+非 PREEMPT_RT で task context と softirq が同じデータを共有する場合、CPU 間の排他をロックで行い、task 側では `spin_lock_bh()` / `spin_unlock_bh()` を使ってローカル softirq による再入も防ぐ形がよく使われます。
+
+```c
+static DEFINE_SPINLOCK(queue_lock);
+static LIST_HEAD(packet_queue);
+
+static void add_packet(struct packet *packet)
+{
+	spin_lock_bh(&queue_lock);
+	list_add(&packet->node, &packet_queue);
+	spin_unlock_bh(&queue_lock);
+}
+
+static void process_packets_from_softirq(void)
+{
+	LIST_HEAD(local_queue);
+	struct packet *packet, *next;
+
+	spin_lock(&queue_lock);
+	list_splice_init(&packet_queue, &local_queue);
+	spin_unlock(&queue_lock);
+
+	list_for_each_entry_safe(packet, next, &local_queue, node)
+		process_packet(packet);
+}
+```
+
+この例は、一覧をローカルへ移す短い区間だけロックし、各項目の処理はロック外で行う形です。実際には、`process_packet()` が softirq 文脈で許される処理だけを行うこと、項目の所有権・寿命、同時に追加される項目の扱いも設計します。`spin_lock_bh()` はローカル bottom half に対する制御であり、CPU 間排他は `queue_lock` が担います。hard IRQ も同じロックへアクセスするなら、task 側の IRQ 制御を含めて再設計し、単に `_bh` suffix を使えば十分とは考えません。
+
+softirq handler 自体が複数 CPU で動く場合、各 handler が同じロックを取得することで共有状態を直列化できます。ただしロックを保持したまま大きな処理を続けると、CPU 間の並列性を失い、待ち時間も増えます。可能ならリストから必要な項目を短いクリティカルセクションで切り離し、ロック外で処理する設計を検討します。ただしオブジェクト寿命と状態遷移は別途保護します。
+
+##### tasklet と workqueue を混同しない
+
+旧本文の「同じ tasklet は同時実行されない」という性質を softirq 全体へ一般化できません。tasklet は個々の tasklet object に関する直列化であり、複数 object が同じデータを参照する場合や、task / IRQ / workqueue と共有する場合は別の同期が要ります。さらに tasklet API は legacy な仕組みであり、新規コードでは threaded IRQ、workqueue、softirq や `WQ_BH` など要件に合う機構を検討します。
+
+通常の workqueue は task context の worker が実行するため、必要に応じて sleeping lock を利用できます。一方、同じ work item の再 queue や複数 worker、他のアクセス経路との競合を把握する必要は残ります。`WQ_BH` は名前に workqueue が含まれても bottom-half 文脈であり、sleep 可能性を通常の workqueue と同一視しません。
+
+##### PREEMPT_RT の bottom-half と per-CPU 状態
+
+PREEMPT_RT では softirq の実行・プリエンプション特性が変わるため、softirq 文脈であることを根拠に「プリエンプトされない」「ローカル per-CPU 状態へのアクセスが自動的に直列化される」と仮定できません。必要な場合は `local_lock_t` や `local_lock_nested_bh()` / `local_unlock_nested_bh()` を含む Linux 6.18 の契約を確認し、保護範囲を明示します。
+
+実際の選択では、保護対象へアクセスする task・hard IRQ・softirq・workqueue・threaded IRQ の全経路を列挙します。softirq と task のローカル再入だけでなく、別 CPU からの同時アクセス、PREEMPT_RT でのロック型の変更、オブジェクト寿命も含めて判定します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- softirq 実行・pending 管理と tasklet: `kernel/softirq.c`、`include/linux/interrupt.h`
+- tasklet の利用上の位置付けと代替機構: `Documentation/core-api/` と `Documentation/locking/`
+- workqueue の実行文脈: `Documentation/core-api/workqueue.rst`、`kernel/workqueue.c`
+- `WQ_BH`、local BH 制御、PREEMPT_RT での softirq: `include/linux/bottom_half.h`、`kernel/softirq.c`、`Documentation/locking/locktypes.rst`
+
+##### この小節で固定したいこと
+
+- 遅延処理は一つの文脈ではない。softirq、tasklet、通常 workqueue、threaded IRQ、`WQ_BH` の違いを見分ける
+- softirq は同じ種類でも CPU 間並列実行され得る。tasklet の個体単位の直列化を全体へ一般化しない
+- task と softirq の共有では、CPU 間ロックとローカル bottom-half 制御の役割を分けて考える
+- 通常 workqueue は task 文脈だが、複数 worker や他文脈との共有があれば同期が必要
+- PREEMPT_RT では softirq と per-CPU 状態の前提が変わるため、暗黙の非プリエンプト性に頼らない
