@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、アトミック RMW、メモリ順序、排他ロックと読み書き用スピンロックの保護範囲・実行文脈上の制約
-- 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。特に `spinlock_t` と `raw_spinlock_t`、PREEMPT_RT の意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.5.2 を作成。続きは 5.2.6 以降を小節単位で追加する
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、アトミック RMW、メモリ順序、spinlock / rwlock / seqlock の保護範囲と実行文脈上の制約
+- 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t` の役割と PREEMPT_RT の意味の違いを確認する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.6 を作成。続きは 5.2.7 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -739,3 +739,78 @@ read/write のロック状態や待ち行列の具体的なビット表現は、
 - IRQ / BH と共有する場合は同一 CPU 上の再入を考慮し、対応する suffix の取得・解放を組にする
 - write lock は読み手を待たせるため、保護区間を短くし、ロック順序を一貫させる
 - カウンタ表現や命令列を API 契約と混同せず、PREEMPT_RT とアーキテクチャごとの実装を分けて読む
+
+### 5.2.6 順次ロック
+
+#### 読み手は待たずに読み取りをやり直す
+
+順次ロック（seqlock）は、読み取り側をロックで待たせず、データを読み取った前後で sequence counter を検査する方式です。
+書き手が読み取り中に更新を始めた、または読み取り中に更新を完了した場合、読み手は得たコピーを破棄して読み直します。書き手は読み手の終了を待たないため、読み取りが多く書き込みが少ないデータで有効です。
+
+```c
+static DEFINE_SEQLOCK(clock_lock);
+static struct clock_snapshot clock_data;
+
+static struct clock_snapshot read_clock_snapshot(void)
+{
+	struct clock_snapshot copy;
+	unsigned int seq;
+
+	do {
+		seq = read_seqbegin(&clock_lock);
+		copy = clock_data;
+	} while (read_seqretry(&clock_lock, seq));
+
+	return copy;
+}
+
+static void update_clock_snapshot(struct clock_snapshot next)
+{
+	write_seqlock(&clock_lock);
+	clock_data = next;
+	write_sequnlock(&clock_lock);
+}
+```
+
+概念上、書き手は更新開始時に sequence を奇数にし、更新終了時に偶数へ戻します。読み手は開始時に偶数の値を得て、データをローカルへコピーした後に同じ値が維持されたかを調べます。
+API の細部は型や variant ごとに異なるため、現行の Linux では `read_seqbegin()` / `read_seqretry()` など対応する API の契約を確認します。
+
+#### seqcount_t と seqlock_t は同じものではない
+
+`seqcount_t` は sequence counter による整合性検査の仕組みであり、複数 writer を直列化するロックを内部に持ちません。
+writer 同士を外部ロックで直列化し、writer が読者に中断されて sequence が奇数のままにならないよう、プリエンプションや割り込みの条件も呼び出し側で満たす必要があります。
+
+`seqlock_t` は sequence counter に writer 用の spinlock を組み合わせた型です。`write_seqlock()` / `write_sequnlock()` で writer を直列化し、読み手はロックレスに読み取りを試みて必要なら再試行します。
+どの read/write variant を使うかは、hard IRQ や softirq の読者があるかを含む実行文脈によります。sequence counter が自動的にあらゆる writer / IRQ 問題を解決すると考えず、Linux 6.18 の該当 variant と locking 文書を確認します。
+
+#### 保護対象はコピー可能で、副作用のない読み取りに限る
+
+読み取り区間は再実行される可能性があるため、読み取り中に副作用を起こしてはいけません。
+たとえば同じ読み取りをもう一度行うことでカウンタを二重加算したり、デバイス操作を繰り返したりする処理は不適切です。読み手は必要な値をローカル変数へコピーし、再試行が終わってから結果を使います。
+
+ポインタを含む構造体をコピーすること自体は可能ですが、sequence retry は指し先の寿命を保護しません。読み手がポインタを追っている間に writer が対象を解放・置換すれば、読み手は無効なメモリへアクセスする危険があります。
+ポインタの寿命や差し替えも保護する必要がある場合は、RCU など寿命管理を含む別の仕組みを検討します。
+
+また、writer が読者に割り込まれ、その reader が奇数の sequence を見て再試行を続けると、writer が実行を再開して sequence を偶数へ戻せません。高優先度 reader がこの状態を作ると livelock につながることがあります。
+writer が reader に中断されない条件と、reader が実行される文脈を組み合わせて確認します。通常の seqlock は NMI reader に対する万能な保護ではなく、そうした要件には latch sequence counter など別の設計が必要になる場合があります。
+
+#### 書き込み頻度と再試行コスト
+
+順次ロックでは writer は reader を待たせませんが、更新と重なった reader は読み直す必要があります。書き込み頻度が高い、読み取り区間が長い、再試行を許容できない場合は、効率や応答性が悪化します。
+単に「読み手が多い」だけで選ぶのではなく、writer の頻度、読み取り区間の長さ、再試行可能性、データの寿命、割り込み優先度を合わせて検討します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- seqcount / seqlock の型と API: `include/linux/seqlock.h`
+- sequence counter と sequential lock の契約・使い方: `Documentation/locking/seqlock.rst`
+- 時刻情報での利用例: `kernel/time/timekeeping.c`
+- RCU とポインタ寿命の考え方: `Documentation/RCU/` 以下の設計文書
+
+#### この小節で固定したいこと
+
+- sequence counter は読み取りの一貫性を検査し、更新と重なった読み手に再試行を要求する
+- `seqcount_t` は writer の直列化を提供しない。`seqlock_t` は writer 用ロックを内包する
+- 再試行する読み取り区間に副作用を置かず、必要なデータをローカルへコピーする
+- sequence retry はポインタの寿命を保護しないため、指し先の解放・置換を別の仕組みで守る
+- reader が writer を中断して奇数 sequence を待ち続けないよう、IRQ / NMI / 優先度と writer の実行条件を確認する
+- 読み手の再試行コストと書き込み頻度を考慮し、用途に合わない場合は通常のロックや RCU 等を選ぶ
