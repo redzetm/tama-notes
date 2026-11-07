@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3
-- 今回の主題: `alloc_pages()`系API、高位メモリmapping、buddy allocatorのorder別free area、block split/merge、migratetype
-- 現在の進捗: 8.1〜8.1.7.3を作成済み。8.1.8以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」
+- 今回の主題: GFP条件からzone候補・watermarkを経てページを得るfast/slow path、direct reclaim・compaction・OOM、ページ解放と参照管理
+- 現在の進捗: 8.1〜8.1.9.1を作成済み。8.2以降は未着手
 
 ## 第8章の見取り図
 
@@ -40,7 +40,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1.5 | ページフレームの割り当て・解放API | 作成済み |
 | 8.1.6 | HIGHMEMとkernel temporary mapping | 作成済み |
 | 8.1.7、8.1.7.1〜8.1.7.3 | buddy systemの構造、割り当て、解放 | 作成済み |
-| 8.1.8〜8.1.9 | per-CPU page cache、zone allocator | 未着手 |
+| 8.1.8、8.1.8.1〜8.1.8.2 | CPUごとのページキャッシュ、割り当て・解放経路 | 作成済み |
+| 8.1.9、8.1.9.1 | ページ割り当て判断とページ解放 | 作成済み |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
@@ -615,3 +616,163 @@ order番目のbitを反転することで、同じ大きさの相方blockを求�
 - free blockの検索・split: `mm/page_alloc.c` (`__rmqueue_smallest()`、`expand()`)
 - buddyの探索とblock merge: `mm/page_alloc.c` (`find_buddy_page_pfn()`、`__free_one_page()`)
 - fragmentationとcompactionの観測: `/proc/buddyinfo`、`/proc/pagetypeinfo`、`mm/compaction.c`
+
+### 8.1.8 CPUごとのページフレームキャッシュ
+
+Linux 6.18は、頻繁に使われるページの確保・解放でzoneのbuddy free areaを毎回直接操作しなくてよいよう、CPUごとのPer-CPU Pageset (PCP)を持ちます。各zoneには`per_cpu_pageset`があり、現在CPU向けの小さなページリストを介してページを受け渡します。
+
+```text
+CPU 0: PCP lists --+
+CPU 1: PCP lists --+--> zoneごとのbuddy free areas
+CPU 2: PCP lists --+        (zone lockで共有管理)
+        ...         |
+
+order-0中心の一般経路:
+確保: local PCPから取り出す -> 空ならbuddyからbatch補充
+解放: local PCPへ置く       -> 上限を超えた分をbuddyへbatch返却
+```
+
+PCPの主な狙いは、zoneの共有lock競合を減らし、よくあるorder-0確保・解放をCPU localに処理することです。これは別の物理メモリ領域や別のallocatorを作る仕組みではなく、zoneのbuddy free areaからページをまとめて受け取り、後でまとめて返す一時的なcacheです。
+
+#### 8.1.8.1 per-CPU pagesetからのページ確保
+
+order-0の割り当てでは、適切なzoneとmigratetypeに対応するPCP listからページを取り出せる場合、buddyのzone lockを毎回取得する経路を避けられます。listが空なら、ページアロケータはbuddyから複数ページをまとめて取り出してPCPへ補充し、そのうち一つを要求元へ渡します。
+
+現行の処理は、第3版に登場する`buffered_rmqueue()`とhot/cold cacheの単純な説明とは異なります。Linux 6.18では`rmqueue_pcplist()`、`__rmqueue_pcplist()`等がper-CPU listからの取り出しを扱い、必要なとき`rmqueue_bulk()`でbuddyからbatch単位の補充を行います。orderや構成によってPCPを使える範囲が異なり、PCPを利用できない要求はbuddy側の経路へ進みます。
+
+PCP listは単純な「CPU cacheにデータが載っていそうなページ／載っていなさそうなページ」の二分管理ではありません。現行構造ではorderとmigratetypeなどに応じたlistが使われます。第3版の`__GFP_COLD`やhot/cold page listを、現行のCPU data-cacheのhotness制御として読み替えないようにします。
+
+#### 8.1.8.2 per-CPU pagesetへのページ解放
+
+解放されたページがPCP対象orderであれば、通常は現在のCPUに対応するPCP listへ追加されます。PCPのページ数が上限付近に達すると、一定量を`free_pcppages_bulk()`等でbuddyへ戻します。batchと上限値は固定の定数だけで決まるわけではなく、zoneの規模や設定、実行時の調整に応じて変化します。
+
+```text
+ページ解放
+    |
+    +-- PCP対象orderか?
+    |       |
+    |       +-- yes --> CPU-local PCP listへ追加
+    |       |                |
+    |       |                +-- PCPが上限付近 --> batchでbuddyへdrain
+    |       |
+    |       +-- no --> buddy allocatorへ直接解放・併合
+    |
+    v
+ページは再利用可能なfree状態として管理される
+```
+
+PCPにページを保持すると、buddyの共有lockを取る頻度を抑えられます。一方、ページが各CPUに分散して一時保持されるため、zone全体の統計やbuddyだけを見たときの空き量と即時に一致しない場合があります。CPU hotplug、watermark調整、memory pressureなどではPCPをdrainする処理が関係します。
+
+#### 構造と観測のポイント
+
+`struct per_cpu_pages`は、list群、ページ数、batch、high/low相当の上限管理値などを持ちます。Linux 6.18の実際のメンバ名は`count`、`high`、`high_min`、`high_max`、`batch`、`lists[]`等であり、第3版の`low`/`hot`/`cold`構成と同じレイアウトではありません。
+
+| 観点 | Linux 6.18での読み方 |
+|---|---|
+| page list | `lists[]`にorder・migratetypeに対応するページが保持される |
+| `count` | PCPに現在保持するページ数を表す |
+| `batch` | buddyとのページ受け渡し量を決める基準の一つ |
+| `high`、`high_min`、`high_max` | PCPの保持量やdrain条件を調整する値 |
+| drain | PCPに保持したページをzoneのbuddy free areaへ返す処理 |
+| hot/cold | 現行PCP listの基本的な分類としてそのまま存在するわけではない |
+
+**Linux 6.18のソースを追う入口**
+
+- `struct per_cpu_pages`とzoneの`per_cpu_pageset`: `include/linux/mmzone.h`
+- PCPからの確保、batch補充、buddy fallback: `mm/page_alloc.c` (`rmqueue_pcplist()`、`__rmqueue_pcplist()`、`rmqueue_bulk()`)
+- PCPへの解放とbatch drain: `mm/page_alloc.c` (`free_frozen_page_commit()`、`free_pcppages_bulk()`、`drain_zone_pages()`)
+- pagesetの初期化とzoneごとの設定: `mm/page_alloc.c` (`setup_zone_pageset()`、`per_cpu_pages_init()`)
+- PCPとbuddyの関係: `Documentation/mm/physical_memory.rst` のZones説明
+
+### 8.1.9 ゾーンアロケータ
+
+zone allocatorは、`alloc_pages()`等のページ要求を受け取り、GFP flags、order、preferred node、zonelist、watermark、ページ移動特性などを使って、適切なページを探します。Linux 6.18の割り当て処理は一回のzone走査だけではなく、まず短いfast pathを試し、要求条件が許す場合にだけ回収・compactionを含むslow pathへ進みます。
+
+```text
+alloc_pages(gfp, order)
+        |
+        v
+要求条件を整理
+  zone上限 / nodemask / cpuset / NUMA policy / migratetype
+        |
+        v
+fast path: zonelistのzoneを走査
+  watermark・予約・fragmentation条件を確認
+        |
+        +-- PCPまたはbuddyから取得できた --> pageを返す
+        |
+        +-- 取得できない
+                |
+                +-- sleep/reclaim不可 --> 利用可能な限定reserveを試す場合がある
+                |                         それでも取得できなければNULL
+                |
+                +-- reclaim可能
+                       kswapd wakeup / direct reclaim / compaction
+                       条件に応じてretry、OOM処理、またはNULL
+```
+
+この図は概念経路です。実際にはNUMA zonelist、cpuset、allocation policyや割り当てのorderにより候補が変わり、回収やcompactionを行わずに失敗する要求もあります。たとえばinterrupt contextではsleepしてdirect reclaimを待つことはできません。逆に`GFP_KERNEL`は通常sleep可能な文脈で使い、メモリ圧迫時にはdirect reclaimが起き得ます。
+
+#### zone選択とwatermark判定
+
+`prepare_alloc_pages()`はGFP flagsからzone上限やmigratetype等を整理し、対象nodeのzonelistとnodemaskを準備します。`get_page_from_freelist()`は候補zoneを走査し、cpuset等の制約を確認してからwatermarkを判定し、条件を満たすzoneでPCPまたはbuddyからblockを取得します。
+
+zoneは「空きページが要求数以上あるか」だけで選ばれません。要求orderの連続blockがあるか、watermarkとlowmem reserveを維持できるか、指定されたzone/node/migratetypeの条件を満たすかが関係します。DMAなど制約の強いzoneを不用意に消費しないように、より高位の適合zoneを優先する候補順も使われます。
+
+| 判定の観点 | allocatorでの意味 |
+|---|---|
+| zone/node候補 | GFP mask、zonelist、NUMA nodemask、cpuset等で制約される |
+| watermark | 割り当て後に最低限の空きとreserveを保てるかを確認する |
+| `order` | 必要な連続blockがfree area等に存在するかを確認する |
+| migratetype | mobilityやCMA/highatomic等の扱いとfallback可否に関係する |
+| 割り当てcontext | sleep、I/O、filesystem、回収・再試行を行えるかを決める |
+
+#### fast pathからslow pathへ
+
+Linux 6.18の通常のページ要求では、最初に`__alloc_pages_noprof()`から割り当ての中心処理へ入り、watermarkを含むfast pathで候補zoneを走査します。そこで失敗した場合、GFP flagsが許可すればslow pathが次の処理を条件に応じて行います。
+
+1. `kswapd`を起こし、node単位のbackground reclaimを促す
+2. 高order要求などで有効性がある場合、compactionを試みる
+3. direct reclaimが許される場合、呼び出し元のcontextで回収し、再度zoneを走査する
+4. 進捗・retry flags・order・cpusetやzonelistの変更を踏まえて、再試行か失敗を決める
+5. 必要な条件を満たす場合はOOM処理に進むことがある
+
+この順序は単純な固定ステップ列ではなく、`__GFP_NORETRY`、`__GFP_RETRY_MAYFAIL`、`__GFP_NOFAIL`、compaction可能性、呼び出し文脈などで分岐します。`__GFP_NOFAIL`も無制限にあらゆる要求で利用できる保証ではなく、許容されるorderやsleep/reclaim条件に制約があります。通常の呼び出し側は、どのGFP maskでも返却値を確認し、失敗時の処理を用意します。
+
+#### 8.1.9.1 ページフレームの解放
+
+ページ解放は割り当てより経路が短いものの、解放呼び出しをした時点で常にbuddyへ直行するわけではありません。order-0等のPCP対象ページはper-CPU pagesetへ一時保持され、対象外orderやdrain処理ではbuddy allocatorへ返されます。buddyに返ると、隣接する空きbuddyとの併合が試みられます（8.1.7.3）。
+
+```text
+__free_pages(page, order)
+        |
+        +-- 参照がまだ残る --> 物理ページは解放しない
+        |
+        +-- 最後の参照を解放
+                |
+                +-- PCP対象 --> per-CPU listへ。後でbatch drainの場合もある
+                |
+                +-- PCP対象外/drain --> buddyへ戻し、併合を試す
+```
+
+Linux 6.18の`__free_pages()`は、ページ参照の解放を行い、最後の参照が外れた場合にfree pathへ進みます。compound pageと非compoundの高order allocationでは解放の扱いが異なるため、同じorder・所有権規約に対応する解放APIを使います。割り当て時のorderと異なるorderを`__free_pages()`へ渡すと、メモリ破損や警告の原因になり得ます。
+
+```c
+/* alloc_pages(GFP_KERNEL, order)で得たblockの解放例 */
+static void release_page_block(struct page *page, unsigned int order)
+{
+        if (page)
+                __free_pages(page, order);
+}
+```
+
+上の例は、呼び出し側が当該blockの所有権を持ち、他の利用者へ参照を渡していない場合に限ります。共有参照を管理する場合は、ページ／folioの参照APIとcompound pageの規約に従います。`__free_pages()`はorderが割り当て時と一致することを一般に検査しないため、orderを正しく保持する設計が必要です。
+
+**Linux 6.18のソースを追う入口**
+
+- `alloc_pages()`からの実装入口: `include/linux/gfp.h`、`mm/page_alloc.c` (`__alloc_pages_noprof()`、`__alloc_frozen_pages_noprof()`)
+- 要求条件とzonelist走査: `mm/page_alloc.c` (`prepare_alloc_pages()`、`get_page_from_freelist()`)
+- watermark判定: `mm/page_alloc.c` (`zone_watermark_fast()`、`__zone_watermark_ok()`)
+- slow path、direct reclaim、compaction、retry/OOM: `mm/page_alloc.c` (`__alloc_pages_slowpath()`、`__alloc_pages_direct_reclaim()`、`__alloc_pages_direct_compact()`)
+- 解放・PCP/buddyへの経路: `mm/page_alloc.c` (`__free_pages()`、`___free_pages()`、`__free_frozen_pages()`)
+- allocatorの設計説明: `Documentation/core-api/memory-allocation.rst`、`Documentation/mm/physical_memory.rst`
