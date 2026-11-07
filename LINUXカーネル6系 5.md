@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」、5.3.1.3「遅延処理がアクセスするデータの保護」、5.3.1.4「例外と割り込みがアクセスするデータの保護」
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」、5.3.1.3「遅延処理がアクセスするデータの保護」、5.3.1.4「例外と割り込みがアクセスするデータの保護」、5.3.1.5「例外と遅延処理がアクセスするデータの保護」
 - 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.4を作成。続きは 5.3.1.5 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.5を作成。続きは 5.3.1.6 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1565,3 +1565,58 @@ PREEMPT_RT では IRQ の多くがthreaded IRQとして実行され、`spinlock_
 - ローカル IRQ 禁止だけでは別 CPU のアクセスを防げず、IRQ handlerではsleepするmutexやsemaphoreを使えない
 - PREEMPT_RTではthreaded IRQとhard IRQを区別し、通常の `spinlock_t` suffixがIRQを無効化すると仮定しない
 - `raw_spinlock_t` はhard IRQと共有する限定的な短い区間にのみ検討し、機械的な置換を避ける
+
+#### 5.3.1.5 例外と遅延処理がアクセスするデータの保護
+
+##### task context と bottom half の共有状態
+
+システムコールなどのtask contextとsoftirq系の遅延処理が同じデータへ触れる場合、task側がそのままロックを取ると、ロック保持中に同じCPUのsoftirqが割り込み、そのロックを待つ可能性があります。非 PREEMPT_RT ではtask側を `spin_lock_bh()` / `spin_unlock_bh()` で囲み、ロックに加えてローカルbottom halfの再入を抑止する形が代表的です。softirq側も同じロックを使います。
+
+```c
+static DEFINE_SPINLOCK(state_lock);
+static unsigned long shared_state;
+
+static void update_from_task(unsigned long value)
+{
+	spin_lock_bh(&state_lock);
+	shared_state = value;
+	spin_unlock_bh(&state_lock);
+}
+
+static void update_from_softirq(unsigned long value)
+{
+	spin_lock(&state_lock);
+	shared_state = value;
+	spin_unlock(&state_lock);
+}
+```
+
+ロックがCPU間の相互排他を担い、`_bh` suffixはtask側と同じCPUのsoftirqとの競合を扱います。`local_bh_disable()`だけでは他CPUからのsoftirq実行を止めず、共有状態を保護するロックの代用になりません。ロックはtask側・softirq側の全アクセスで一貫させます。
+
+##### workqueueなど、sleep可能な処理との違い
+
+「遅延処理」が通常のworkqueue workerやthreaded IRQのthread functionなら、それらはtask contextで動きます。共有相手がtask contextだけであり、保護区間でsleepする必要がある場合はmutexなどを検討できます。この場合、`local_bh_disable()`はそのworkerとの同期にはなりません。
+
+一方、softirq、tasklet、`WQ_BH`はbottom-half制約を持ち、通常のworkqueueのようにsleepできるとは限りません。task contextとの共有はsoftirq系として保護し、通常workqueueとの共有はtask同士の共有として保護するなど、API名の「遅延」ではなくcallbackの実際の実行文脈で区別します。複数の実行機構が同じ状態へアクセスするなら、全経路が共通の同期規約に参加する必要があります。
+
+##### PREEMPT_RTでのbottom-half制御
+
+PREEMPT_RTではsoftirqの実行やプリエンプションの扱いが非RTと異なり、`local_bh_disable()`を単純な「プリエンプション禁止」とみなせません。`spinlock_t`の `_bh` variantはbottom halfを抑止する役割を保ちますが、内部の直列化方法は構成で変わります。softirq専用のper-CPUデータなどでは、`local_lock_t`や `local_lock_nested_bh()` / `local_unlock_nested_bh()` を使って保護範囲を明示する方法も、Linux 6.18のlocking規則に照らして検討します。
+
+どの構成でも、保護する状態へアクセスするtask、softirq、別CPU、workqueue、IRQの全経路を列挙し、ローカル制御が担う範囲とCPU間排他の範囲を分けます。原文の「CPU上の遅延処理は常に直列」という説明は現行Linuxの一般則にせず、機構ごとの並行性とPREEMPT_RTの契約を確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- bottom-half制御API: `include/linux/bottom_half.h`
+- softirq実行とBH disable/enableの構成別実装: `kernel/softirq.c`
+- `spinlock_t`の `_bh` variantとPREEMPT_RT: `Documentation/locking/locktypes.rst`
+- softirqとper-CPUデータの保護範囲: 同文書の CPU local scope / bottom-half の項
+- workqueueの実行文脈: `Documentation/core-api/workqueue.rst`
+
+##### この小節で固定したいこと
+
+- taskとsoftirq系処理の共有には、CPU間ロックとローカルbottom-half制御の両方を考える
+- `spin_lock_bh()`はローカルsoftirq再入を扱い、CPU間排他は共通のロックが担う
+- 通常workqueueやthreaded IRQはtask contextであり、`local_bh_disable()`だけでは同期できない
+- taskletや`WQ_BH`を通常workqueueと同じsleep可能な文脈とみなさない
+- PREEMPT_RTではsoftirq / bottom-halfとper-CPUデータの契約を再確認し、暗黙の非プリエンプト性に依存しない
