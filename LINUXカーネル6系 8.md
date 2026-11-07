@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」
-- 今回の主題: `vmalloc`系による仮想アドレス連続・物理ページ非連続の領域の位置づけと、連続物理メモリとの使い分け
-- 現在の進捗: 8.1〜8.2.15と8.3の導入を作成済み。8.3.1以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」
+- 今回の主題: vmalloc領域の仮想address space上の位置、direct map・vmemmap・module/fixmap等との関係、architecture依存のlayout
+- 現在の進捗: 8.1〜8.2.15、8.3、8.3.1を作成済み。8.3.2以降は未着手
 
 ## 第8章の見取り図
 
@@ -58,7 +58,7 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.14 | `kmalloc()`の汎用size classと解放経路 | 作成済み |
 | 8.2.15 | mempoolの予約・枯渇時動作 | 作成済み |
 | 8.3 | 非連続ページを仮想アドレス上で連続させる領域管理の概観 | 作成済み |
-| 8.3.1 | 非連続メモリ領域の仮想アドレス空間 | 未着手 |
+| 8.3.1 | vmalloc領域の仮想アドレス空間 | 作成済み |
 | 8.3.2 | 非連続メモリ領域を表すdescriptor | 未着手 |
 | 8.3.3〜8.3.4 | 領域の割り当てと解放 | 未着手 |
 
@@ -1667,3 +1667,48 @@ mempool_destroy(pool); /* pool利用者が停止した後に破棄 */
 - 仮想領域確保、page mapping、unmappingの実装: `mm/vmalloc.c`
 - architectureごとのvmalloc address range: `arch/*/include/asm`内の`VMALLOC_START`、`VMALLOC_END`定義
 - kmallocからvmallocへfallbackする経路: `mm/slub.c` (`__kvmalloc_node_noprof()`)
+
+### 8.3.1 非連続メモリ領域のリニアアドレス
+
+#### 仮想アドレス空間上の「連続領域」
+
+`vmalloc`の割り当ては、まずカーネル仮想address spaceのうちvmalloc用に割り当て可能な範囲に仮想領域を確保し、その範囲の各ページへ物理ページをmappingします。得られるポインタは連続したkernel virtual addressですが、隣接する仮想ページが隣接するPFNを指す保証はありません。ここでいう連続性は仮想addressの連続性であり、物理アドレスの連続性ではありません。
+
+```text
+kernel virtual address space (概念図、実際の順序と範囲はarchitecture依存)
+
+  kernel image / module mappings
+  direct map                 : 物理メモリを広い範囲で直接参照
+  vmalloc / ioremap region   : 非連続pageを仮想連続にmapping
+  vmemmap                    : struct page配列の仮想mapping
+  KASAN shadow / fixmap等    : 機能・architectureに応じた領域
+```
+
+この図は役割を示す概念図であり、全architectureで領域がこの順に並ぶという意味ではありません。Linuxの仮想address spaceはarchitectureが定義する範囲と機能ごとの予約から成り、`VMALLOC_START`と`VMALLOC_END`も一律の定数ではありません。vmalloc領域の空きアドレスを探すとき、カーネルは固定の「PAGE_OFFSETから後ろ」を走査するのではなく、汎用vmalloc管理機構とarchitectureが定めた領域境界を使います。
+
+#### architectureごとの配置例
+
+Linux 6.18のx86-64では、4-level pagingと5-level pagingでkernel virtual address spaceの大きさが異なり、direct map、vmalloc/ioremap、vmemmap、KASAN shadowなどに割り当てる領域も変わります。x86-64のmemory map documentationでは、4-level paging時のvmalloc/ioremap領域は概ね32 TiB、5-level paging時は概ね12.5 PiBと説明されています。実際のbase addressは`vmalloc_base`等から決まり、`CONFIG_RANDOMIZE_MEMORY`が有効ならdirect map・vmalloc・vmemmapのbaseがboot時にrandomizeされる場合があります。さらにKMSAN構成ではvmalloc範囲の一部をshadow/origin metadata用に分割します。
+
+arm64では`VMALLOC_START`がmodule領域の終端`MODULES_END`に結びつき、`VMALLOC_END`は`VMEMMAP_START`付近の使用可能範囲から定義されます。VA bitsやpage size等の条件によって具体的な計算が変わります。従ってx86-64の数値をarm64や32-bit構成へそのまま当てはめることはできません。
+
+旧版の32-bit x86の図では、`PAGE_OFFSET`直後のdirect map、896 MiBのRAM mapping、`PKMAP_BASE`、4 GiB境界、8 MiB/4 KiBのguard gapなどが示されています。これは当時の特定構成における説明です。Linux 6.18では、32-bit x86の配置でさえconfig条件によって異なり、64-bit architectureではaddress-space layout自体が別モデルです。4 KiBは必ずしもベースpage sizeではなく、guard gapの値も旧版の固定値を一般化してはいけません。
+
+#### 読み進めるときの観点
+
+vmalloc領域の位置を調べる際は、次の順で確認します。
+
+1. 対象architecture・paging mode・page sizeを特定する。
+2. `VMALLOC_START`、`VMALLOC_END`、および関連領域（module、direct map、vmemmap、fixmap等）の定義を読む。
+3. KASLR、KASAN、KMSAN等のconfigが範囲やbaseに与える条件を確認する。
+4. `mm/vmalloc.c`の領域管理実装を読み、予約範囲内の空き領域確保、guard、mappingを区別する。
+
+`VMALLOC_START`/`VMALLOC_END`は「一つの割り当ての先頭と末尾」ではなく、割り当て候補となる仮想address rangeの境界です。個々のvmalloc領域はその中から別途確保され、mapping解除・遅延purge等の管理対象になります。次の8.3.2では、その個々の領域と管理descriptorを調べます。
+
+**Linux 6.18のソースを追う入口**
+
+- x86-64の4/5-level address map、randomization条件: `Documentation/arch/x86/x86_64/mm.rst`
+- x86-64の`VMALLOC_START`等の計算とKMSAN range: `arch/x86/include/asm/pgtable_64_types.h`
+- arm64の`VMALLOC_START`/`VMALLOC_END`: `arch/arm64/include/asm/pgtable.h`
+- 32-bit x86 layout（旧版の説明との限定比較）: `arch/x86/include/asm/pgtable_32_areas.h`
+- vmalloc virtual rangeのgeneric management: `mm/vmalloc.c` (`__vmalloc_node_range_noprof()`)
