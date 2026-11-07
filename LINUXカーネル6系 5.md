@@ -1353,7 +1353,7 @@ static int update_config(int value)
 
 カウント資源の上限を管理する場合は semaphore が候補ですが、task 間の単純な相互排他には mutex を優先します。Linux 6.18 では mutex は owner semantics を持ち、セマフォは owner を持ちません。データの排他と「同時に何個まで許すか」は別の要件です。
 
-#### Linux 6.18 LTS のソースを追う入口
+##### Linux 6.18 LTS のソースを追う入口
 
 - システムコールの入口と task context: `arch/*/entry/` 配下の syscall entry、および `kernel/entry/`
 - mutex の API と利用条件: `include/linux/mutex.h`、`Documentation/locking/`
