@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1を再整備、次は2.2.2）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.2を再整備、次はGDT/LDT）
 
 ## 2章の研究観点
 
@@ -296,25 +296,41 @@ x86-64でTLSやper-CPU参照を調べる場合は、selectorのIndexだけでな
 
 #### 2.2.2 セグメントディスクリプタ
 
-セグメントセレクタだけでは、実際にそのセグメントがどこから始まり、どこまで続き、
-どういう権限を持つのかは分かりません。
-その情報を持つのがセグメントディスクリプタです。
-ディスクリプタには、ベースアドレス、長さ、種別、特権レベル、存在フラグなど、
-そのセグメントの性質を示す情報が入ります。
+セグメントディスクリプタは、セレクタが選んだセグメントの属性をCPUへ与えるdescriptorです。原文の図2-3は、一般的なcode/data descriptorでbaseとlimitが複数のbit範囲に分割され、属性bitとともに格納されることを示しています。重要なのは図をそのまま暗記することではなく、CPUがbase・範囲・種別・権限をセットで検査する点です。
 
-この発想自体はとても面白いです。
-つまり x86 は、単に番地を変換するだけではなく、どの範囲にアクセスしてよいか、
-その対象がコードかデータか、どの特権レベルなら使えるか、といった情報をハードウェア側へ
-かなり持たせています。
-OS はこの仕組みを使うことで、保護機構をソフトウェアだけで抱え込まずに済みます。
+| フィールド | 役割 | 読み違えを避ける点 |
+|---|---|---|
+| Base | segmentの基準アドレス | 64-bit modeでは通常のCS/DS/ES/SSによるアドレス形成の中心ではない。FS/GS baseは例外的に有効 |
+| Limit と G | 有効なsegment範囲。G=0はbyte単位、G=1は4 KiB単位 | G=1では有効limitは概ね`(limit_field << 12) | 0xfff`として解釈される |
+| Type と S | code/dataの種別や属性、またはsystem descriptorの種別 | S=1は通常のcode/data、S=0はTSSやLDTなどのsystem descriptor |
+| DPL と P | descriptor privilege levelとpresent状態 | Pはdescriptorの有効性を示すbitで、ページがRAMに常駐しているかを示すものではない |
+| L と D/B | code descriptorの64-bit mode属性やoperand/address sizeに関係 | long modeの64-bit codeではL=1、D=0。データ用descriptorのD/Bの意味とは区別する |
+| AVL | ソフトウェアが利用できるbit | CPUが一般用途の意味を決めるbitではない |
 
-ただし、Linux 6.18 LTS の研究として大事なのは、ディスクリプタの全ビット配置を
-丸暗記することではありません。
-本質は、CPU がアドレス変換と保護チェックを行うためのメタデータを別構造として持っている、
-という理解です。
-あとでページテーブルエントリを見るときも、似た発想が別の形で出てきます。
-つまり、「ただの番地」ではなく、「番地に付随する属性も一緒に管理する」という見方を
-ここで掴んでおくと強いです。
+原文の表2-1はsegment limitを「終端のoffset」と説明しています。上限は含まれる値として扱われるため、limit値と「長さ」を厳密には同一視しないでください。また、P=0はsegment descriptorがpresentでない状態であり、Linuxのページフォルトやページ単位のswap状態を表すものではありません。
+
+##### 64-bit modeでdescriptorを読む際の補足
+
+x86-64のlong modeでは、通常のCS/DS/ES/SS descriptorのbaseとlimitによる従来の領域分割はほぼ使われません。CSのL bitなどの属性は実行モードや特権遷移の文脈で引き続き意味を持ち、FS/GS baseもアドレス形成に使われます。したがって、32-bit protected mode向けのdescriptor図をそのまま現代x86-64の全アドレス計算に当てはめないようにします。
+
+サイズにも注意が必要です。Linux 6.18の`struct desc_struct`は通常の8-byte descriptorを表しますが、x86-64のTSSやLDTを指すsystem descriptorはbase addressの上位部分を含むため16-byte形式です。つまり「descriptorは常に8 byte」という説明は、古典的なcode/data descriptorについての説明として読む必要があります。
+
+このdescriptorを操作するCコード例はここでは省きます。GDTの更新はCPU状態や実行CPUごとの初期化と結び付いており、単なる構造体代入を示す例では安全な更新手順を伝えられないためです。代わりにLinuxの定義・初期化コードを追います。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- descriptorのbit定義と通常descriptor構造: `arch/x86/include/asm/desc_defs.h`
+- descriptorの作成・GDT操作・TSS設定: `arch/x86/include/asm/desc.h`
+- kernel/user code/data descriptorの初期値: `arch/x86/kernel/cpu/common.c`
+- selectorとGDT entry番号: `arch/x86/include/asm/segment.h`
+
+#### この小節で固定したいこと
+
+- descriptorはセレクタが選ぶ属性情報であり、base・limit・種別・権限などを持つ
+- limitとGの解釈、P bitの意味をページの常駐状態と混同しない
+- 64-bit modeでは通常segmentのbase/limitの役割は縮小するが、CS属性とFS/GS baseなどは残る
+- 通常descriptorは8 byteでも、x86-64のTSS/LDT system descriptorは16 byte形式になりうる
+- 現在のLinuxの実値・構造は`desc_defs.h`とGDT初期化コードで確認する
 
 #### GDT と LDT
 
@@ -970,7 +986,6 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
 
 
 
