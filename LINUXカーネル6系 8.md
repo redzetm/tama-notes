@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」
-- 今回の主題: ページフレームから小さなカーネルオブジェクトを切り出す理由、cache/slab/objectの階層、Linux 6.18のSLUBと主要API
-- 現在の進捗: 8.1〜8.2.1を作成済み。8.2.2以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」
+- 今回の主題: kmallocのサイズ別汎用cacheと型専用cache、cache lifecycle、SLUB cache mergeの条件と意味
+- 現在の進捗: 8.1〜8.2.4を作成済み。8.2.5以降は未着手
 
 ## 第8章の見取り図
 
@@ -43,7 +43,10 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1.8、8.1.8.1〜8.1.8.2 | CPUごとのページキャッシュ、割り当て・解放経路 | 作成済み |
 | 8.1.9、8.1.9.1 | ページ割り当て判断とページ解放 | 作成済み |
 | 8.2、8.2.1 | 小さな領域の管理とSLUBの基本モデル | 作成済み |
-| 8.2.2〜8.2.15 | cache/slab構造、割り当て・解放、mempool | 未着手 |
+| 8.2.2 | cache descriptorとその管理情報 | 作成済み |
+| 8.2.3 | slab descriptorとslab単位の状態 | 作成済み |
+| 8.2.4 | 汎用cache・特定用途cacheとcache merge | 作成済み |
+| 8.2.5〜8.2.15 | page allocatorとの接続、object配置・割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -878,3 +881,168 @@ static void __exit sample_cache_exit(void)
 - SLUB実装: `mm/slub.c`
 - slab allocatorの利用者向け説明と観測: `Documentation/admin-guide/mm/slab.rst`
 - GFP flagsと割り当てAPIの選択: `Documentation/core-api/memory-allocation.rst`
+
+### 8.2.2 キャッシュディスクリプタ
+
+各`kmem_cache`は、同じ種類のobjectをどのように配置・割り当てるかを表すcache descriptorです。ただし、descriptorだけに全objectや全slabの状態を詰め込むわけではありません。Linux 6.18のSLUBでは、cache共通の設定に加え、CPUごとの高速経路、NUMA nodeごとのslab管理、slab単位の状態に情報が分散しています。
+
+```text
+struct kmem_cache
+  cache共通の設定・サイズ・名前
+  CPUごとの状態への参照 ──> struct kmem_cache_cpu 等
+  nodeごとの状態への参照 ──> struct kmem_cache_node
+                                  |
+                                  +-- partial slab群
+  各slabの状態 ───────────────> struct slab
+```
+
+#### cache共通の属性
+
+`mm/slab.h`の`struct kmem_cache`には、object配置やcacheの動作を決める情報があります。主要な項目を役割別に読むと次のようになります。
+
+| 情報のまとまり | Linux 6.18の主なメンバ | 読み方 |
+|---|---|---|
+| cache識別・公開属性 | `name`、`flags`、`list` | 名前、属性、全cache管理リストとの関係を表す |
+| object寸法 | `object_size`、`size`、`reciprocal_size`、`align` | 利用者が要求したobject寸法、内部metadata等を含むslot寸法、index計算、配置境界に関係する |
+| freelist配置 | `offset`、`inuse`、`red_left_pad` | freelist metadataやdebug用領域の位置・object配置に関係する |
+| slabの割り当て形状 | `oo`、`min`、`min_partial` | slabのorder/object数の選択やnode側partial slab保持に関係する |
+| node/CPU状態への参照 | `node[]`、`cpu_slab`、`cpu_sheaves` | NUMA node別、CPU別の割り当て状態を引く入口。利用可能な項目は構成に依存する |
+| 初期化・制約 | `ctor`、`allocflags`、`useroffset`、`usersize` | constructor、slab用ページ確保flags、usercopy可能範囲などを表す |
+
+これらのメンバすべてが全kernel configurationで同じ形で存在するわけではありません。CPU partialやdebug、KASAN、NUMA等に関係する項目には構成条件があり、`CONFIG_SLUB_TINY`では省略・簡略化される状態もあります。また、`size`は利用者向けの要求サイズそのものではなく、metadataやalignmentなどを反映した内部slot寸法です。実際のobject数はslabのorderやslabごとの状態と併せて決まります。
+
+#### 一元的なcache descriptorではなく、粒度ごとの状態
+
+第3版の表8-8では、CPUごとの`array`、`batchcount`、`limit`や、複数のslab listを持つ`kmem_list3`が`kmem_cache_t`のメンバとして説明されています。Linux 6.18のSLUBには同名・同配置のdescriptorはありません。CPUの高速pathは`struct kmem_cache_cpu`等、NUMA nodeのpartial slab管理は`struct kmem_cache_node`、slab自身のfreelistやinuse/object countは`struct slab`で表現されます。したがって、旧表の各メンバを現在の`struct kmem_cache`へ一対一対応させず、「cache設定」「CPUローカル状態」「node単位状態」「個別slab状態」に役割を分けて読むのが適切です。
+
+代表例として、`struct kmem_cache_cpu`は現在CPUのfreelistと割り当て元slabを保持し、構成によりpartial slabも持ちます。`struct kmem_cache_node`はnodeごとのlockとpartial slab管理情報を持ち、SLUB debug構成ではfull slab一覧なども持ちます。個々のslabのobject数、inuse count、freelistは`struct slab`側の状態です。こうして高速なCPUローカル処理と、node上のslab集合管理が分かれています。
+
+| 状態の粒度 | 代表構造 | 主な役割 |
+|---|---|---|
+| cache全体 | `struct kmem_cache` | サイズ、配置、flags、constructor、状態配列への参照 |
+| CPU単位 | `struct kmem_cache_cpu`、per-CPU sheaf | CPUローカルのfreelistや一時保持を用いた高速化 |
+| NUMA node単位 | `struct kmem_cache_node` | partial slab等をnode別に管理 |
+| slab単位 | `struct slab` | slabに属するcache、freelist、object数と使用状態 |
+
+#### 設定値と実行時状態の見分け方
+
+cache名や一部の属性は`/sys/kernel/slab/<cache名>/`から観測でき、`slabinfo`もcache単位の統計や状態を確認する手段です。ただし、sysfsの属性はdescriptor全体の写しではなく、公開対象として選ばれた項目に限られます。構造体の値を直接読んで設計を推測するだけでなく、該当する更新・参照箇所を`mm/slub.c`で追います。
+
+**Linux 6.18のソースを追う入口**
+
+- `struct kmem_cache`、`struct slab`、cache全体リスト: `mm/slab.h`
+- CPU/nodeごとの状態とSLUBの処理: `mm/slub.c` (`struct kmem_cache_cpu`、`struct kmem_cache_node`)
+- cacheの生成、登録、merge処理: `mm/slab_common.c`
+- 公開APIと生成引数: `include/linux/slab.h` (`struct kmem_cache_args`、`kmem_cache_create()`)
+- runtime観測と`/sys/kernel/slab/`: `Documentation/admin-guide/mm/slab.rst`
+
+### 8.2.3 スラブディスクリプタ
+
+slab descriptorは、1つのcacheから供給されるobject群の配置領域と、その時点の利用状態を記録します。Linux 6.18のSLUBでは、この役割を`struct slab`が担います。slabは物理ページ（正確にはslab用に確保されたfolio）から成り、そこにcacheのobject slotが並びます。
+
+```text
+struct slab (ページ管理用metadata側)
+  slab_cache ─────> 所属する struct kmem_cache
+  freelist ───────> 次に使えるfree object
+  inuse / objects ─> 使用中数 / slab内のobject総数
+        |
+        v
+slab用folioの仮想アドレス範囲
+  [ object ][ object ][ object ] ... [ object ]
+```
+
+ここで重要なのは、descriptorがslabのobject領域に埋め込まれているという意味ではないことです。Linuxのページ管理metadataである`struct page`の領域を、slabとして使うfolioでは`struct slab`として解釈する設計です。`struct slab`と`struct page`は先頭部分のlayoutを共有し、コンパイル時assertで対応関係やサイズが検証されます。したがって、第3版で説明される「内部／外部slab descriptor」の選択を、そのままLinux 6.18 SLUBの実装モデルとして当てはめることはできません。
+
+#### slab descriptorが表す状態
+
+| `struct slab`の情報 | 意味 |
+|---|---|
+| `slab_cache` | slabが属する`kmem_cache` |
+| `freelist` | slab内の空きobject群の先頭。free pointerをたどって次の空きを得る |
+| `inuse` | 使用中object数 |
+| `objects` | slab内のobject slot総数 |
+| `slab_list`等 | node側のpartial listや、deferred処理などに使う状態。union・構成に応じて用途が変わる |
+| `flags`等のpage metadata | folio/pageとの連携やページ属性に関する情報 |
+
+基本的な空き数は`objects - inuse`で把握できます。ただし、objectの確保・解放はCPUローカルfreelistとslab側freelistの間で状態を移すことがあり、複数CPUからの操作やdebug構成も関係します。単純なカウンタ差分だけで、すべての瞬間的な割り当て状態やlist所属を推測するのは避け、更新経路と同期方法を合わせて読みます。
+
+slabを新しく作るとき、SLUBはcacheが選んだorderでページアロケータからfolioを得て、slab単位の`objects`、`inuse`、所属cacheなどを初期化します。空きobjectをfreelistとして連結し、割り当てでは先頭free objectを取り出して使用中数を進めます。object数やorderはcacheのslot size、debug metadata、割り当て可能性などに依存するため、すべてのslabが同じobject数になるとは限りません。
+
+#### slabとnode管理リスト
+
+`struct kmem_cache_node`はNUMA nodeごとのpartial slab管理を担います。空きobjectを持つslabはnodeのpartial管理対象となり、objectがすべて使用中になれば通常のallocation pathではpartialから外れます。空になったslabを保持するかページアロケータへ返すかは、cache設定やSLUBの回収処理に左右されます。旧来の「free/partial/fullの3リストが常にcache descriptorにある」という図式は現行構造そのものではありません。特にfull slabを追跡するlistはdebug構成に依存します。
+
+| 状態の見方 | 現行SLUBでの理解 |
+|---|---|
+| partial | 空きobjectを持ち、再利用候補となるslab。node単位の管理が関係する |
+| full | `inuse == objects`の状態。常時すべてのfull slabを通常構成でlist追跡するとは限らない |
+| empty | 使用中objectがない状態。保持・再利用・ページ返却の判断はallocator経路と保持数に依存する |
+
+**Linux 6.18のソースを追う入口**
+
+- `struct slab`と`struct page`/folioの対応: `mm/slab.h` (`struct slab`、`folio_slab()`、`slab_folio()`、`slab_order()`)
+- slab用folioのmetadata初期化とfreelist構築: `mm/slub.c` (`allocate_slab()`)
+- objectをslab freelistから取り出す処理: `mm/slub.c` (`alloc_single_from_partial()`およびfastpath関連関数)
+- node単位のpartial管理: `mm/slub.c` (`struct kmem_cache_node`、partial slabの追加・除去処理)
+
+### 8.2.4 汎用キャッシュと特定用途のキャッシュ
+
+slab cacheは、利用者から見た役割で大きく二つに分けて考えられます。
+
+- **汎用cache**: サイズを指定する`kmalloc()`等のためのsize-class cache群。呼び出し側は型専用cacheを用意せず、要求サイズやGFP属性に応じたcacheを利用する。
+- **特定用途cache**: `kmem_cache_create()`等で作り、特定の構造体型・object用途に使うcache。object size、alignment、flags、constructor等をcacheごとに設定できる。
+
+```text
+kmalloc(size, flags)
+        |
+        +--> flagsとsize classに対応するkmalloc cache
+                    |
+                    +--> object
+
+kmem_cache_alloc(type_cache, flags)
+        |
+        +--> 構造体型に対応したcache
+                    |
+                    +--> object
+```
+
+第3版で列挙される`cache_cache`や固定個数の`malloc_sizes`、DMA用／通常用の二重配列は、当時の実装の説明です。Linux 6.18のSLUBでは汎用cacheは`kmalloc_caches`等として管理され、サイズクラスやcache typeは構成、GFP flags、accounting、DMA zone等に応じて選択されます。小さなサイズの刻みも含め、古い表の個数・サイズを現行の固定仕様として扱いません。要求サイズからどのcacheが使われるかは、`kmalloc_index()`やcache type選択の実装で追います。
+
+#### 型専用cacheを使う理由と寿命
+
+同じ型のobjectを繰り返し確保する場合、専用cacheによりobject slotのサイズ・alignment等をその型に合わせられます。cache nameや専用flagsによって診断・観測もしやすくなります。一方で、cacheを作るだけでobjectの寿命管理が自動化されるわけではありません。各objectは`kmem_cache_alloc()`で確保し、利用終了時に`kmem_cache_free()`で同じcacheへ返します。cacheを破棄する際は、そのcacheから確保したobjectの使用が終わっていることが前提です。
+
+```c
+struct request *req = kmem_cache_alloc(request_cache, GFP_KERNEL);
+if (!req)
+        return -ENOMEM;
+
+initialize_request(req);
+/* requestを利用 */
+
+kmem_cache_free(request_cache, req);
+```
+
+一回限りの小さなbufferや、型専用cacheを必要としない用途では、適切なサイズの`kmalloc()`／`kzalloc()`と`kfree()`を使います。いずれの場合もGFP flagsは、現在の実行文脈でsleepやreclaimが許されるかに合わせます。
+
+#### cache merge
+
+Linux 6.18のSLUBは、属性が互換なcacheを同じ実体へmergeし、別名として扱うことがあります。これにより似たcacheごとに別のslabを抱える必要が減り、メモリ利用やcache localityに利点があります。mergeは単にobject sizeが同じであれば成立するわけではなく、alignment、flags、constructor、usercopy設定、merge禁止属性などの条件を調べます。constructorを持つcacheや`SLAB_NEVER_MERGE`属性のcacheなどはmerge対象から外れます。
+
+mergeは運用・安全性にも関わります。同じcache実体を複数用途で共有すると、ある用途のobject overrun等が、同じslab内の別用途objectへ影響しやすくなります。カーネルの`CONFIG_SLAB_MERGE_DEFAULT`や起動時の`slab_nomerge`／`slub_nomerge`設定でmerge方針を変えられます。mergeの有無を調べる際は`slabinfo -a`や`/sys/kernel/slab/`だけでなく、対象cacheの作成条件と`find_mergeable()`の判定も確認します。
+
+| 観点 | Linux 6.18での確認点 |
+|---|---|
+| 汎用cache | `kmalloc()`のサイズclassとcache type選択 |
+| 型専用cache | `kmem_cache_create()`のobject size、alignment、flags、constructor |
+| cache merge | 同一sizeだけでなく、alignment・flags等の互換条件 |
+| merge抑止 | config、boot parameter、`SLAB_NO_MERGE`等 |
+| 調査手段 | `slabinfo -a`、sysfs、`mm/slab_common.c`のmerge判定 |
+
+**Linux 6.18のソースを追う入口**
+
+- `kmalloc()`がcache typeとsize classを選ぶ仕組み: `include/linux/slab.h` (`kmalloc_type()`、`kmalloc_caches`)、`mm/slab_common.c` (`kmalloc_info[]`、`create_kmalloc_caches()`)
+- 汎用cacheの初期化: `mm/slub.c` (`kmem_cache_init()`)、`mm/slab_common.c` (`new_kmalloc_cache()`)
+- cache生成時のalias/merge: `mm/slab_common.c` (`__kmem_cache_create_args()`、`find_mergeable()`、`slab_unmergeable()`)
+- merge制御とconfig: `mm/slab_common.c` (`slab_nomerge`)、`mm/Kconfig` (`CONFIG_SLAB_MERGE_DEFAULT`)
+- merge状況の観測: `Documentation/admin-guide/mm/slab.rst` (`slabinfo -a`)
