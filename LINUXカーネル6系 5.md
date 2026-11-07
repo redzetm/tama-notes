@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore の役割と実行文脈上の制約
-- 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU の役割と PREEMPT_RT の意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.8.1 を作成。続きは 5.2.9 以降を小節単位で追加する
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore の役割と実行文脈上の制約
+- 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.9 を作成。続きは 5.2.10 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1001,3 +1001,67 @@ static int use_slot(void)
 - `down_trylock()` は失敗時 1、成功時 0 という戻り値に注意する
 - `up()` は取得 task 以外からも呼べるため、解放責任と二重解放防止を設計する
 - 新しい用途では排他に mutex、イベント待ちに completion、並行数制限に semaphore を使い分ける
+
+### 5.2.9 読み書き用セマフォ
+
+#### 複数の読み手と排他的な書き手
+
+Linux 6.18 の読み書き用セマフォは `struct rw_semaphore` を使い、API 名では `rwsem` と呼ばれます。複数の読み手が同時に保護区間へ入れますが、書き手は他の読み手・書き手が保護区間にいない状態でのみ取得できます。読み取りが多く、書き込みが相対的に少ない共有状態に適します。
+
+```c
+static DECLARE_RWSEM(config_sem);
+static int config_value;
+
+static int read_config(int *result)
+{
+	int ret;
+
+	ret = down_read_interruptible(&config_sem);
+	if (ret)
+		return ret;
+
+	*result = config_value;
+	up_read(&config_sem);
+	return 0;
+}
+
+static void update_config(int value)
+{
+	down_write(&config_sem);
+	config_value = value;
+	up_write(&config_sem);
+}
+```
+
+ロックは保護対象へのアクセス規約として、読み書き双方のすべての経路で一貫して使います。読者が保護区間内でデータを書き換えたり、書き手がロックを取らずに更新したりすれば、rwsem を導入しても競合は防げません。
+
+#### sleep するロックとして使う
+
+`rw_semaphore` は sleeping lock です。競合時に task を待たせるため、取得 API はプリエンプト可能な task context から呼びます。ハード IRQ や softirq のように sleep できない文脈から取得してはいけません。また、読み取り側もロック保持中に任意の実行文脈へ移れるわけではなく、呼び出し経路の制約を確認します。
+
+`down_read_interruptible()` と `down_read_killable()`、`down_write_killable()` は中断可能な取得を提供し、失敗時には負の errno を返します。結果を確認し、取得成功後だけ対応する `up_read()` / `up_write()` を実行します。`down_read_trylock()` と `down_write_trylock()` は待たずに試み、成功時 1、競合時 0 を返します。通常の semaphore の `down_trylock()` とは成功・失敗の戻り値が逆です。
+
+#### 公平性と PREEMPT_RT
+
+古い本文にある待ち行列の具体的な FIFO 処理や `rw_semaphore` の内部フィールドは、Linux 6.18 の固定的な実装説明として引き継ぎません。実装表現や待ち合わせの詳細はカーネル版・構成に依存します。
+
+Linux 6.18 の locking 文書では、非 PREEMPT_RT の rwsem 実装は writer starvation を防ぐ公平な実装と説明されています。一方、PREEMPT_RT では別の rt_mutex ベースの実装となり、公平性の性質が変わります。とくに読み手がプリエンプトされたままロックを保持する場合、書き手の優先度継承では読み手を進行させられず、優先度の高い書き手も待つことがあります。性能や待ち時間を評価するときは、`CONFIG_PREEMPT_RT` の有無と実際の競合パターンを分けて確認します。
+
+#### 書き込みロックの downgrade
+
+`downgrade_write()` は、保持中の書き込みロックを読み取りロックへ移します。更新後も読み取り保護を継続したいとき、いったん `up_write()` してから `down_read()` を取り直す間に別の書き手が入る隙間を作らずに済みます。これは write から read への移行であり、read ロックを保持したまま write ロックへ昇格する手段ではありません。読み取り中に更新が必要になった場合は、いったん読み取りロックを解放し、書き込みロックを取得して状態を再確認する設計にします。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- 型、初期化、公開 API と戻り値: `include/linux/rwsem.h`
+- 待ち合わせとロック取得・解放の実装: `kernel/locking/rwsem.c`
+- sleep 可能な文脈、公平性、PREEMPT_RT の違い: `Documentation/locking/locktypes.rst` の `rw_semaphore`
+- メモリ管理での使用例: `include/linux/mm_types.h` と `mm/` 配下の利用箇所。個々のデータ・経路の保護契約を確認する
+
+#### この小節で固定したいこと
+
+- `rw_semaphore` は複数読み手・単一書き手の sleeping lock で、競合時に待つ task context から使う
+- 保護対象の全読み書き経路で同じ規約を守る。読み手の並行実行は読み取り専用であることが前提
+- `down_*_trylock()` は成功 1、失敗 0。通常 semaphore の trylock と戻り値が逆
+- 非 PREEMPT_RT と PREEMPT_RT では内部実装と公平性の性質が同じではない
+- `downgrade_write()` は write から read への移行であり、read から write への昇格ではない
