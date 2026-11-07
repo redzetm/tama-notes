@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1〜2.5.4を再整備、次は2.5.5）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1〜2.5.6を再整備、次は2.5.7）
 
 ## 2章の研究観点
 
@@ -1212,65 +1212,105 @@ Linux 6.18 LTSのソースを追う入口:
 
 #### 2.5.5 カーネルのページテーブル
 
-元の本文でとても大事なのは、マスタカーネルページグローバルディレクトリの考え方です。
-Linux はカーネル自身のためのページテーブル群を持ち、その高位側のマッピングを各プロセスのページテーブルへ反映させます。
-これにより、どのプロセスが動いていても、カーネルへ入ったときには必要なカーネル空間を参照できます。
+Linuxはカーネル自身が使うmappingを管理し、それを各アドレス空間のページテーブルから適切に利用できるようにします。従来の構成では、ユーザー側mappingは`mm_struct`ごとに異なる一方、カーネル側mappingの多くは共通の構造を通じて参照されてきました。ただし「全プロセスが同じマスタPGDを丸ごと使う」という意味ではありません。ユーザー用の最上位ページテーブルはアドレス空間ごとにあり、kernel mappingの共有・複製・同期方法はarchitectureと設定に依存します。
 
-これは設計としてかなり美しいです。
-ユーザー空間はプロセスごとに分離しつつ、カーネルが動くための土台は共通に保ちます。
-そのため syscall や例外や割り込みでカーネルに入ったとき、毎回まったく別世界を組み直す必要がありません。
-もちろん近年の KPTI のように、安全性のために細かな調整は入っていますが、
-大きな発想として「カーネル側マッピングを体系的に管理する」という骨格は今でも非常に重要です。
+起動時には、通常運用時のmappingが完成する前に、カーネル自身が次の初期化段階へ進むための小さなページテーブルが必要です。その後、利用可能な物理メモリ範囲、kernel image、direct map、固定用途のmappingなどを反映した構成へ移ります。さらに、x86のPTIが有効な場合、ユーザーmodeで使うページテーブルからkernel mappingの大部分を外すため、「全プロセスのページテーブルに同じkernel mappingが常に見える」という単純な説明は成立しません。
 
-原文の次の小節は、Linux 2.6/x86-32 の起動時ページテーブルと、RAM 容量に応じた最終 mapping を説明しています。
-この項番との対応は残しますが、RAM の境界値や同じ配置を Linux 6.18 の動作仕様として扱わないでください。
+```text
+起動初期: transitionに必要な限定的mapping
+                 │
+                 v
+通常運用: kernel image / direct map / 各種kernel mapping
+                 │
+                 ├── kernel実行用のpage table
+                 └── PTI有効時: user実行用の限定的page table
+```
+
+原文の2.5.5.1〜2.5.5.4はLinux 2.6/x86-32の起動経路と、RAM容量別のmappingを扱います。項番の対応は保ちますが、以下の説明ではLinux 6.18の一般化できる考え方を中心にし、旧カーネルの具体的なentry数や境界値を現行仕様として使いません。
 
 ##### 2.5.5.1 暫定的なカーネルページテーブル
 
-旧 x86-32 の説明では、起動初期に必要な範囲を identity mapping と kernel mapping の両方で一時的に参照できるようにします。
-Linux 6.18 でも early boot には段階的な page-table setup がありますが、構造や mapping 範囲はアーキテクチャと起動方式に依存します。
+起動直後のCPUは、まだ通常のkernel virtual address配置を前提にできません。x86-64では、初期段階で実行位置からの移行に必要なidentity mappingを含む暫定ページテーブルを使い、その後、kernelの仮想アドレスから実行するための初期ページテーブルへ切り替えてidentity mappingを外していきます。さらに通常のmemory mappingを構成する処理が続きます。
+
+これは起動時の制約を解くための段階的なmappingです。旧x86-32における「先頭8MiBを二つの仮想領域に重ねる」といった範囲や構成を、x86-64の固定動作と見なしてはいけません。必要なidentity mappingの範囲や解消時点は、boot protocol、kernel imageの配置、CPU起動経路などによって異なります。
 
 ##### 2.5.5.2 RAM が 896MB 未満の場合の最終 mapping
 
-896MB という境界は、旧 x86-32 の kernel virtual address space の分割に基づく値です。
-現行 x86-64 の direct map にそのまま適用せず、カーネル仮想空間の設計と実際の物理メモリ範囲を確認します。
+原文の前提では、`PAGE_OFFSET`から始まるkernel virtual addressが物理アドレスへ線形に対応し、RAM全体をその範囲に収められる場合を説明しています。`__va()`や`__pa()`のような変換も、そのarchitectureで対応するdirect mappingの範囲など前提を満たすときにのみ意味を持ち、任意の物理アドレスと任意のkernel pointer間の一般変換ではありません。
+
+Linux 6.18のx86-64でもdirect mapは重要ですが、その開始位置・物理範囲・paging level・large-page利用などは構成に応じて決まります。「RAMが896MiB未満ならこのentry構成」という境界は現行のモデルではありません。変換macro/helperの前提と、実際に対象範囲がdirect mapされているかを確認します。
 
 ##### 2.5.5.3 RAM が 896MB 以上 4096MB 未満の場合の最終 mapping
 
-この区分も旧 32bit x86 の highmem/lowmem の制約を説明するものです。
-Linux 6.18 のメモリ配置は固定の 896MB 区切りではなく、アーキテクチャ、設定、物理メモリ map に基づいて決まります。
+この区分は、旧32-bit x86のkernel virtual address空間が限られ、物理RAMの全体を同時にdirect mapできない状況を表しています。直接mappingできないhigh memoryは、カーネルが必要な範囲を別の仮想領域へmappingしてアクセスする必要がありました。ここでの主題はRAM容量の数値そのものではなく、仮想アドレス空間の上限が物理メモリの直接参照可能範囲を制約することです。
+
+Linux 6.18のx86-64では、この896MiBの境界を使いません。一方、アーキテクチャや構成によっては直接mappingに関する制約が残り、すべての物理ページが同一のkernel virtual addressから常時アクセスできるとは限りません。highmemの有無やdirect mapの限界は、対象architectureとconfigurationを個別に読みます。
 
 ##### 2.5.5.4 RAM が 4096MB 以上の場合の最終 mapping
 
-原文では PAE を使う 32bit x86 を前提としています。
-現行 Linux では、PAE の有無やこの RAM 容量区分を一般仕様とせず、対象アーキテクチャの物理アドレス幅と page-table setup を読みます。
+原文は、PAEを有効にした32-bit x86で、仮想アドレス幅は32-bitのまま物理アドレス幅を広げる場合を説明しています。PAEによりカーネルが4GiBを超える物理RAMを管理できても、単一の32-bit仮想アドレス空間から全RAMを同時にdirect mapできるわけではありません。これは「物理アドレス幅」と「仮想アドレス幅」が別の制約であることを示す例です。
+
+このRAM容量別の初期化手順や、掲載されているPAE page-table entryの構築コードは、Linux 2.6/x86-32の説明です。Linux 6.18のx86-64はlong modeのページング階層を使い、物理アドレス幅もCPU機能とkernel構成の範囲で扱います。現行のコードを追うときは、PAE用の旧手順を流用せず、実際の起動時page-table setupと物理範囲のmappingを見ます。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86-64の起動と暫定ページテーブルからの切り替え: `arch/x86/kernel/head_64.S`
+- x86-64の物理メモリmappingとpage-table初期化: `arch/x86/mm/init_64.c`
+- identity mappingの構築helper: `arch/x86/mm/ident_map.c`
+- 初期アドレス空間やkernel mappingを扱うgeneric MM: `mm/memory.c`、`include/linux/mm_types.h`
+- PTIのmapping構成とentry/exitの考え方: `Documentation/arch/x86/pti.rst`、`arch/x86/mm/pti.c`
+
+この小節で固定したいこと:
+
+- 起動時の暫定mappingと通常運用時のkernel mappingは、別の段階として追う
+- identity mappingは起動時に必要となる場合があるが、最終的なkernel mappingと同じものではない
+- direct mapは物理RAMの全アドレスを無条件にkernel pointerへ変換できることを意味しない
+- 896MiB/4GiBごとの区分とPAEの手順は旧x86-32固有の説明である
+- kernel mappingの共有方法はarchitecture・設定依存であり、PTIが有効な場合はuser mode用page tableから大部分が分離される
 
 #### 2.5.6 固定マップ用リニアアドレス
 
-元の本文には、RAM のうちどこが使えてどこが使えないか、カーネルをどこへ置くか、
-低位メモリと高位メモリをどう見るかといった話が出てきます。
-これは単なる歴史話ではなく、OS が現実の物理メモリ地形を相手にしていることを示しています。
+##### fixmapが解決する問題
 
-Linux 6.18 LTS をいま読むと、32 ビット時代の highmem 問題そのものは主役ではなくなりました。
-しかし、「物理メモリは一枚岩ではない」「全部を常に同じ形で直接見られるとは限らない」「ブート直後と通常運用時では見せ方が違う」
-という発想は今でも重要です。
+Linuxのfixmap（fixed mapping）は、コンパイル時に決まる仮想アドレスslotを用意し、起動時または実行時にそのslotへ物理アドレスを対応付ける仕組みです。仮想アドレスはindexから計算できるため、用途ごとに既知のアドレスを使えます。一方、そのslotが指す物理アドレスやprotection属性はmapping設定によって決まり、仮想アドレスから物理アドレスを単純な足し引きで求められるとは限りません。
 
-とくに x86_64 では direct map の理解が効いてきます。
-カーネルは物理メモリのかなり大きな範囲を、都合のよいカーネル仮想アドレス空間へ直接対応付けて扱います。
-この考え方を理解すると、ページディスクリプタ、ページアロケータ、スラブ、I/O マッピングなどの話がつながりやすくなります。
+概念としては、次の二つの段階を分けます。
 
-原文でいう固定マップ用リニアアドレスは、特定用途の物理ページへ決められたカーネル仮想アドレスからアクセスするための仕組みです。
-つまり、一般的な direct map とは別に、用途限定の mapping を用意します。
+```text
+固定slot index ── fix_to_virt(index) ──> 固定のkernel virtual address
+                                                │
+                                  __set_fixmap(index, phys, flags)
+                                                │
+                                                v
+                                         指定物理範囲
+```
 
-この発想は OS 実装でよく出てきます。
-ブート時の初期化、APIC や I/O 関連のレジスタ空間、テンポラリな高位メモリアクセスなど、
-何でもかんでも 1 つの単純な対応だけでは捌けません。
-そこで Linux は、固定アドレス窓や一時マップを用意して、必要な物理ページへ安全に触れるようにしています。
+Linux 6.18のx86では、`enum fixed_addresses`が用途別slotを定義し、`fix_to_virt()`がindexを仮想アドレスへ変換します。`set_fixmap()`系helperはそのslotのmappingと属性を設定し、`clear_fixmap()`は対応を解除する用途です。indexの値からアドレスを計算することと、そのアドレスに有効なmappingが設定済みであることは別の状態です。使用前に、設定箇所・寿命・並行実行時の規約を追います。
 
-Linux 6.18 LTS の最新コードでは細部は変わっていても、
-「カーネル仮想アドレス空間の中に、用途別の特別な窓を持つ」という発想は読み解きに役立ちます。
-UmuOS のような自作 OS でも、あとから device register や boot-time mapping を扱う段階で、この発想がかなり
-効いてきます。
+##### direct mapやioremapとの違い
+
+direct mapは物理RAMの範囲をカーネル仮想アドレスへ広く線形対応させるmappingです。fixmapは、それとは別に、限られた用途・slotに対してmappingを作る仕組みです。slotを利用する固定性は「物理アドレスが固定」という意味ではなく、「その用途が使う仮想アドレス位置が既知」という意味です。
+
+また、fixmapを一般的なデバイスmapping全体と同一視しません。通常のI/O領域をkernel virtual addressへmappingするには`ioremap()`等のI/O mapping APIが使われ、resourceの範囲やmemory attributeを考慮します。fixmapは早期boot時の一時mappingや、APICなど特定の用途で使われることがあります。どちらを使うかは呼び出し側の用途とAPI契約で判断し、MMIOを通常RAMのようなcache属性でmappingしてはいけません。
+
+早期起動では通常の`ioremap()`がまだ利用可能でない段階があるため、x86は`early_ioremap()`等のtemporary mappingを用意します。temporary mappingはその用途・期間に限って利用し、不要になれば解除します。これを恒久的なdirect mapや、任意の高位メモリへの汎用アクセス方法と混同しないことが重要です。
+
+原文にある`0xffffc000`、4GiB空間の末尾からslotを割り当てる配置、`FIX_IOAPIC_BASE_0`のindex値は、Linux 2.6/x86-32の例です。Linux 6.18でもfixmapの抽象はありますが、slot一覧、配置、定数値、利用条件はarchitectureとconfigurationに依存します。また、固定アドレスを使う主な理由を「ポインタ変数の間接参照を省いて高速化すること」と捉えるのは適切ではありません。用途が明確な仮想アドレスslotと、mappingの制御・初期化上の要件が中心です。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- 共通のindex・仮想アドレス変換とhelper: `include/asm-generic/fixmap.h`
+- x86のslot一覧・範囲・設定関数: `arch/x86/include/asm/fixmap.h`
+- 起動初期のtemporary mapping: `mm/early_ioremap.c`、`arch/x86/include/asm/fixmap.h`
+- 通常のI/O memory mappingとの比較: `arch/x86/mm/ioremap.c`、`include/linux/io.h`
+
+この小節で固定したいこと:
+
+- fixmapの仮想slotは既知の位置だが、物理アドレスとの対応は設定によって決まる
+- `fix_to_virt()`によるアドレス計算だけではmappingの有効性は保証されない
+- fixmap、direct map、`ioremap()`は用途とmapping範囲が異なる
+- MMIOでは用途に応じたI/O mapping APIとprotection/cache属性を使う
+- 旧x86-32の固定アドレスやindex値をLinux 6.18の共通仕様として扱わない
 
 #### 2.5.7 ハードウェアキャッシュと TLB の制御
 
