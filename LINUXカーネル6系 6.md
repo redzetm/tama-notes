@@ -23,10 +23,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」、6.4「統計情報の更新」および6.4.1〜6.4.4
-- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻補正、CPU時間会計、load average、perf、lockup watchdog
+- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」、6.4「統計情報の更新」および6.4.1〜6.4.4、6.5「ソフトウェアタイマと遅延関数」および6.5.1〜6.5.3
+- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻補正、CPU時間会計、load average、perf、lockup watchdog、timer wheel・hrtimer・sleep・busy-waitの使い分け
 - 6.18 LTSの視点: 旧式の全体割り込み・CPU別割り込みという固定図ではなく、共通時間管理層と各CPUのclockevent、設定に応じたtick運用を追う
-- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3、6.4、6.4.1〜6.4.4を作成。6.5以降は未着手
+- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3、6.4、6.4.1〜6.4.4、6.5、6.5.1〜6.5.3を作成。6.6以降は未着手
 
 ## 6章の見取り図
 
@@ -36,7 +36,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 | 6.2、6.2.1〜6.2.3 | 時間管理の仕組みとデータ構造 | 作成済み |
 | 6.3 | 時刻と日付の更新 | 作成済み |
 | 6.4、6.4.1〜6.4.4 | 統計情報、負荷、プロファイリング、watchdog | 作成済み |
-| 6.5、6.5.1〜6.5.3 | カーネルタイマ、待機、短時間遅延 | 未着手 |
+| 6.5、6.5.1〜6.5.3 | カーネルタイマ、待機、短時間遅延 | 作成済み |
 | 6.6、6.6.1〜6.6.4 | 時間管理関連のシステムコール | 未着手 |
 
 ## 6章を読むための基本モデル
@@ -549,6 +549,162 @@ NO_HZ_FULLのCPUではtickless動作との関係から、標準のwatchdog対象
 - `readprofile` / `/proc/profile` は歴史的な入口であり、現在の汎用的な性能解析はperfなどを使う
 - NMI watchdogはhard lockup検出の一方式であり、soft lockup検出や全アーキテクチャの共通仕様と混同しない
 
+## 6.5 ソフトウェアタイマと遅延関数
+
+カーネルが指定した期限後に処理を起こす仕組みには、用途の異なるタイマがあります。
+Linux 6.18 LTSでは、一般的なtimeoutにはtick基準のtimer wheel、細かな期限が必要な処理にはhrtimer、短いハードウェア待ちにはbusy-wait delay関数を使い分けます。
+タイマが「期限に達した」ことと、コールバックが正確な期限の瞬間に実行されることは同じではありません。
+スケジューリングや割り込み遅延、コールバック処理の都合により、実行時刻には遅れが生じ得ます。
+
+```text
+期限を登録する
+    |
+    +-- timer_list / timer wheel --> 一般的なtimeout。jiffies基準の粗い粒度
+    |
+    +-- hrtimer -------------------> 高分解能の期限。ktime_t基準
+    |
+    +-- delay関数 ----------------> 呼び出し側CPUをbusy-waitさせて短時間待つ
+```
+
+### 6.5.1 カーネルタイマ
+
+`struct timer_list` は、比較的粗い期限処理やtimeoutに使うカーネルタイマです。
+タイマは `jiffies` を基準に期限を登録し、期限が来るとコールバックを実行します。
+Linux 6.18 LTSのtimer wheelはCPUごとに管理され、期限の遠さに応じた複数段の配列で、多数のtimeoutを効率よく扱います。
+タイマを時刻順に走査する単一の巨大リストではありません。
+
+現在のAPIでは、タイマを `timer_setup()` で初期化し、`mod_timer()` などで登録・期限変更します。
+コールバックは `struct timer_list *` を受け取り、`from_timer()` / `timer_container_of()` などで包含するオブジェクトへ戻れます。
+原文にある `function(unsigned long data)` や `init_timer()` は古いAPIです。
+
+```c
+struct device_state {
+        struct timer_list timeout;
+};
+
+static void timeout_fn(struct timer_list *timer)
+{
+        struct device_state *state =
+                container_of(timer, struct device_state, timeout);
+
+        /* 非同期のtimeout処理。ここでsleepして待たない */
+}
+
+static void setup_timeout(struct device_state *state)
+{
+        timer_setup(&state->timeout, timeout_fn, 0);
+        mod_timer(&state->timeout, jiffies + msecs_to_jiffies(100));
+}
+```
+
+この例はAPI形状を示すための断片であり、実際のドライバではオブジェクト寿命・再登録・並行する停止処理を設計する必要があります。
+短いtimeout用途のtimer wheelは、期限ちょうどに実行される精密タイマではありません。
+期限の近いtimerは概ねtick粒度に基づいて処理され、CPU負荷やtick運用によってcallbackが遅れることがあります。
+
+#### タイマcallbackと実行文脈
+
+通常のtimer callbackはsoftirq系の実行文脈から呼ばれるため、通常のtaskのようにsleepして資源待ちすることはできません。
+callbackは必要な状態を記録し、処理がsleepを必要とするならworkqueueなどへ引き継ぎます。
+callback実行中に同じtimerを再登録する設計も可能ですが、停止・解放側との競合を明示的に扱わなければなりません。
+
+#### 取消しとオブジェクト寿命
+
+タイマを登録したままcallbackが参照するデータを解放すると、解放後にcallbackが実行される危険があります。
+単に `timer_delete()` を呼ぶだけでは、既に別CPUで実行中のcallbackが終わるのを待つ用途には不十分です。
+オブジェクトを解放する前に、必要な同期を取ってcallbackの実行と再登録を止めます。
+
+- `timer_delete()` は登録済みtimerを取り消すが、実行中callbackの完了待ちはしない
+- `timer_delete_sync()` は実行中callbackの完了も待つ。callbackと同じロックを保持したまま呼ぶとデッドロックし得る
+- `timer_shutdown_sync()` は終了処理向けに、同期してcallbackを止め、以後の再armも防ぐ
+
+どのAPIを使うかは、callbackが自分を再登録するか、他の経路が再登録するか、呼び出し側がどのロックを保持するかで決めます。
+timer APIを使うコードでは、「タイマを消した」だけでなく「callbackがもう対象データに触れない」ことを確認してから解放します。
+
+**ソースコードの入口**
+
+- `struct timer_list` と登録・削除API: `include/linux/timer.h`
+- timer wheelとcallback処理: `kernel/time/timer.c`
+- callbackの遅延実行との関係: `kernel/softirq.c`
+- 実行中callbackとの競合や終了順序: `Documentation/core-api/timer.rst`
+
+### 6.5.2 動的タイマの適用例：nanosleep()
+
+原文では `nanosleep()` を、`timer_list` と `schedule_timeout()` でtaskを起こす例として説明しています。
+Linux 6.18 LTSでは、`nanosleep()` や `clock_nanosleep()` はhrtimerを使う経路を持ちます。実際に高分解能で動作するかは、カーネル構成やclockeventなどの能力にも依存します。
+旧例は「期限を登録し、taskを休止し、期限またはsignalで起床する」という設計の理解に使い、現行の実装コードそのものとして読まないようにします。
+
+```text
+ユーザーtaskがnanosleepを要求
+             |
+             +--> 指定clockに対する期限を設定
+             |
+             +--> taskをsleep状態にし、schedulerへ実行権を渡す
+                      |
+          +-----------+----------------+
+          |                            |
+   期限満了で起床                signal等で中断
+          |                            |
+   sleep終了                      残り時間を返す場合がある
+```
+
+taskをsleepさせることで、その待ち時間中にCPUを別の実行可能taskへ割り当てられます。
+これは `udelay()` のように呼び出し側CPUを回し続けるbusy-waitとは根本的に異なります。
+
+ユーザー空間の `nanosleep()` は指定時間ちょうどにtaskが再実行されることを保証しません。
+期限満了後に起床可能になっても、実際にCPUを得る時刻はスケジューラとシステム負荷にも依存します。
+signalで中断された場合は `EINTR` と残り時間を扱う設計が必要です。
+
+**ソースコードの入口**
+
+- 高分解能sleepとhrtimer: `kernel/time/hrtimer.c`
+- POSIX時計・timer・sleep syscall: `kernel/time/posix-timers.c`
+- `schedule_timeout()` を使うjiffies単位のカーネル待機: `kernel/time/sleep_timeout.c`
+- hrtimerの設計: `Documentation/timers/hrtimers.rst`
+
+### 6.5.3 遅延関数
+
+`udelay()`、`ndelay()`、`mdelay()` は、呼び出し側のCPUをbusy-waitさせて短い時間を待つ関数です。
+デバイスのレジスタ操作後に数マイクロ秒だけ待つなど、sleepできない文脈で短時間待機が必要な場合に使います。
+この間、CPUは他のtaskを実行できないため、長い時間の待機に使うとCPU時間を浪費します。
+
+sleep可能な文脈で数ミリ秒以上待つ場合は、通常 `msleep()` や `usleep_range()` のようなsleep関数を検討します。
+Linux 6.18では `fsleep()` もあり、待機時間に応じて短いbusy-wait、`usleep_range()`、`msleep()` の仕組みを選びます。
+どのAPIが適切かは、呼び出し文脈、許容する誤差、CPUを占有できる時間で判断します。
+
+| API | 待ち方 | 主な用途と制約 |
+|---|---|---|
+| `ndelay()` / `udelay()` | busy-wait | 極短時間。呼び出しCPUを占有する |
+| `mdelay()` | busy-wait | 原則として避け、sleep可能ならsleep APIを優先する |
+| `usleep_range()` | taskをsleep | マイクロ秒〜短い待機。範囲を渡してtimer coalescingの余地を与える |
+| `msleep()` | taskをsleep | ミリ秒以上の待機。精密な期限実行ではない |
+| `fsleep()` | 時間に応じて選択 | 使える文脈でbusy-waitとsleepを切り替える |
+
+```text
+短いデバイス待ち、sleep不可   -> udelay() / ndelay()
+sleep可能な短時間待ち         -> usleep_range()
+比較的長い待ち                -> msleep()
+待ち時間に応じた汎用選択      -> fsleep()
+```
+
+busy-wait関数は較正値やアーキテクチャ依存の実装に基づく近似です。
+高負荷・割り込み・仮想化などで指定時間を厳密な実時間として保証するものではありません。
+また、`udelay()` に数ミリ秒以上を指定すると精度やオーバーフローの問題があり得るため、カーネルのAPI説明と呼び出し条件を確認します。
+
+**ソースコードの入口**
+
+- delay・sleep APIの宣言と `fsleep()`: `include/linux/delay.h`
+- x86のdelay実装: `arch/x86/lib/delay.c`
+- sleepとdelay APIの説明: `Documentation/timers/`、`Documentation/driver-api/`
+
+### 6.5で区別しておきたいこと
+
+- `timer_list` は一般的なtimeout向けであり、期限ちょうどの実行を保証する高精度タイマではない
+- hrtimerは高分解能の期限管理に使われ、timer wheelとはデータ構造・用途が異なる
+- callbackは非同期に実行され、通常のtimer callbackからsleepしてはならない
+- callbackを含むデータの解放では、timerを取り消すだけでなく実行中callbackの完了と再armの有無を考慮する
+- `nanosleep()` はtaskをsleepさせ、`udelay()` はCPUをbusy-waitさせる
+- 高分解能の期限であっても、期限満了時にユーザーtaskが即座に実行される保証とは異なる
+
 ## Linux 6.18 LTSのソースを追う入口
 
 - 時計源の選択・登録: `kernel/time/clocksource.c`
@@ -560,6 +716,9 @@ NO_HZ_FULLのCPUではtickless動作との関係から、標準のwatchdog対象
 - x86 local APICタイマ: `arch/x86/kernel/apic/apic.c`
 - i8253/PIT: `drivers/clocksource/i8253.c`
 - RTCクラス: `drivers/rtc/`
+- timer wheel: `kernel/time/timer.c`
+- hrtimer: `kernel/time/hrtimer.c`
+- delay / sleep API: `include/linux/delay.h`
 
 ## UmuOSでの観測上の注意
 
@@ -568,3 +727,4 @@ NO_HZ_FULLのCPUではtickless動作との関係から、標準のwatchdog対象
 - `/proc/interrupts` はCPUごとの割り込み状況を観測する手掛かりだが、特定デバイスがclocksourceとして使われていることまでは示さない
 - `/proc/timer_list` の内容はカーネル構成や権限に依存する。存在しない場合もある
 - 仮想マシンでは、ゲストから見えるタイマデバイスが物理ホストの実デバイスと一致するとは限らない
+- タイマ期限の測定とcallbackが実行される時刻は別であり、負荷・割り込み遅延・taskスケジューリングの影響を受ける
