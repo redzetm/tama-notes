@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」
-- 今回の主題: vmalloc領域の仮想address space上の位置、direct map・vmemmap・module/fixmap等との関係、architecture依存のlayout
-- 現在の進捗: 8.1〜8.2.15、8.3、8.3.1を作成済み。8.3.2以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」、8.3.2「非連続メモリ領域のディスクリプタ」
+- 今回の主題: Linux 6.18の`vm_struct`と`vmap_area`の責務分担、descriptor fieldと仮想領域管理の関係
+- 現在の進捗: 8.1〜8.2.15、8.3〜8.3.2を作成済み。8.3.3以降は未着手
 
 ## 第8章の見取り図
 
@@ -59,7 +59,7 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.15 | mempoolの予約・枯渇時動作 | 作成済み |
 | 8.3 | 非連続ページを仮想アドレス上で連続させる領域管理の概観 | 作成済み |
 | 8.3.1 | vmalloc領域の仮想アドレス空間 | 作成済み |
-| 8.3.2 | 非連続メモリ領域を表すdescriptor | 未着手 |
+| 8.3.2 | `vm_struct`と`vmap_area`による領域・mapping管理 | 作成済み |
 | 8.3.3〜8.3.4 | 領域の割り当てと解放 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1712,3 +1712,55 @@ vmalloc領域の位置を調べる際は、次の順で確認します。
 - arm64の`VMALLOC_START`/`VMALLOC_END`: `arch/arm64/include/asm/pgtable.h`
 - 32-bit x86 layout（旧版の説明との限定比較）: `arch/x86/include/asm/pgtable_32_areas.h`
 - vmalloc virtual rangeのgeneric management: `mm/vmalloc.c` (`__vmalloc_node_range_noprof()`)
+
+### 8.3.2 非連続メモリ領域のディスクリプタ
+
+Linux 6.18でvmalloc系領域を追うときは、`vm_struct`だけを旧版の`vmlist` descriptorと同じものとして捉えず、仮想アドレス範囲の管理を担う`vmap_area`との組で見ます。大づかみには、`vm_struct`がmappingの属性や関連ページを記録し、`vmap_area`がkernel virtual address space内の予約範囲を管理します。
+
+```text
+vmap area management
+  使用中の仮想アドレス範囲 [va_start, va_end)
+           |
+           +-- vmap_area
+                 +-- rb/list links: address range管理
+                 +-- vm ----------> vm_struct
+                                      +-- addr / size / requested_size
+                                      +-- flags / caller
+                                      +-- pages / nr_pages
+                                      +-- phys_addr / page_order (構成依存)
+```
+
+#### `vm_struct`: mappingの属性と実体への参照
+
+Linux 6.18の`struct vm_struct`には、次のような情報があります。mapping種別や使い方により、すべてのfieldがすべての領域で同じ意味・有効性を持つわけではありません。
+
+| field | 役割 |
+|---|---|
+| `addr` | 仮想領域の開始アドレス |
+| `size` | 管理対象領域のサイズ。guard page等を含む場合がある |
+| `requested_size` | 呼び出し側が要求したサイズ。rounded sizeや管理用sizeと区別する |
+| `flags` | `VM_ALLOC`、`VM_MAP`、`VM_IOREMAP`等、領域の用途・状態 |
+| `pages` | mappingに関連する`struct page *`配列。外部pageを使うmappingなどでは常に同じ所有権とは限らない |
+| `nr_pages` | 関連するpage数 |
+| `phys_addr` | ioremap等、物理I/O範囲を扱う場合の物理address情報 |
+| `caller` | 領域を作成した呼び出し元の追跡情報 |
+| `page_order` | huge-vmap対応構成でのmapping page order情報 |
+
+`flags`は旧来の`VM_ALLOC`、`VM_MAP`、`VM_IOREMAP`といった種別を含みますが、現行のflag群にはguardの有無、KASANやpermission処理、page ownership等に関係する追加flagもあります。flag名だけでpageの確保元や解放責務を決めつけず、生成・破棄経路と併せて読む必要があります。たとえば`VM_MAP_PUT_PAGES`はunmap時にpage群を返す扱いに関連し、mapping descriptorとpage ownershipは同じ話ではありません。
+
+`size`と`requested_size`も区別が必要です。`__get_vm_area_node()`は要求サイズを保存した後、page granularityにround upし、guardを使う場合は管理範囲へ追加のpageを含めます。従ってdescriptorの管理sizeを、利用側がアクセスしてよいbyte数として扱ってはいけません。
+
+#### `vmap_area`: 仮想address intervalの管理
+
+`struct vmap_area`は`va_start`と`va_end`で仮想address intervalを表し、address順のred-black treeとlistによるvmap管理に参加します。空き領域側のtreeでは`subtree_max_size`を用いて大きさに合う範囲の探索を助け、busy側のtreeではunion領域に対応する`vm_struct *`を保持します。したがって`vmap_area`は物理page配列を記録するdescriptorではなく、仮想address rangeの予約・検索・解放を支える管理nodeです。
+
+`vm_struct`には互換性や初期化時の仕組みに関係する`next` fieldも残っていますが、旧版のように通常の全vmalloc領域を単一の`vmlist` chainで検索・保護する、というモデルが現行実装の中心ではありません。領域検索は`find_vmap_area()`等を通じてvmap area管理を使います。descriptorの構造を読むときは、`vm_struct`の存在だけで全管理アルゴリズムを推測しないようにします。
+
+`get_vm_area()`系は、指定された範囲から仮想領域を予約して`vm_struct`を返します。`find_vm_area(addr)`は指定された開始addressに対応するareaを探し、その`vmap_area`に結びついた`vm_struct`を返します。返されたdescriptorの有効期間には同期上の前提があるため、lookup後に任意の期間保持してよいとは限りません。公開APIのdocument commentが要求するlocking/lifetime条件を確認します。
+
+**Linux 6.18のソースを追う入口**
+
+- `vm_struct`、`vmap_area`、VM flags: `include/linux/vmalloc.h`
+- descriptor初期化、guard size、`get_vm_area()`、lookup: `mm/vmalloc.c` (`__get_vm_area_node()`、`setup_vmalloc_vm()`、`find_vm_area()`)
+- busy/free virtual intervalのtree/list管理: `mm/vmalloc.c` (`alloc_vmap_area()`、`find_vmap_area()`、`free_vmap_area()`)
+- page arrayとmapping flagsの設定・解放: `mm/vmalloc.c` (`__vmalloc_node_range_noprof()`、`vmap()`、`__vunmap()`)
