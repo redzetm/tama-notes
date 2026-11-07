@@ -23,16 +23,16 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 
 ## 今回扱う範囲
 
-- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」
-- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界
-- 現在の進捗: 7.1、7.1.1、7.1.2を作成。次は7.2「スケジューリングアルゴリズム」を節単位で扱う
+- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」
+- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則
+- 現在の進捗: 7.1〜7.2.2を作成。次は7.3「スケジューラが使用するデータ構造」を節単位で扱う
 
 ## 7章の見取り図
 
 | 原文の節 | 研究する主題 | 進捗 |
 |---|---|---|
 | 7.1、7.1.1〜7.1.2 | 方針、プリエンプション、実行時間配分 | 作成済み |
-| 7.2、7.2.1〜7.2.2 | 通常taskとリアルタイムtaskのスケジューリング | 未着手 |
+| 7.2、7.2.1〜7.2.2 | 通常taskとリアルタイムtaskのスケジューリング | 作成済み |
 | 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 未着手 |
 | 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 未着手 |
 | 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 未着手 |
@@ -173,6 +173,101 @@ fair classの調整値を「各taskに保証されるクォンタム」と解釈
 - taskの起床、runqueueへの登録、再スケジュール要求、context switchは一つの瞬間に起こる同義語ではない
 - 通常taskに一律の固定クォンタムが配られるという前提でLinux 6.18のfair classを読まない
 
+## 7.2 スケジューリングアルゴリズム
+
+Linux 6.18のschedulerは、全taskを一つの巨大なリストから同じ数値で比較するのではなく、CPUごとのrunqueueとスケジューリングクラスを使って次のtaskを選びます。実行可能taskが存在しないCPUでは、そのCPUのidle taskが実行されます。idle taskは「通常taskがいない状態」でもCPUを表現するために必要ですが、ユーザーが設定する `SCHED_IDLE` policyとは異なります。
+
+原文のLinux 2.6説明では、通常task向けのactive/expired array、動的優先度、クォンタムと、リアルタイムtask向けFIFO/RRを対比します。このうちFIFO/RRの基本的な違いは現行Linuxにも残りますが、active/expired arrayや通常taskの動的優先度計算は6.18のfair schedulerを示すものではありません。
+
+```text
+CPUごとのrunqueue
+       |
+       +--> stop class:     stop task（通常のユーザーpolicyではない）
+       +--> deadline class: SCHED_DEADLINE
+       +--> RT class:       SCHED_FIFO / SCHED_RR
+       +--> fair class:     SCHED_NORMAL / SCHED_BATCH / SCHED_IDLE
+       +--> idle task:      他に実行可能taskがない場合
+```
+
+上図はクラス選択の考え方を示す概念図です。stop classはCPU停止などカーネル内部の用途で使われ、通常のユーザーpolicyとして設定するものではありません。また、クラス選択の後には各クラス固有のrunqueue・優先度規則が働きます。
+
+### 7.2.1 従来型プロセスのスケジュール
+
+ここでいう「従来型プロセス」は原文の用語であり、Linux 6.18の専用scheduler class名ではありません。現行の通常taskはfair classで扱われ、`SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` などのpolicyがこのクラスに対応します。
+
+#### fair classとEEVDF
+
+fair classは、実行可能なtask間でCPU時間を重み付きに配分しようとします。通常policyではnice値から得られる重みが配分に関係し、nice値が低い（優先度が高い）taskは、同じ条件のnice値が高いtaskより大きなCPU shareを受けます。ただしnice値は、別クラスのtaskを追い越すための全体優先度ではありません。
+
+Linux 6.18のfair classではEEVDF (Earliest Eligible Virtual Deadline First) に基づく選択が使われます。概念的には、taskが公平なCPU shareに対して実行不足かどうかをlagで表し、実行可能と判断されたtaskの仮想deadlineを比較して選択します。短いservice sliceを要求するtaskは仮想deadlineが早くなり得るため、応答性を意識した選択にもつながります。
+
+```text
+fair class内の概念的な選択
+実行量と重みを会計
+        |
+        +--> 公平なshareに対するlagを評価
+        |
+        +--> eligibleなtaskのvirtual deadlineを比較
+                    |
+                    +--> 次に実行するtaskを選択
+```
+
+これは選択原理を示す図で、`vruntime`、lag、virtual deadlineを単純な一つの値として同一視するものではありません。具体的な更新・木構造・起床taskの扱いは `kernel/sched/fair.c` とEEVDF設計資料で追います。
+
+したがって、原文の次の要素を現行の通常taskの実装として読み替えないようにします。
+
+- 静的優先度100〜139をそのまま内部の優先度範囲として使う説明
+- 動的優先度を平均休止時間から算出し、対話型taskを判定する説明
+- 基礎クォンタムの計算式
+- 実行可能taskをactive/expiredの二つのarrayに分け、epoch切替で管理する説明
+
+nice値自体はLinux 6.18でもユーザー向け設定として残ります。しかし、nice値から2.6時代の静的優先度や基礎クォンタムを計算し、それをそのまま現行の選択順序とみなすことはできません。
+
+### 7.2.2 リアルタイムプロセスのスケジュール
+
+LinuxのRT classは `SCHED_FIFO` と `SCHED_RR` を扱い、通常のfair taskより高いscheduler class優先順位で選択されます。RT priorityは1〜99の範囲で、値が大きいほど高優先度です。RT class内では高いRT priorityの実行可能taskが先に選ばれます。同一RT priority内の並び方はpolicyによって異なります。
+
+| policy | 同一RT priorityのtask間の基本動作 |
+|---|---|
+| `SCHED_FIFO` | 実行中taskは、より高いRT priorityのtaskにプリエンプトされるか、自分でblock/yieldするなどの理由がない限り実行を続ける。同じpriorityの後続taskだけを理由に通常のタイムスライスで交代しない |
+| `SCHED_RR` | FIFOの規則を基礎に、同じpriorityの実行可能task間でRR timeslice満了時に実行機会を回す |
+
+`SCHED_RR` のtimesliceはRT priorityそのものではなく、同一priorityのRT task間で交代するための量子です。Linuxでは `sched_rr_get_interval()` による照会や、構成に応じた `sched_rr_timeslice_ms` 設定が関係します。これはfair classの通常taskに一律に配られる固定クォンタムとは別の仕組みです。
+
+#### `SCHED_DEADLINE` は別のclass
+
+Linux 6.18の `SCHED_DEADLINE` はRT classのpriority 1〜99を使うpolicyではなく、deadline classで扱われます。taskはruntime、deadline、periodを指定し、schedulerはEDF (Earliest Deadline First) とCBS (Constant Bandwidth Server) を組み合わせて実行可能性と帯域を管理します。
+
+```text
+runtime: 1 period内に割り当てられる実行予算
+deadline: period開始から相対的に期限を置く時間
+period:   実行予算を補充する周期
+```
+
+概念的には、期限の早いdeadline taskが先に選ばれ、runtimeを使い切ったtaskは次の補充まで実行を制限されます。実際に期限を守れるかはCPU容量、task間の要求、affinity、admission controlなどに依存します。パラメータを指定しただけで、任意の負荷下における実時間完了が保証されるわけではありません。
+
+#### RT taskを使うときの注意
+
+高優先度のFIFO taskがCPU上で実行可能なまま回り続けると、通常taskや低優先度taskが実行機会を得にくくなることがあります。RT bandwidth throttlingなどの保護機構はありますが、RT schedulingはシステム全体の応答性に影響します。特権の必要性、実行時間、block/yield条件、CPU affinity、watchdogやRT bandwidth設定を確認せず、実機で安易に優先度を上げるべきではありません。
+
+deadline policyにも利用可能な帯域や受け入れ可能性の制約があります。schedulerの期限計算は、ハードリアルタイム保証を無条件に作り出すものではなく、カーネル構成・CPU数・負荷と要求パラメータを含めて検討する必要があります。
+
+**ソースコードの入口**
+
+- class間の選択とpolicy設定: `kernel/sched/core.c`
+- fair/EEVDF: `kernel/sched/fair.c`、`Documentation/scheduler/sched-eevdf.rst`
+- FIFO/RR: `kernel/sched/rt.c`
+- EDF/CBSとdeadline bandwidth: `kernel/sched/deadline.c`、`Documentation/scheduler/sched-deadline.rst`
+- RT bandwidth設定: `Documentation/scheduler/sched-rt-group.rst`
+
+### 7.2で区別しておきたいこと
+
+- active/expired arrayはLinux 2.6の通常task管理構造であり、Linux 6.18のfair classの構造ではない
+- `SCHED_FIFO` / `SCHED_RR` はRT class、`SCHED_DEADLINE` は別のdeadline classに属する
+- RT priorityの大小とnice値は別の尺度であり、数値を直接比較しない
+- `SCHED_RR` のtimesliceと通常taskのCPU share・実行粒度は別の概念
+- deadline schedulingは設定だけで期限達成を保証せず、帯域の admission controlと実システム条件が関係する
+
 ## Linux 6.18 LTSのソースを追う入口
 
 - scheduler共通処理: `kernel/sched/core.c`
@@ -181,4 +276,4 @@ fair classの調整値を「各taskに保証されるクォンタム」と解釈
 - deadline class: `kernel/sched/deadline.c`
 - task構造とスケジューリング属性: `include/linux/sched.h`
 - EEVDF設計資料: `Documentation/scheduler/sched-eevdf.rst`
-
+- deadline scheduling設計資料: `Documentation/scheduler/sched-deadline.rst`
