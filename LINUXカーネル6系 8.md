@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」
-- 今回の主題: `alloc_pages()`系API、GFP flags、orderと物理連続性、fast/slow allocation path、割り当てと解放の対応
-- 現在の進捗: 8.1〜8.1.5を作成済み。8.1.6以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」
+- 今回の主題: `alloc_pages()`系API、GFP flags、割り当て経路、高位メモリと一時kernel mapping
+- 現在の進捗: 8.1〜8.1.6を作成済み。8.1.7以降は未着手
 
 ## 第8章の見取り図
 
@@ -38,7 +38,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1.2〜8.1.3 | NUMA、メモリゾーン | 作成済み |
 | 8.1.4 | 空きページのwatermarkとGFP allocation context | 作成済み |
 | 8.1.5 | ページフレームの割り当て・解放API | 作成済み |
-| 8.1.6〜8.1.9 | highmem、buddy、per-CPU cache、zone allocator | 未着手 |
+| 8.1.6 | HIGHMEMとkernel temporary mapping | 作成済み |
+| 8.1.7〜8.1.9 | buddy、per-CPU cache、zone allocator | 未着手 |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
@@ -452,3 +453,71 @@ static int allocate_one_page(void)
 - 回収を含むslow path: `mm/page_alloc.c` (`__alloc_pages_slowpath()`)
 - allocation APIの使い分け: `Documentation/core-api/memory-allocation.rst`
 - DMA buffer: `Documentation/core-api/dma-api.rst`
+
+### 8.1.6 高位メモリのページフレームのカーネルマッピング
+
+HIGHMEMは、物理ページの全てをkernelの恒久的な仮想mappingに置けない構成で、必要なページだけを一時的にkernel address spaceへmappingする仕組みです。これは主に一部の32-bit architectureの制約に関係し、Linux 6.18の全環境に存在する一般的なメモリ領域ではありません。x86-32でのカーネル仮想空間の分割や、896 MiBといった境界は特定構成の歴史的な例であり、現在の全architectureへ適用できません。
+
+```text
+物理ページ
+    |
+    +-- permanent/direct mappingがあるページ
+    |       kernel addressから継続してアクセス可能
+    |
+    +-- HIGHMEM page（CONFIG_HIGHMEM等の構成時）
+            |
+            +-- kmap_local_page()で短時間mapping
+                    |
+                    +-- アクセス終了後にkunmap_local()
+```
+
+HIGHMEMのページでも`struct page`を通じた管理は可能ですが、ページ内容を指すkernel virtual addressが常に存在するわけではありません。そのため、ページ記述子を返す`alloc_pages()`と、kernel virtual addressを返す`__get_free_pages()`は区別します。後者は返すべき直接参照可能なアドレスが必要なので、HIGHMEM pageを使う方法にはなりません。
+
+#### 短期アクセスには`kmap_local_page()`
+
+Linux 6.18では、ページを短時間だけkernelから参照する場合、`kmap_local_page()`またはfolioの一部を扱う`kmap_local_folio()`を使います。mappingしたアドレスは、同じ実行context内で利用し、使い終えたら対応する`kunmap_local()`へ渡します。
+
+```c
+#include <linux/errno.h>
+#include <linux/highmem.h>
+#include <linux/mm.h>
+#include <linux/string.h>
+
+static int copy_page_prefix(struct page *page, void *dst, size_t len)
+{
+        void *addr;
+
+        if (!dst || len > PAGE_SIZE)
+                return -EINVAL;
+
+        addr = kmap_local_page(page);
+        memcpy(dst, addr, len);
+        kunmap_local(addr);
+        return 0;
+}
+```
+
+この例は1ページの先頭から指定範囲を読み出し、mappingを得ている間だけページ内容に触れます。`page`の所有権・参照を呼び出し側が適切に保持していることが前提です。また、`dst`が指す領域を呼び出し側が書き込み可能であることも必要です。
+
+`kmap_local_page()`のmappingはthread-localで、返されたアドレスを別threadへ渡したり、mappingを取得したcontext以外から参照したりしてはいけません。複数のlocal mappingをネストする場合は、stack状に順序を守ってunmapします。mapping中にpreemptionが無効になる、あるいはpage faultが常に無効になると仮定しないでください。これらの制御が別途必要な処理では、明示的に適切な同期・context制御を行います。
+
+`kmap_atomic()`と`kmap()`は既存コードで見かけますが、Linux 6.18のdocumentationではdeprecatedとされ、新しいコードでは`kmap_local_page()`等を優先します。過去の`kmap_atomic()`にはpreemptionやpage faultを制御する副作用があったため、単純置換でその前提を失わないよう、呼び出し元のcontext要件も調べます。
+
+#### 一時mappingと`vmalloc` mappingは別の用途
+
+`kmap_local_page()`は単一ページ等の短期アクセスに適したlocal mappingです。複数ページをまとめた連続kernel virtual rangeが必要な場合は、物理ページが非連続でも仮想的に連続なmappingを作る`vmap()`等が関係します。これは8.3の非連続メモリ領域の話題につながります。どちらも「全物理メモリを恒久的に直接mappingする」仕組みではありません。
+
+| 手段 | 主な用途 | mappingの性質 |
+|---|---|---|
+| direct/permanent mapping | 常時kernelからアクセスする通常ページ | 既存のkernel mappingを利用 |
+| `kmap_local_page()` / `kmap_local_folio()` | ページ内容への短時間アクセス | 取得したthread/context内でのみ有効 |
+| `vmap()` | 複数の物理ページを連続kernel virtual rangeへmap | mappingの作成・解放に共有管理が関係する |
+
+64-bit architectureでは全RAMを恒久mappingできる構成が多く、`kmap_local_page()`がdirect mapping addressを返して実際のtemporary mapを必要としない場合があります。それでも、コードをHIGHMEM対応に保つためにAPIを一貫して使うことが有効です。mapping APIがno-opになる可能性は、そのアドレスの寿命やcontext制約まで無くすことを意味しません。
+
+**Linux 6.18のソースを追う入口**
+
+- `kmap_local_page()`、`kmap_local_folio()`、deprecated APIの注記: `include/linux/highmem.h`
+- HIGHMEMの概念とmappingの制約: `Documentation/mm/highmem.rst`
+- `CONFIG_HIGHMEM`のarchitecture依存: `arch/*/Kconfig`、`include/linux/gfp_types.h`
+- 非連続ページ群のvirtual mapping: `mm/vmalloc.c`、`Documentation/core-api/mm-api.rst`
