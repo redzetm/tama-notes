@@ -23,10 +23,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」
-- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻の進行・補正
+- 原文対応: 6.1「クロック回路とタイマ回路」および6.1.1〜6.1.6、6.2「時間管理の仕組み」および6.2.1〜6.2.3、6.3「時刻と日付の更新」、6.4「統計情報の更新」および6.4.1〜6.4.4
+- 今回の主題: 時刻を測るclocksource、期限にイベントを起こすclockevent、timekeeping、jiffies、CPUごとのtickとNO_HZ、時刻補正、CPU時間会計、load average、perf、lockup watchdog
 - 6.18 LTSの視点: 旧式の全体割り込み・CPU別割り込みという固定図ではなく、共通時間管理層と各CPUのclockevent、設定に応じたtick運用を追う
-- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3を作成。6.4以降は未着手
+- 現在の進捗: 6.1、6.1.1〜6.1.6、6.2、6.2.1〜6.2.3、6.3、6.4、6.4.1〜6.4.4を作成。6.5以降は未着手
 
 ## 6章の見取り図
 
@@ -35,7 +35,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 | 6.1、6.1.1〜6.1.6 | クロック回路とタイマ回路 | 作成済み |
 | 6.2、6.2.1〜6.2.3 | 時間管理の仕組みとデータ構造 | 作成済み |
 | 6.3 | 時刻と日付の更新 | 作成済み |
-| 6.4、6.4.1〜6.4.4 | 統計情報、負荷、プロファイリング、watchdog | 未着手 |
+| 6.4、6.4.1〜6.4.4 | 統計情報、負荷、プロファイリング、watchdog | 作成済み |
 | 6.5、6.5.1〜6.5.3 | カーネルタイマ、待機、短時間遅延 | 未着手 |
 | 6.6、6.6.1〜6.6.4 | 時間管理関連のシステムコール | 未着手 |
 
@@ -424,6 +424,130 @@ clocksource ──> カーネルtimekeeping ──> CLOCK_REALTIME等
 - NTPなどによる時刻補正は、壁時計の進み方・オフセットの調整であり、ハードウェアカウンタそのものの書き換えではない
 - `CLOCK_REALTIME` は補正・設定で変化し得るため、経過時間の測定には時計の性質を確認する
 - RTCはシステム時刻の初期化や定期的な書き戻しに関係するが、稼働中のtimekeepingそのものではない
+
+## 6.4 統計情報の更新
+
+時間管理の仕組みは、時刻や期限だけでなく、タスクやCPUがどの状態でどれだけ動作したかを把握するためにも使われます。
+原文では周期tickごとに実行中タスクの時間を加算する構成が中心ですが、Linux 6.18 LTSでは、統計の種類やカーネル構成によってtickベースの会計とより細かな時間会計が使い分けられます。
+
+```text
+実行中タスク / 割り込み / idle
+              |
+              +--> task・CPUのCPU時間会計 ------> /proc/<pid>/stat, /proc/stat
+              |
+              +--> runnable等の状態 ------------> load average
+              |
+              +--> PMU / software event sampling -> perf
+              |
+              +--> hrtimer / perf watchdog --------> soft / hard lockup検出
+```
+
+各統計の意味と更新方法は同一ではありません。
+`/proc/stat` のCPU時間、個々のtaskのuser/system time、load average、perfのサンプルは、それぞれ別の量を表します。
+
+### 6.4.1 ローカルCPUとタスクの統計情報
+
+カーネルはユーザー空間のtaskやCPU単位の実行時間を会計します。
+taskのuser timeとsystem timeは、ユーザーモードとカーネルモードで実行したCPU時間を表し、CPU単位の統計にはさらにidle、iowait、IRQ、softirq、stealなどの分類があります。
+これらの値は `/proc/<pid>/stat`、`/proc/stat` や、会計設定に応じたインターフェースから観測できます。
+
+原文の `update_process_times()` のようにtick割り込みで時間を加算するだけが唯一の方法ではありません。
+Linuxにはtickベースの会計に加え、構成に応じたvirtual CPU time accountingやIRQ time accountingなどがあり、tickless動作とも両立させる必要があります。
+また、IRQやsoftirqの実行時間をtaskのsystem timeとどう分けるかにも設定や会計経路が関係します。
+したがって、統計値を読むときは、単位・対象（taskかCPUか）・分類方法を確認します。
+
+`scheduler_tick()` はスケジューラの周期的な処理を起動する経路の一つですが、「タイムスライスをtickごとに単純減算する処理」と現代のスケジューラ全体を同一視しないようにします。
+スケジューリングの判断と実行時間の会計は関連しますが、別の責務です。
+
+**ソースコードの入口**
+
+- task / CPU時間の会計: `kernel/sched/cputime.c`
+- CPU統計の公開・集計: `kernel/sched/`、`fs/proc/stat.c`
+- tickからスケジューラへの通知: `kernel/sched/core.c`
+- CPU時間の分類名: `include/linux/kernel_stat.h`
+
+### 6.4.2 システム負荷とload average
+
+`uptime` や `/proc/loadavg` が示すload averageは、CPU使用率そのものではありません。
+Linuxでは、実行中または実行可能なtaskと、uninterruptible sleep状態のtaskの数をもとにした負荷の移動平均を算出します。
+そのため、CPUを実行中のtaskが少なくても、I/O完了などを待つuninterruptible状態のtaskが多ければload averageは高くなることがあります。
+
+load averageは典型的には1分・5分・15分相当の時間窓で平滑化された値です。
+値は活動中task数の平均に基づくため、CPUコア数で正規化した使用率ではありません。
+単一CPU環境ではload average 1がCPUを完全に使うtask一つと直感的に近い場合がありますが、SMP環境では値をCPU数や実行可能task数と比較して解釈する必要があります。
+I/O待ちが混ざるため、CPU飽和の判断にはCPU使用率や実行キューなども合わせて確認します。
+
+現在の実装は、全CPUのtask数を毎tick単純に走査するのではなく、CPUごとの変化を集約し、NO_HZ環境で失われる周期サンプルも考慮します。
+原文の `calc_load()` を読むときは、load averageの概念の入口とし、6.18の実装は `kernel/sched/loadavg.c` から追います。
+
+**観測上の手掛かり**
+
+- `/proc/loadavg`: load averageと実行中 / 総task数など
+- `uptime`: load averageの表示
+- `/proc/stat`: CPU時間分類
+- `top` や `vmstat`: load averageとCPU/I/O状態を合わせて観測
+
+### 6.4.3 カーネルコードのプロファイリング
+
+原文の `readprofile` は、周期tick時の命令位置をサンプリングし、カーネル内のホットスポットを推定する方式を説明しています。
+Linux 6.18 LTSで性能解析を行う際は、通常 `perf` とperf eventsを入口にします。
+perfはCPUのperformance monitoring unit（PMU）を使うhardware eventや、ソフトウェアイベントをサンプリング・集計し、ユーザー空間とカーネル空間を含む解析を行えます。
+
+サンプリング結果は確率的な観測です。高頻度サンプリングはオーバーヘッドを増やし、得られるサンプル数はCPU・イベント・カーネル構成などに左右されます。
+測定対象とイベントを明示し、十分な期間・負荷で比較する必要があります。
+perfの利用可否や収集できる情報は `perf_event_paranoid`、capability、カーネル構成などのアクセス制御にも影響されます。
+
+```text
+PMU / software event
+        |
+        +--> perf_event kernel subsystem
+                    |
+                    +--> sampling buffer / counters
+                                  |
+                                  +--> perf report等で集計・解析
+```
+
+`/proc/profile` や `readprofile` を現在の代表的なプロファイリング手段として前提にせず、目的に応じて `perf record` / `perf report`、tracepoint、ftraceなどを選びます。
+このノートでは、ツールの具体的な測定手順ではなく、サンプルがどう生成されるかと、tick割り込みを使う旧式の説明との違いを押さえます。
+
+**ソースコードの入口**
+
+- perf event共通層: `kernel/events/core.c`
+- x86 PMU: `arch/x86/events/`
+- perf関連の利用者向け文書: `Documentation/admin-guide/perf/`
+- `perf_event_paranoid` 等の設定: `/proc/sys/kernel/` と `Documentation/admin-guide/sysctl/kernel.rst`
+
+### 6.4.4 lockup watchdog
+
+lockup watchdogは、CPUがカーネル内で進行できなくなる状態を検出するための診断機構です。
+Linux 6.18 LTSでは、soft lockup detectorとhard lockup detectorを区別します。
+
+- **soft lockup**: CPUが長時間スケジューリング可能な状態へ戻らず、他のtaskを実行できない状態を検出する
+- **hard lockup**: CPUが通常の割り込み処理すら進められない状態を検出する
+
+現行実装では、soft lockup検出はhrtimerとwatchdog taskを使い、hard lockup検出は利用可能な構成でperfイベントなどを利用します。
+x86ではNMIを用いたhard lockup検出が使われる場合がありますが、すべてのアーキテクチャ・仮想環境でNMI watchdogが使えるとは限りません。
+原文の「ローカルAPICのNMIが毎tick発生し、APIC timer IRQのカウンタ増加を確認する」という方式を、現行の全実装に当てはめないことが重要です。
+
+検出時に出るstack traceや警告は、停止箇所を調査する材料です。
+watchdogがlockupを検出したことだけで、根本原因やデッドロックの原因箇所が確定するわけではありません。
+panicさせるか警告を出して継続するか、どのCPUでwatchdogを有効にするかなどは、カーネル構成・起動引数・sysctl設定に依存します。
+NO_HZ_FULLのCPUではtickless動作との関係から、標準のwatchdog対象CPUが制限される場合もあります。
+
+**ソースコードと観測の入口**
+
+- 共通watchdog実装: `kernel/watchdog.c`
+- x86 NMI / hard lockup処理: `arch/x86/kernel/nmi.c`
+- 関連設定: `/proc/sys/kernel/watchdog`、`watchdog_thresh`、`nmi_watchdog`、`watchdog_cpumask`
+- 詳細: `Documentation/admin-guide/lockup-watchdogs.rst`
+
+### 6.4で区別しておきたいこと
+
+- CPU時間の会計、load average、perfサンプルは対象と意味が異なる
+- load averageはCPU使用率ではなく、実行可能taskとuninterruptible taskを含む移動平均
+- taskやCPUの時間会計は必ずしも一定周期のtickだけに依存しない
+- `readprofile` / `/proc/profile` は歴史的な入口であり、現在の汎用的な性能解析はperfなどを使う
+- NMI watchdogはhard lockup検出の一方式であり、soft lockup検出や全アーキテクチャの共通仕様と混同しない
 
 ## Linux 6.18 LTSのソースを追う入口
 
