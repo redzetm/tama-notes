@@ -23,9 +23,9 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 
 ## 今回扱う範囲
 
-- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」
-- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報
-- 現在の進捗: 7.1〜7.3.2を作成。次は7.4「スケジューラが使用する関数」を節単位で扱う
+- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」、7.4「スケジューラが使用する関数」、7.4.1〜7.4.4
+- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報、tick・起床・sleep・scheduleの経路
+- 現在の進捗: 7.1〜7.4.4を作成。次は7.5「マルチプロセッサにおける実行キューの負荷均衡化処理」を節単位で扱う
 
 ## 7章の見取り図
 
@@ -34,7 +34,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 | 7.1、7.1.1〜7.1.2 | 方針、プリエンプション、実行時間配分 | 作成済み |
 | 7.2、7.2.1〜7.2.2 | 通常taskとリアルタイムtaskのスケジューリング | 作成済み |
 | 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 作成済み |
-| 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 未着手 |
+| 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 作成済み |
 | 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 未着手 |
 | 7.6、7.6.1〜7.6.4 | nice、affinity、リアルタイム関連API | 未着手 |
 
@@ -405,6 +405,160 @@ int main(void)
 - Linux 6.18のrunqueueはclass固有queueの集合であり、2.6のactive/expired priority arrayではない
 - `task_struct` は内部実装であり、field配置や利用可能なfieldは構成依存で、ユーザー空間ABIではない
 - fair classのvirtual deadlineと `SCHED_DEADLINE` の期限・runtime契約を混同しない
+
+## 7.4 スケジューラが使用する関数
+
+Linux 2.6のスケジューラ関数名は、現在の処理を探す入口として役立ちます。ただし、原文の `scheduler_tick()` 内部で一律にタイムスライスを減らす処理や、`recalc_task_prio()` による休止時間ベースの動的優先度計算を、Linux 6.18にそのまま対応づけることはできません。
+
+現行コードでは、`kernel/sched/core.c` がクラス共通の状態遷移・tick・起床・schedule経路をまとめ、クラス固有の処理は各 `sched_class` callbackを通じて `fair.c`、`rt.c`、`deadline.c` などへ委譲されます。
+
+### 7.4.1 `scheduler_tick()`関数
+
+タイマtickなどを契機に `scheduler_tick()` が実行されると、カーネルはCPUごとのrunqueue時計や実行時間会計を更新し、現在のtaskのscheduler classに応じたtick処理を呼び出します。概念的には次の流れです。
+
+```text
+clockevent/tick
+      |
+      v
+scheduler_tick(rq)
+      |
+      +--> runqueueの時間・負荷情報を更新
+      +--> curr->sched_class->task_tick(...)
+      |       +--> fair: 実行会計、選択・再スケジュール判定
+      |       +--> RT:   RR timeslice等のclass固有処理
+      |       +--> deadline: runtime等のclass固有処理
+      +--> 必要なら再スケジュール要求
+```
+
+tickは「現在taskの固定クォンタムを毎回一つ減らす処理」と同義ではありません。NO_HZなどでtickが抑止される構成もあり、スケジューリングの実行時間会計はtick以外のscheduler eventや時計更新とも連携します。公平性・RT timeslice・deadline runtimeはそれぞれ該当classの規則で扱われます。
+
+Linux 2.6の説明にある `task_timeslice()`、`time_slice` の減算、active/expired arrayへの移動、`rebalance_tick()` 呼び出しを6.18の同一実装として探すのではなく、共通tick処理からclass callbackとSMP balancingの現在の経路を追います。
+
+**ソースコードの入口**
+
+- tick共通処理と `scheduler_tick()`: `kernel/sched/core.c`
+- class callback定義: `kernel/sched/sched.h`
+- fair task tick: `kernel/sched/fair.c`
+- RT task tickとRR量子: `kernel/sched/rt.c`
+- deadline taskの実行予算: `kernel/sched/deadline.c`
+
+### 7.4.2 `try_to_wake_up()`関数
+
+`try_to_wake_up()` はsleep状態などにあるtaskを起床させるscheduler共通経路です。単に `__state` を `TASK_RUNNING` に書き換えるだけではなく、起床条件の確認、taskとrunqueueの同期、実行CPUの選択、runqueueへのenqueue、必要に応じた再スケジュール要求を連携させます。
+
+```text
+待ち条件が成立 / signalなど
+          |
+          v
+try_to_wake_up(task, state, ...)
+          |
+          +--> 起床対象のstateを検査
+          +--> on_cpu / on_rqと競合しないよう同期
+          +--> affinity・wake-up placementからCPUを選ぶ
+          +--> taskをrunnableにして選択CPUのrunqueueへenqueue
+          +--> 現在taskより優先すべきならrescheduleを要求
+```
+
+CPU選択は「常に最後に実行したCPU」または「常に起床を処理したCPU」ではありません。taskのaffinity、CPUのonline/active状態、wake affinity、idle CPU、scheduler domainや負荷などを考慮します。具体的な判断はtaskのclassや構成にも依存します。
+
+起床要求が重なる場合や、taskが別CPU上で切り替え中の場合に備え、schedulerはtask lock・runqueue lockとメモリ順序を用いて状態遷移を同期します。そのため、外部コードからtask状態fieldを直接変更して起床させることはできません。通常のカーネルコードはwait queue等の公開APIを使います。
+
+#### wait queueを使ったカーネルコード例
+
+次は、条件成立までtaskをsleepさせ、条件が成立した側から起床を通知する最小のカーネルコード例です。実際のdriverでは、条件の更新と複数readerの扱いを適切なlockやatomic操作で設計します。
+
+```c
+#include <linux/atomic.h>
+#include <linux/wait.h>
+
+static DECLARE_WAIT_QUEUE_HEAD(data_waitq);
+static atomic_t data_ready = ATOMIC_INIT(0);
+
+int wait_for_data(void)
+{
+        return wait_event_interruptible(data_waitq,
+                                        atomic_read(&data_ready) != 0);
+}
+
+void publish_data(void)
+{
+        atomic_set(&data_ready, 1);
+        wake_up_interruptible(&data_waitq);
+}
+```
+
+`wait_event_interruptible()` は条件を再確認しながら待ち状態へ入り、必要なときにscheduleし、signalで中断された場合は負のerrorを返します。呼び出し側が手作業で状態をsleepへ変えてから `schedule()` を呼ぶより、wait queue APIを使う方が、条件検査とwake-upの競合を正しく扱いやすくなります。例は一度だけreadyになる単純な状態を想定しており、繰り返し消費するデータqueueの同期設計そのものではありません。
+
+**ソースコードの入口**
+
+- `try_to_wake_up()`、CPU選択、wake-up preemption: `kernel/sched/core.c`
+- wait queueのAPI: `include/linux/wait.h`
+- sleep/wakeupの呼び出し例: `kernel/sched/`、`kernel/`内のwait queue利用箇所
+- sched wakeup trace event: `include/trace/events/sched.h`
+
+### 7.4.3 `recalc_task_prio()`関数
+
+`recalc_task_prio()` はLinux 2.6のO(1) schedulerにおいて、平均休止時間から動的優先度やinteractive bonusを更新する関数です。Linux 6.18には、この関数を同じ役割で使って通常taskの優先度を再計算する仕組みはありません。
+
+Linux 6.18でもtaskの起床はfair classの状態に影響しますが、理解の中心は休止時間から「対話型優先度」を作ることではありません。fair classは実行時間・重み・公平性に関するentity状態を管理し、EEVDFのeligibilityとvirtual deadlineを用いて選択します。RTやdeadline classはそれぞれ別の実行規則とaccountingを持ちます。
+
+そのため原文の `sleep_avg`、`CURRENT_BONUS`、`effective_prio()`、`activated` を6.18の `task_struct` fieldや現行関数として検索し続けるのではなく、起床経路の `try_to_wake_up()` から、enqueue時のclass callbackとfair entityの更新を追います。古い関数は、当時の方針が「taskの休止履歴からinteractive性を推定した」ことを示す歴史的な説明として扱います。
+
+**現行実装の入口**
+
+- 起床とenqueueの共通処理: `kernel/sched/core.c`
+- fair entityのenqueue・wakeup処理: `kernel/sched/fair.c`
+- EEVDFの概念とlagの説明: `Documentation/scheduler/sched-eevdf.rst`
+
+### 7.4.4 `schedule()`関数
+
+`schedule()` は、現在taskが自分からCPUを譲る場合や、sleepからscheduleする場合に使う主要APIです。内部では共通schedulerがrunqueueをロックして状態と候補を整え、各classの選択処理から次のtaskを決め、必要な場合だけcontext switchを行います。
+
+#### sleepによる直接のschedule
+
+資源やeventを待つtaskは、通常wait queueなどのAPIによって待ち条件とtask stateを連携させます。条件が成立するまでtaskはrunnableではなくなり、CPUを別taskへ渡します。起床後に再実行されても条件を再確認する必要があります。これは「scheduleを呼べば必ず別taskに切り替わる」ことを意味しません。runqueue上に選ぶべき別taskがなければ、同じtaskが続けて選ばれることもあります。
+
+#### 再スケジュール要求からの遅延実行
+
+tick、taskのwake-up、policy変更などで再スケジュールが必要になっても、現在の命令の任意の位置から常に `schedule()` を呼べるわけではありません。schedulerは再スケジュール要求を記録し、割り込み復帰やkernel preemptionの許される地点など、適切な経路で実際のschedule処理へ進みます。割り込み禁止区間、spinlock保持中、preemption countなどの制約も関係します。
+
+```text
+再スケジュール要因
+    ├─ taskがsleepへ入る ───────────────> schedule経路
+    ├─ tickで実行機会の再評価が必要 ───> need-reschedを記録
+    └─ より優先すべきtaskがwake-up ───> need-reschedを記録
+                                              |
+                                              v
+                            preemption / interrupt return等の適切な地点
+                                              |
+                                              v
+                                      __schedule()
+                                              |
+                             classから次のtaskを選び、必要ならswitch
+```
+
+#### task選択とcontext switch
+
+`__schedule()` は現在taskの状態とrunqueueを整合させた後、次に実行するtaskを選びます。切り替えるtaskが現在taskと異なる場合はcontext switchへ進み、アーキテクチャ依存のCPU context切り替えと必要なメモリ管理処理を行います。同じtaskが再選択された場合は、task間のcontext switchを行わずschedule経路から戻ります。
+
+`schedule()`、`__schedule()`、`context_switch()`、architecture固有の `switch_to` は、同じ関数の別名ではなく、API・共通選択処理・切替準備・architecture依存切替という異なる層に属します。Linux 2.6のBKL、`lock_depth`、旧 `switch_to` 展開を現行のschedule経路として持ち込まず、現行の `kernel/sched/core.c` と各architectureのswitch codeを分けて読みます。
+
+**ソースコードの入口**
+
+- 公開schedule APIと `schedule()`: `include/linux/sched.h`、`kernel/sched/core.c`
+- `__schedule()`、runqueue lock、class選択: `kernel/sched/core.c`
+- context switchの共通処理: `kernel/sched/core.c`
+- CPU固有のregister/stack切替: `arch/*/include/asm/switch_to.h`、architecture固有の実装
+- 再スケジュール要求とsched trace event: `include/linux/thread_info.h`、`include/trace/events/sched.h`
+
+### 7.4で区別しておきたいこと
+
+- tickは固定クォンタムの単純な減算器ではなく、classごとのaccounting・tick処理を呼び出す契機の一つ
+- `try_to_wake_up()` はstate変更だけでなく、同期・CPU選択・enqueue・preemption判定を含む
+- `recalc_task_prio()` はLinux 2.6 O(1) schedulerの関数で、Linux 6.18の現行関数ではない
+- sleepによるscheduleと、need-reschedを記録して後でscheduleする経路を区別する
+- `schedule()` が呼ばれても、別taskへのcontext switchが必ず起きるとは限らない
+- task状態fieldを直接変更せず、wait queueなどの同期APIを使う
 
 ## Linux 6.18 LTSのソースを追う入口
 
