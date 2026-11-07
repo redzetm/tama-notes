@@ -23,9 +23,9 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 
 ## 今回扱う範囲
 
-- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」、7.4「スケジューラが使用する関数」、7.4.1〜7.4.4、7.5「マルチプロセッサにおける実行キューの負荷均衡化処理」、7.5.1〜7.5.4
-- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報、tick・起床・sleep・scheduleの経路、scheduler domainによるCPU topology-aware負荷分散
-- 現在の進捗: 7.1〜7.5.4を作成。次は7.6「スケジューリング関連のシステムコール」を節単位で扱う
+- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」、7.4「スケジューラが使用する関数」、7.4.1〜7.4.4、7.5「マルチプロセッサにおける実行キューの負荷均衡化処理」、7.5.1〜7.5.4、7.6「スケジューリング関連のシステムコール」、7.6.1〜7.6.4
+- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報、tick・起床・sleep・scheduleの経路、scheduler domainによるCPU topology-aware負荷分散、スケジューリングpolicy・nice・affinityのユーザーAPI
+- 現在の進捗: 7.1〜7.6.4を作成。第7章の全節を作成済み
 
 ## 7章の見取り図
 
@@ -36,7 +36,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 | 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 作成済み |
 | 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 作成済み |
 | 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 作成済み |
-| 7.6、7.6.1〜7.6.4 | nice、affinity、リアルタイム関連API | 未着手 |
+| 7.6、7.6.1〜7.6.4 | nice、affinity、リアルタイム関連API | 作成済み |
 
 ## 7.1 スケジューリング方針
 
@@ -688,6 +688,144 @@ taskが移動した後も、destination CPUの次の選択はscheduler class規�
 - balancingはtask数を機械的に同数にそろえる処理ではない
 - task migrationが成功しても、移動先CPUで即座に実行されるとは限らない
 - 2.6の`rebalance_tick()`・`move_tasks()`やexpired arrayの記述を、Linux 6.18の関数構成と混同しない
+
+## 7.6 スケジューリング関連のシステムコール
+
+LinuxのスケジューリングAPIは、ユーザー空間からtaskのnice値、policy、policy固有のパラメータ、CPU affinityなどを設定・取得するための入口です。APIは「プロセス」と呼ばれることがありますが、Linux kernelのschedulerは個々のthread/taskを実行単位として扱います。NPTLのthread groupやlibc wrapperの意味も含め、対象が自分自身か、特定のtaskかをman pageで確かめます。
+
+```text
+通常taskの配分を調整      nice() / getpriority() / setpriority()
+policy・RT priority       sched_setscheduler() / sched_setparam()
+deadline属性              sched_setattr()
+実行可能CPUの範囲          sched_setaffinity()
+実行機会の譲渡・照会       sched_yield() / sched_rr_get_interval()
+```
+
+### 7.6.1 `nice()`システムコール
+
+`nice()` は呼び出し元threadのnice値をincrement分だけ変更するAPIです。Linux 6.18のfair classでは、nice値は同じクラス内のCPU shareに関係する重みとして働きます。nice値が低いほど重みが大きく、相対的にCPU時間を多く受けますが、CPU時間や実行開始時刻を保証するものではありません。
+
+nice値の有効範囲は通常 `-20`（高い相対優先度）から `19`（低い相対優先度）です。自分のtaskのnice値を上げて優先度を下げることは通常許されますが、nice値を下げて優先度を上げるには `CAP_SYS_NICE` または適切な `RLIMIT_NICE` などの条件が関係します。対象task、user namespace、security policyによって許可条件が異なるため、「rootだけ」と単純化しません。
+
+`nice()` は指定したincrementを加算し、範囲外の値は `-20`〜`19` に丸めます。Linuxのraw system callは成功時に `0` を返しますが、POSIX準拠のglibc wrapperは新しいnice値を返します。wrapperの成功値として `-1` が返る可能性もあるため、呼び出し結果を判定するときは `errno` を事前に0にして確認します。設定後の値を明示的に読む場合は `getpriority()` を使います。`getpriority()` も有効なnice値として `-1` を返し得るので、同じく `errno` を併用します。
+
+```c
+#define _GNU_SOURCE
+#include <errno.h>
+#include <stdio.h>
+#include <sys/resource.h>
+
+int main(void)
+{
+        int nice_value;
+
+        errno = 0;
+        nice_value = getpriority(PRIO_PROCESS, 0);
+        if (nice_value == -1 && errno != 0) {
+                perror("getpriority");
+                return 1;
+        }
+
+        printf("nice=%d\n", nice_value);
+        return 0;
+}
+```
+
+この例は呼び出し元のnice値を読み取るだけです。優先度を変更する場合は、`nice()` または `setpriority()` を使い、失敗時の `errno` と実行環境の権限を確認します。
+
+### 7.6.2 `getpriority()`、`setpriority()`システムコール
+
+`getpriority()` と `setpriority()` は、`which` と `who` で指定した対象のnice値を取得・設定します。代表的な `which` は `PRIO_PROCESS`、`PRIO_PGRP`、`PRIO_USER` です。`who == 0` は対応する呼び出し元の対象を表します。
+
+Linuxのkernel属性はtask/thread単位で、同じprocess内のthreadが異なるnice値を持つことがあります。`getpriority()` は呼び出しthreadの値を返します。POSIX上の「process」表現との違いがあるため、multi-threaded programではman pageおよびlibcの仕様を確認します。nice値をprocess全体で一つの値として扱うと、Linux上のthread間の差を見落とすことがあります。
+
+`setpriority()` でnice値を下げる（数値を小さくし、CPU優先度を上げる）操作には権限・resource limitが関係します。nice値を上げる方向でも、対象の所有者やsecurity policyなどによって拒否される場合があります。また、nice値の違いはfair class内での配分に作用するもので、RTやdeadline classの優先度を設定するものではありません。
+
+### 7.6.3 `sched_getaffinity()`、`sched_setaffinity()`システムコール
+
+CPU affinityは、taskが実行可能なCPUの集合を制約します。`sched_getaffinity()` は現在の許可maskを取得し、`sched_setaffinity()` はmaskを設定します。新しいmaskに現在のCPUが含まれない場合、kernelは条件を満たすCPUへtaskを移動させます。
+
+指定したmaskが実際に許可される範囲は、online CPUだけでなくcpuset/cgroupなどの制約との共通部分になります。設定要求の全CPUが必ずそのまま反映されるとは限らず、利用可能なCPUがない場合はエラーになります。CPU番号はシステムの構成に依存します。
+
+affinityを単一CPUに絞るとcache localityや測定の再現性に有利な場合がありますが、負荷を他CPUへ分散しにくくし、性能や応答性を悪化させることもあります。affinityは「CPU予約」や「CPU時間の保証」ではありません。CPU isolationやcpusetとの違いも区別します。
+
+```c
+#define _GNU_SOURCE
+#include <sched.h>
+#include <stdio.h>
+
+int main(void)
+{
+        cpu_set_t allowed;
+
+        if (sched_getaffinity(0, sizeof(allowed), &allowed) == -1) {
+                perror("sched_getaffinity");
+                return 1;
+        }
+
+        printf("allowed CPUs:");
+        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+                if (CPU_ISSET(cpu, &allowed))
+                        printf(" %d", cpu);
+        }
+        putchar('\n');
+        return 0;
+}
+```
+
+この例は呼び出し元threadのaffinityを表示するだけです。CPU集合の上限が `CPU_SETSIZE` を超える大規模構成では、動的CPU set APIを検討します。
+
+### 7.6.4 リアルタイムプロセス関連のシステムコール
+
+Linuxでは、次のAPIでpolicyやpolicy固有のパラメータを取得・設定できます。
+
+| API | 役割 | 注意点 |
+|---|---|---|
+| `sched_getscheduler()` / `sched_setscheduler()` | policyと `sched_param` を取得・設定 | FIFO/RRではpriority 1〜99、通常policyではpriority 0 |
+| `sched_getparam()` / `sched_setparam()` | policyを保ったまま `sched_param` を取得・設定 | RT priority設定には権限等の条件がある |
+| `sched_get_priority_min()` / `sched_get_priority_max()` | policyごとのpriority範囲を取得 | LinuxのFIFO/RRは通常1〜99、ほかのpolicyは0 |
+| `sched_rr_get_interval()` | `SCHED_RR` のquantumを取得 | `SCHED_FIFO`にはRR quantumがない |
+| `sched_yield()` | 呼び出しtaskが実行機会を自発的に譲る | 通常policyでの公平性制御手段として安易に使わない |
+| `sched_getattr()` / `sched_setattr()` | policyと拡張属性を取得・設定 | Linux固有。`SCHED_DEADLINE` のruntime/deadline/periodなどを扱う |
+
+policyを設定するAPIは、無効なpriorityやpolicyの組合せを拒否します。RT policyへの切り替えや高priorityの設定は、通常 `CAP_SYS_NICE` などの権限が必要です。`SCHED_DEADLINE` は単なるRT priority設定ではなく、runtime/deadline/period、bandwidth admission control、CPU affinityの制約が関係します。
+
+glibcは `sched_setscheduler()` などのwrapperを提供しますが、`sched_setattr()` / `sched_getattr()` はglibc wrapperがない環境があり、`syscall()` と `struct sched_attr` を用いるLinux固有の呼び出しが必要です。可搬性を重視するコードではその差を明示し、kernel/UAPI headerとman pageで構造体sizeやflagsを確認します。
+
+`sched_yield()` は現在の実行可能状態を保ったまま実行権を譲る操作ですが、次にどのtaskがいつ実行されるかを保証しません。特に `SCHED_OTHER` で繰り返し呼び出して同期や公平性を実装するのは適切でない場合があります。RT taskではFIFO/RRの同一priority内の挙動を理解したうえで使います。
+
+**ソースコードの入口**
+
+- syscall共通処理とpolicy変更: `kernel/sched/core.c`
+- sched UAPI構造体: `include/uapi/linux/sched/types.h`
+- nice値とpriority定義: `include/linux/sched/prio.h`
+- affinityとCPU mask: `kernel/sched/core.c`、`include/linux/sched/affinity.h`
+- RT classとRR quantum: `kernel/sched/rt.c`
+- deadline属性の検証: `kernel/sched/deadline.c`
+- user-visible APIの説明: `Documentation/scheduler/`、各system callのman page
+
+### 7.6で区別しておきたいこと
+
+- nice値はfair class内の相対的な重みであり、RT priorityやdeadlineとは別の尺度
+- Linux schedulerの実行単位はthread/taskであり、APIやlibcが「process」と呼ぶ対象との範囲を確認する
+- CPU affinityは実行可能CPUの制約であって、CPU予約や実行時間保証ではない
+- `SCHED_RR` のquantumと通常taskのCPU shareを混同しない
+- `sched_yield()` は実行権を譲るAPIであり、待機・同期や公平性を保証しない
+- RT/deadline policyはシステム全体へ影響し、権限・bandwidth・admission controlと運用条件を確認する
+
+## 第7章のまとめ
+
+Linux 6.18 LTSのスケジューラは、CPUごとのrunqueueと複数のscheduling classを使い、taskのpolicy・優先度・実行会計・affinity・CPU topologyを考慮して実行対象を選びます。通常taskのfair scheduling、FIFO/RRのRT scheduling、EDF/CBSに基づくdeadline schedulingは別の規則で動きます。
+
+第7章を通して、次のつながりを意識します。
+
+- **誰をどの規則で扱うか**: policyとscheduling class
+- **どこに実行候補があるか**: CPUごとのrunqueueとclass固有queue
+- **いつ実行機会を再評価するか**: tick、wake-up、sleep、need-resched、schedule
+- **CPU間でどう配置するか**: affinity、scheduler domain、load balancing、task migration
+- **ユーザー空間から何を指定できるか**: nice、scheduler API、affinity、deadline attributes
+
+原文の2.6 O(1) schedulerにある動的優先度、active/expired array、固定クォンタム、旧関数名は当時の実装理解として参照し、Linux 6.18の実際の処理は `kernel/sched/core.c` と各class実装を起点に追います。
 
 ## Linux 6.18 LTSのソースを追う入口
 
