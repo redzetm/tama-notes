@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion の役割と実行文脈上の制約
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.10 を作成。続きは 5.2.11 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.11 を作成。続きは 5.2.12 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1132,3 +1132,67 @@ completion は共有データを排他的に保護するロックではありま
 - `complete()` は IRQ / atomic context から使えるが、sleep する wait API は task context に限る。PREEMPT_RT では `complete_all()` の実行文脈も確認する
 - timeout / signal で待ちが先に戻る経路を含め、非同期の通知側が使い終わるまでオブジェクトを生存させる
 - 再利用時は `reinit_completion()` を使い、前サイクルの wait / complete が残らないよう別途同期する
+
+### 5.2.11 ローカル割り込み禁止
+
+#### ローカル CPU のハード IRQ を一時的に抑止する
+
+`local_irq_disable()` は呼び出した CPU のハードウェア割り込みを無効化し、`local_irq_enable()` は有効化します。`irqs_disabled()` は現在の CPU で割り込みが無効かどうかを調べる API です。これはローカルな実行文脈の制御であり、他 CPU の割り込みや実行を止める機能ではありません。
+
+タスク文脈と同じ CPU のハード IRQ handler が共有データを触る場合、タスク側でローカル IRQ を無効にすれば、その CPU 上でのマスク可能なハード IRQ による割り込みを避けられます。しかし別 CPU は引き続き並行実行できます。共有データを複数 CPU から更新するなら、ローカル IRQ 制御だけでは足りず、CPU 間排他を行うロックなども必要です。NMI のように通常のローカル IRQ 無効化で抑止されない実行経路も、別途考慮します。
+
+```c
+static DEFINE_SPINLOCK(state_lock);
+static unsigned long shared_state;
+
+static void update_from_task(unsigned long value)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&state_lock, flags);
+	shared_state = value;
+	spin_unlock_irqrestore(&state_lock, flags);
+}
+```
+
+この形は、非 PREEMPT_RT でタスクとハード IRQ handler が同じロックを使う典型例です。ロックが CPU 間の相互排他を担い、IRQ 制御は同じ CPU 上の handler がそのロックを再取得してデッドロックすることを避けます。IRQ handler 側も同じロックを正しい variant で使う必要があります。PREEMPT_RT では `spin_lock_irqsave()` の IRQ suffix が CPU の割り込み状態を無効化しないため、この例の実行文脈上の意味をそのまま当てはめません。ロックを併用しない単なる割り込み禁止は SMP のロックの代替ではありません。
+
+#### 割り込み状態を保存して復元する
+
+クリティカル区間を抜けるときに無条件で `local_irq_enable()` を呼ぶと、入る前から割り込み禁止だった呼び出し元の状態を壊す可能性があります。入れ子や既存の割り込み状態を保つ必要がある通常の形は `local_irq_save()` と `local_irq_restore()` の組です。
+
+```c
+static void update_local_state(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	/* ローカル IRQ と競合する短い処理 */
+	local_irq_restore(flags);
+}
+```
+
+`flags` は同じ呼び出しの保存・復元に対応させ、別の保存値で上書きしません。復元は保存時の状態に戻すため、元が有効なら有効に、無効なら無効のままになります。単純な `local_irq_disable()` / `local_irq_enable()` は、呼び出し前に割り込みが有効だと分かっていて、その前提を呼び出し階層全体で保証できる場合に限ります。
+
+割り込みを無効にした区間では、sleep する処理や長い処理を行いません。IRQ が遅れて処理され、システムの応答性やデバイス処理の遅延に影響するため、対象を必要最小限に絞ります。また、IRQ 制御はメモリ共有の一般的なロックやメモリバリアと同じ保証ではありません。
+
+#### PREEMPT_RT とアーキテクチャ依存性
+
+Linux 6.18 の `local_irq_*()` はアーキテクチャが提供する IRQ 制御に接続され、lockdep 用の追跡なども API に含まれます。x86 の `cli` / `sti` や `EFLAGS.IF` を全アーキテクチャ共通の実装とみなさず、まず Linux API の契約を読みます。
+
+PREEMPT_RT では `spinlock_t` が RT-mutex ベースとなるため、`local_irq_disable()` の後に通常の `spin_lock()` を取得する、非 RT 前提の組み合わせは成立しません。割り込み状態の制御とロックを別々に扱う必要がある場合は、`Documentation/locking/locktypes.rst` の該当ルールを確認し、per-CPU データに対する `local_lock` など適切な仕組みを検討します。ハード IRQ を実際に抑止する必要があるからといって、機械的に `raw_spinlock_t` へ置き換えるのではなく、共有相手と実行文脈を特定します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ 制御 API と状態追跡: `include/linux/irqflags.h`
+- アーキテクチャ固有の割り込み状態操作: `arch/*/include/asm/irqflags.h`
+- 割り込み無効化と PREEMPT_RT・`local_lock` の規則: `Documentation/locking/locktypes.rst`
+- IRQ がロックを共有する場合の使い分け: `Documentation/locking/spinlocks.rst`
+
+#### この小節で固定したいこと
+
+- `local_irq_disable()` は呼び出し元 CPU のマスク可能なハード IRQ を抑止する。SMP 全体の排他ではない
+- 元の IRQ 状態を保つ必要がある区間は `local_irq_save(flags)` / `local_irq_restore(flags)` を対で使う
+- IRQ 禁止区間は短くし、sleep する処理を置かない。NMI や他 CPU のアクセスも別に考える
+- CPU 間排他はロックが担い、ローカル IRQ 制御は同一 CPU 上の IRQ 再入を防ぐなど別の役割を担う
+- PREEMPT_RT では IRQ 制御と `spinlock_t` の組み合わせを非 RT の感覚で流用せず、lock type の契約を確認する
