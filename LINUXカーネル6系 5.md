@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」
 - 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1を作成。続きは 5.3.1.2 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.2を作成。続きは 5.3.1.3 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1366,3 +1366,63 @@ static int update_config(int value)
 - task 間の同期は mutex 自体が担う。プリエンプション禁止を追加して代用する必要はない
 - 「例外ハンドラ」という呼び方だけでは sleep 可否を判断できない。システムコール、ページフォルト、IRQ などの実際の文脈を特定する
 - mutex は相互排他、semaphore はカウント資源の管理という要件の違いで選ぶ
+
+#### 5.3.1.2 割り込みがアクセスするデータの保護
+
+##### IRQ handler の直列性を前提にしない
+
+hard IRQ handler は sleep できないため、mutex や待ちを伴う semaphore の取得を保護手段にできません。また、「同じ種類の割り込み handler は常に一つしか実行されない」と一般化しないことが重要です。IRQ の共有設定、per-CPU IRQ、IRQ の配送先、nested IRQ の有無、threaded IRQ への分離などによって、同じデータへ到達する経路は異なります。異なる IRQ handler が同じ状態を更新する場合や、同一 IRQ が複数 CPU から処理され得る場合は、並行実行を明示的に考慮します。
+
+```c
+static DEFINE_SPINLOCK(device_state_lock);
+static unsigned int event_count;
+
+static irqreturn_t device_irq(int irq, void *data)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&device_state_lock, flags);
+	event_count++;
+	spin_unlock_irqrestore(&device_state_lock, flags);
+
+	return IRQ_HANDLED;
+}
+
+static void reset_event_count(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&device_state_lock, flags);
+	event_count = 0;
+	spin_unlock_irqrestore(&device_state_lock, flags);
+}
+```
+
+この形は、IRQ handler と task context の双方が同じデータを保護する非 PREEMPT_RT の例です。ロックは別 CPU からの同時アクセスを排他し、task 側の `spin_lock_irqsave()` はローカル IRQ 状態を保存・無効化して、同じ CPU でロック保持中に handler が再入するデッドロックを避けます。IRQ handler 側も同じロックを取得し、全アクセス経路が規約に参加する必要があります。実際のドライバでは、ハード IRQ の実行状態と lock type の選択を対象カーネル構成に合わせて確認します。
+
+##### 単一 CPU の IRQ 制御と SMP のロックは別の役割
+
+ローカル IRQ を無効にするだけでは、他 CPU で実行中の IRQ handler や task を止められません。従って SMP で共有状態を守る場合、CPU 間排他を行うロックが必要です。一方、ロックだけを使い、task がロックを保持している間に同じ CPU の handler が同じロックを取ると、handler がロック解放を待つ一方で task は handler の終了を待つ循環が起こり得ます。非 RT では `spin_lock_irqsave()` / `spin_unlock_irqrestore()` がこの両方を組み合わせる一般的な形です。
+
+複数箇所から割り込み状態を変更する可能性があるコードでは、無条件に enable する `_irq` variant より、元の状態を保存・復元する `_irqsave` / `_irqrestore` variant が適することがあります。どのロック関数を使うかは、hard IRQ・threaded IRQ・softirq・task の全共有経路を確認して決めます。read/write lock や seqlock の IRQ variant も同じく、API名だけで安全性を判断せず、保護対象と writer / reader の文脈を照合します。
+
+##### PREEMPT_RT では hard IRQ 経路を再評価する
+
+PREEMPT_RT では、多くの IRQ handler が threaded IRQ として実行され、`spinlock_t` も非 RT と異なる意味を持ちます。特に `spin_lock_irqsave()` の suffix は CPU の hard IRQ 状態を無効化しないため、非 RT のコード例をそのまま「同一 CPU の hard IRQ 再入を防ぐ」と解釈できません。hard IRQ の一次 handler に残る処理と thread function を分け、どちらが共有データをアクセスするかを確かめたうえで、通常の `spinlock_t` で扱える task/threaded context なのか、真に hard IRQ と共有し `raw_spinlock_t` が必要な限定領域なのかを判断します。
+
+`raw_spinlock_t` は一般的に速い代替という意味ではなく、PREEMPT_RT でも厳密な非プリエンプト可能区間を必要とする低レベル用途向けです。取得中の処理は短く保ち、sleep やブロックする処理を入れません。hard IRQ handler の設計を task context に移せるなら、threaded IRQ などを使って sleeping lock を利用できる構成にする方法も検討します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ handler と threaded IRQ の登録・実行経路: `kernel/irq/manage.c`、`include/linux/interrupt.h`
+- IRQ と共有するロックの基本形: `Documentation/locking/spinlocks.rst`
+- `spinlock_t` / `raw_spinlock_t` の PREEMPT_RT と IRQ suffix: `Documentation/locking/locktypes.rst`
+- 実デバイスの handler と共有状態: `request_irq()` / `request_threaded_irq()` の呼び出し元から全 read / write 経路を追う
+
+##### この小節で固定したいこと
+
+- hard IRQ handler では sleep できない。mutex や待つ semaphore を使わない
+- handler が逐次実行されるという前提を置かず、IRQ 共有・per-CPU IRQ・複数 CPU・nested IRQ を確認する
+- `local_irq_disable()` は他 CPU を止めない。SMP の共有状態には CPU 間ロックが必要
+- 非 RT で task と hard IRQ が同じロックを使う典型例は `spin_lock_irqsave()`。全経路が同じロックを使う
+- PREEMPT_RT では IRQ の thread 化と `spinlock_t` suffix の意味が変わる。hard IRQ と共有する箇所だけ `raw_spinlock_t` を検討し、安易に置換しない
