@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」
-- 今回の主題: kmallocのサイズ別汎用cacheと型専用cache、cache lifecycle、SLUB cache mergeの条件と意味
-- 現在の進捗: 8.1〜8.2.4を作成済み。8.2.5以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」
+- 今回の主題: SLUBがslab用folioをページアロケータから得て初期化し、解放・回収時に返す経路とreclaim accounting
+- 現在の進捗: 8.1〜8.2.5を作成済み。8.2.6以降は未着手
 
 ## 第8章の見取り図
 
@@ -46,7 +46,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.2 | cache descriptorとその管理情報 | 作成済み |
 | 8.2.3 | slab descriptorとslab単位の状態 | 作成済み |
 | 8.2.4 | 汎用cache・特定用途cacheとcache merge | 作成済み |
-| 8.2.5〜8.2.15 | page allocatorとの接続、object配置・割り当て・解放、mempool | 未着手 |
+| 8.2.5 | slab allocatorとpage allocatorの確保・返却連携 | 作成済み |
+| 8.2.6〜8.2.15 | slab割り当て、object配置・割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1046,3 +1047,58 @@ mergeは運用・安全性にも関わります。同じcache実体を複数用�
 - cache生成時のalias/merge: `mm/slab_common.c` (`__kmem_cache_create_args()`、`find_mergeable()`、`slab_unmergeable()`)
 - merge制御とconfig: `mm/slab_common.c` (`slab_nomerge`)、`mm/Kconfig` (`CONFIG_SLAB_MERGE_DEFAULT`)
 - merge状況の観測: `Documentation/admin-guide/mm/slab.rst` (`slabinfo -a`)
+
+### 8.2.5 スラブアロケータとページアロケータ間のインタフェース
+
+slab allocatorが新しいslabを必要とするとき、下位のページアロケータから物理的に連続したページ群を得ます。SLUBではslabのorderに応じたfolioを確保し、それをslabとして印付け・初期化してobject slotを構成します。slabが空になり回収対象になれば、metadataを解除して同じページ群をページアロケータへ返します。
+
+```text
+kmem_cacheに空きobjectがない
+        |
+        v
+SLUBが選んだorderでfolioを確保
+        |  alloc_frozen_pages()系
+        v
+folioをslabとして識別・初期化
+  cache / object数 / freelist / accounting
+        |
+        v
+objectをcache利用者へ供給
+        |
+        v
+slabを破棄するとき
+  slab属性とaccountingを解除
+        |
+        v
+free_frozen_pages()系でページアロケータへ返却
+```
+
+確保時の中心経路は`allocate_slab()`から`alloc_slab_page()`です。`alloc_slab_page()`は通常のページ確保APIではなく、現行SLUBがfolio/page allocatorを呼ぶ内部helperです。要求orderはcacheの`oo`等から選ばれます。初期の高order確保が失敗した場合、SLUBはcacheが定めた最小orderへfallbackすることがあります。そのため、あるcacheのすべてのslabが常に同じorderとは限らず、利用可能なobject数もslabごとに異なる場合があります。
+
+GFP flagsには呼び出し側の制約に加え、cache側のallocation flagsが反映されます。大きなorderの初回要求では、メモリ圧迫時にそれを早めに失敗させて低orderを試せるよう、GFP制約を調整する経路があります。これはobject単位の小さな確保で高order pageを過度に要求しないための設計です。再claimできるか、sleepできるかなどは元のGFP contextに従います。
+
+#### slabとしての識別とaccounting
+
+確保されたfolioは`__folio_set_slab()`によりslabとして識別され、`struct slab`から所属cacheやfreelist等を参照できる状態になります。SLUBはobject数や使用数、freelistを初期化し、node単位の統計を更新します。ページ管理側がslabとして扱えるようにするこのmetadataは、object本体とは別の管理情報です。
+
+`SLAB_RECLAIM_ACCOUNT`は、cache内のページがreclaim可能なslab memoryとして会計されるべきことを示すcache属性です。Linux 6.18では、単純な旧式のグローバルpage counterを唯一の指標として見るのではなく、node単位のVM統計などに反映される経路を追います。このflagは「ページが常に直ちに回収可能」という保証ではなく、reclaim分類・accounting上の意味を持ちます。
+
+#### 解放とreclaim accounting
+
+SLUBがslabを破棄するときは`__free_slab()`がslab属性を解除し、slab object extensionsやnode accounting等を整理してからfolioをページアロケータへ返します。現行経路では`free_frozen_pages()`が使われます。メモリ回収処理中にページを解放する場合、`mm_account_reclaimed_pages()`を通じて回収したページ数をreclaim側へ通知します。ページを返す時点でも、呼び出し中のreclaim stateやslab flagsに応じた会計処理が必要です。
+
+| 方向 | Linux 6.18の代表経路 | 主な処理 |
+|---|---|---|
+| page allocator → SLUB | `allocate_slab()` → `alloc_slab_page()` → `alloc_frozen_pages()`系 | folio確保、slab識別、object/freelist初期化、node統計更新 |
+| SLUB → page allocator | `free_slab()` → `__free_slab()` → `free_frozen_pages()` | slab識別解除、accounting解除、folio返却 |
+| reclaimとの接続 | `__free_slab()`内の`mm_account_reclaimed_pages()`等 | reclaim中に解放されたページ数を回収処理へ反映 |
+
+したがって、slab allocatorはページアロケータから独立したメモリ源ではありません。SLUB内に空きobjectや空きslabを保持している間は、そのページ群はページアロケータのfree listには戻っていません。memory pressure時にslabをどのように縮小できるかは、cache利用者が保持するobjectの寿命とreclaim経路にも依存します。
+
+**Linux 6.18のソースを追う入口**
+
+- slab用folioの確保: `mm/slub.c` (`allocate_slab()`、`alloc_slab_page()`)
+- folioとslab metadataの関係: `mm/slab.h` (`struct slab`、`folio_slab()`、`slab_folio()`)
+- cache flagsに基づくpage accounting: `mm/slub.c` (`account_slab()`、`unaccount_slab()`)
+- slabの破棄とページ返却: `mm/slub.c` (`free_slab()`、`__free_slab()`)
+- 下位のページ確保・解放: `mm/page_alloc.c` (`__alloc_frozen_pages_noprof()`、`free_frozen_pages()`)
