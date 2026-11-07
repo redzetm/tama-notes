@@ -933,10 +933,10 @@ Linux の locking 文書は、semaphore を新しい用途で相互排他と待�
 
 #### 利用できる実行文脈
 
-`down()`、`down_interruptible()`、`down_killable()`、`down_timeout()` は枠がなければ task を sleep させるため、sleep 可能な task context から呼び出します。ハード IRQ や softirq のように待ち時間中に sleep できない文脈からは使えません。
+`down()`、`down_interruptible()`、`down_killable()`、`down_timeout()` は枠がなければ task を sleep させるため、基本的に sleep 可能な task context から呼び出します。ハード IRQ や softirq のように待ち時間中に sleep できない文脈では、取得できない可能性がある `down*()` を使ってはいけません。
 
 `down_trylock()` は待たずに取得を試みる API で、成功時は 0、取得できない場合は 1 を返します。この戻り値は `spin_trylock()` や `mutex_trylock()` と逆向きなので注意します。
-Linux 6.18 の実装では `down_trylock()` と `up()` は interrupt context から呼べる旨が `include/linux/semaphore.h` に明記されています。ただし「待たない」操作でも、保護対象や呼び出し側の実行文脈の制約がすべて消えるわけではありません。
+Linux 6.18 の実装では `down_trylock()` と `up()` は interrupt context から呼べる旨が `include/linux/semaphore.h` に明記されています。実装上、成功が確実な場合に限り `down()` を interrupt context から呼ぶ既存箇所も想定されていますが、通常の設計では待ち得る `down*()` を IRQ / softirq で使わず、非ブロッキング API と明確な条件を選びます。「待たない」操作でも、保護対象や呼び出し側の実行文脈の制約がすべて消えるわけではありません。
 
 #### Linux 6.18 LTS のソースを追う入口
 
@@ -997,7 +997,7 @@ static int use_slot(void)
 #### この小節で固定したいこと
 
 - semaphore はカウント資源を管理し、所有者を持たない。mutex の単純な別名ではない
-- sleep する `down*()` は task context のみで使い、戻り値を処理する
+- sleep し得る `down*()` は基本的に sleep 可能な task context で使い、戻り値を処理する。IRQ / softirq では待たない API と実装上の条件を確認する
 - `down_trylock()` は失敗時 1、成功時 0 という戻り値に注意する
 - `up()` は取得 task 以外からも呼べるため、解放責任と二重解放防止を設計する
 - 新しい用途では排他に mutex、イベント待ちに completion、並行数制限に semaphore を使い分ける
