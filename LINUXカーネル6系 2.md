@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1を再整備、次は2.4.2）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.2を再整備、次は2.4.3）
 
 ## 2章の研究観点
 
@@ -648,34 +648,64 @@ Linux 6.18のソースを追う入口:
 
 #### 2.4.2 拡張ページングと巨大ページ
 
-元の本文では、拡張ページングとして 4MB ページの話が出てきます。
-現代 Linux の文脈では、これを「巨大ページを使う発想の入口」として理解するとよいです。
-ページを大きくすれば、広い仮想空間をより少ないエントリで表現でき、TLB ミスも減らしやすくなります。
+##### 4 MiB拡張ページングの原理
 
-ただし、ここで出てくる **4MB ページは、主に 32 ビット x86 の文脈で現れる歴史的な代表例** です。
-現代の x86_64 Linux で巨大ページとしてよく意識されるのは、むしろ 2MB ページや 1GB ページです。
-たとえば Transparent Huge Pages では 2MB ページが前面に出ることが多く、
-hugetlb でも環境によって 2MB や 1GB の巨大ページを扱います。
-つまり、「巨大ページ」という考え方自体は今も重要ですが、
-**現代カーネルで日常的にまず思い浮かべる巨大ページが 4MB とは限りません。**
+原文の「拡張ページング」は、PAEを使わない32-bit x86のPSE（Page Size Extension）による4 MiB pageを指します。通常の2段walkではPDEが次のpage tableを指しますが、CR4.PSEが有効でPDEのPS（Page Size）bitが1なら、そのPDE自体が4 MiB範囲のmappingを表します。page tableを1段省略し、linear addressの上位10 bitでPDEを選び、下位22 bitをpage offsetとして使います。
 
-Intel/x86_64 の感覚で短く並べると、通常ページは 4KB、よく出てくる巨大ページは 2MB、
-さらに大きい巨大ページは 1GB です。
-研究ノートとしては、まず 4KB を基本形として押さえ、そのあと 2MB や 1GB が性能目的で使われると捉えると整理しやすいです。
+```text
+31             22 21                           0
++----------------+------------------------------+
+| PDE index (10) | offset within 4 MiB (22)     |
++----------------+------------------------------+
+        │                         │
+        v                         v
+ page directory entry ──> 4 MiB-aligned physical base + offset
+```
 
-ここで注意したいのは、**Linux 6.18 LTS だから常に基本ページサイズが 4KB だ、というわけではない**ことです。
-Intel を含む x86 や x86_64 では 4KB ページが標準的なので説明の入口として使いやすいのですが、
-Linux カーネル全体で見ると、基本ページサイズはアーキテクチャや設定によって異なります。
-たとえば arm64 では 4KB だけでなく 16KB や 64KB の構成もあります。
-つまり、4KB は「現代 Linux 全体の絶対ルール」というより、特に x86 系でいちばんよく出てくる代表例です。
+この方式では、物理baseが4 MiB境界に整列している必要があります。4 KiB pageを1024個並べて表す代わりに一つのPDEで範囲を示せるため、page table memoryを節約し、TLB entry一つでより広い範囲をカバーできます。原文の4 MiB値はこの非PAE・32-bit x86の方式に固有であり、現在のx86-64の巨大pageサイズと同一視しません。
 
-ただし、ページを大きくすれば良いことばかりではありません。
-細かな保護や割り当て粒度が粗くなり、内部断片化も増えやすくなります。
-そのため、通常ページと巨大ページは用途によって使い分けられます。
-Linux 6.18 LTS でも、transparent huge pages や hugetlb のように、大きなページを活用する仕組みがありますが、
-それらは「とにかく大きくする」のではなく、性能と柔軟性のトレードオフの中で使われています。
+##### Linux 6.18のx86で使われる大きなmapping
 
-ここでのポイントは、ページサイズが変換コスト、管理コスト、性能特性に直結する設計要素だということです。
+x86-64の4 KiB base-page構成では、通常の階層の途中にあるentryをleafとして使うことで、大きな範囲を直接mappingできます。代表例はPMD levelの2 MiB pageと、CPUが対応する場合のPUD levelの1 GiB pageです。いずれも対応する物理baseのalignmentが必要で、page-table entryのPS bitなどによりleafとして識別されます。
+
+| x86での例 | page-table level | 4 KiB pageで同じ範囲を表す場合 | 主な効果 |
+|---|---|---:|---|
+| 2 MiB mapping | PMD | 512個 | PTE tableの節約、TLB reachの拡大 |
+| 1 GiB mapping | PUD | 262,144個 | より広い範囲を少ないentryでmapping |
+
+この表は4 KiB base-page構成のx86-64に限った概念例です。CPU capability、kernel configuration、対象memoryやmapping用途によって利用可能なsizeは変わります。Linux共通の階層では、hardwareがどのlevelでwalkを終えるかを`pmd_leaf()`や`pud_leaf()`などarchitecture helper経由で扱います。
+
+大きなpageは、page-table memoryとTLBの節約につながりますが、無条件に速くなる保証ではありません。mappingや物理領域に大きなalignmentが必要になり、細かい単位での保護・解放・入れ替えがしにくくなります。必要な物理メモリをまとまった大きさで確保できないこともあり、memory compactionの負担や内部断片化が生じる場合もあります。
+
+##### Transparent Huge Pagesとhugetlbを分ける
+
+Linuxは用途に応じて複数の経路を用意します。代表的な違いは、巨大pageをアプリケーションが明示的に要求・管理するか、通常の匿名memoryなどでkernelが透過的に利用するかです。
+
+| 仕組み | 基本的な考え方 | 研究時の着眼点 |
+|---|---|---|
+| Transparent Huge Pages（THP） | 通常のmemory利用を大きく変えず、kernelが巨大mappingを割り当てたり、既存pageをcollapseしたりする。必要に応じてsplitも行う | どのmemory種別・page sizeが対象か、設定・allocation・collapse/splitとfallback |
+| hugetlb | poolで管理するhugetlb pageを、アプリケーションが`mmap`やSystem V shared memory等で明示的に利用する | poolの確保・予約・枯渇時の挙動、HugeTLB filesystemやmapping条件 |
+
+Linux 6.18のTHPはPMD-sizeだけに限定されず、multi-size THP（mTHP）でbase pageより大きくPMD-sizeより小さいsizeを扱う構成もあります。したがって「THPなら常に2 MiB」とは限りません。一方、hardwareがTLBで扱う通常の巨大leaf mappingと、複数の小さなPTEをまとめて割り当てるmTHPは同じ形のpage-table mappingとは限らず、実際のlevelやTLB動作はsizeとarchitectureに照らして確認します。
+
+なお、THPとhugetlbは単なる「自動」と「手動」の呼び分けだけではありません。確保・予約の意味、failure時のfallback、mapping ABI、memory reclaimなどが異なる別の仕組みです。用途を調べる際は一括して「huge page」と済ませず、どちらの実装経路かを特定します。
+
+Linux 6.18 LTSのソース・文書を追う入口:
+
+- x86の大きなpageを示すentry bit: `arch/x86/include/asm/pgtable_types.h`
+- THPとmTHPの挙動: `Documentation/admin-guide/mm/transhuge.rst`
+- hugetlb poolとmapping: `Documentation/admin-guide/mm/hugetlbpage.rst`
+- THPの実装: `mm/huge_memory.c`
+- HugeTLBの実装: `mm/hugetlb.c`
+- 汎用page-table levelとleaf判定: `include/linux/pgtable.h`
+
+この小節で固定したいこと:
+
+- 原文の4 MiB拡張ページは、非PAE・32-bit x86のPSEの説明である
+- x86-64の4 KiB base-page構成では、代表的な大きなmappingはPMDの2 MiBと、対応環境でのPUDの1 GiB
+- 大きなmappingはpage-table memoryとTLB reachを改善しうるが、alignment・確保・断片化・粒度とのtrade-offがある
+- THP/mTHPとhugetlbはallocation・管理・failure時の意味が異なるLinuxの機構である
+- page sizeだけで性能を断定せず、hardware mapping levelとLinuxのallocation/mapping経路を合わせて読む
 
 #### 2.4.3 ハードウェア保護機構
 
@@ -1024,5 +1054,4 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
 
