@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」
-- 今回の主題: ベースページ、`struct page`、NUMAとzone、zone watermark、割り当て文脈とGFP flags
-- 現在の進捗: 8.1〜8.1.4を作成済み。8.1.5以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」
+- 今回の主題: `alloc_pages()`系API、GFP flags、orderと物理連続性、fast/slow allocation path、割り当てと解放の対応
+- 現在の進捗: 8.1〜8.1.5を作成済み。8.1.6以降は未着手
 
 ## 第8章の見取り図
 
@@ -37,7 +37,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1、8.1.1 | ページフレーム、`struct page` | 作成済み |
 | 8.1.2〜8.1.3 | NUMA、メモリゾーン | 作成済み |
 | 8.1.4 | 空きページのwatermarkとGFP allocation context | 作成済み |
-| 8.1.5〜8.1.9 | ページ割り当て、highmem、buddy、per-CPU cache、zone allocator | 未着手 |
+| 8.1.5 | ページフレームの割り当て・解放API | 作成済み |
+| 8.1.6〜8.1.9 | highmem、buddy、per-CPU cache、zone allocator | 未着手 |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
@@ -362,3 +363,92 @@ static int create_request(unsigned int id)
 - zone watermarkを使う割り当て判定: `mm/page_alloc.c`
 - GFP flagsと割り当て文脈: `include/linux/gfp.h`、`Documentation/core-api/memory-allocation.rst`
 - 実行環境の値: `/proc/sys/vm/min_free_kbytes`、`/proc/zoneinfo`
+
+### 8.1.5 ゾーンごとのページフレームアロケータ
+
+Linuxのページアロケータは、ページ単位の要求に対して、GFP flagsで表された制約と割り当て文脈を使い、適合するzone・nodeからページを探します。要求は「どのzoneがよいか」だけでなく、「何ページ必要か」「物理的に連続している必要があるか」「sleepや回収が許されるか」も含みます。
+
+```text
+alloc_pages(GFP flags, order)
+        |
+        v
+要求に合うzonelist / node / zoneを決める
+        |
+        v
+fast path: watermarkを確認し、per-CPU page list等から確保
+        |
+        +-- 成功 --> struct page * を返す
+        |
+        +-- 不足 --> GFP条件が許す範囲で回収・compaction等を試す
+                         |
+                         +-- 成功 --> struct page * を返す
+                         +-- 失敗 --> NULL
+```
+
+実際の経路は上図より複雑で、割り当てのorder、cpuset、NUMA memory policy、watermark、fragmentation、GFP modifiersなどによって分岐します。per-CPU page listとbuddy allocatorの役割は8.1.7〜8.1.8で、watermarkと回収の関係は8.1.4および後続章で扱います。
+
+#### `order`が表す連続ページ数
+
+`alloc_pages(gfp, order)`は、`2^order`個の連続したベースページから成るblockを要求します。成功時に返るのは先頭ページの`struct page *`で、失敗時は`NULL`です。`alloc_page(gfp)`は`alloc_pages(gfp, 0)`に相当し、1ページを要求します。
+
+高いorderほど大きな物理連続領域が必要になり、空きページの総量が十分でもfragmentationのため確保できないことがあります。単に大きなメモリ領域が必要なだけで物理連続性が要らない場合、`vmalloc()`や`kvmalloc()`など別のAPIが適切か検討します。DMA用途では、物理アドレスを仮定せずDMA APIを使います。
+
+| API | 成功時の戻り値 | 物理的な連続性 | 対応する解放 |
+|---|---|---|---|
+| `alloc_pages(gfp, order)` | 先頭の`struct page *` | `2^order`ページが連続 | `__free_pages(page, order)` |
+| `alloc_page(gfp)` | 1ページの`struct page *` | 1ページ | `__free_page(page)` |
+| `__get_free_pages(gfp, order)` | 先頭ページのkernel virtual address | `2^order`ページが連続し、返す範囲をkernelから直接参照できる必要がある | `free_pages(addr, order)` |
+| `get_zeroed_page(gfp)` | zeroed pageのkernel virtual address | 1ページ | `free_page(addr)` |
+| `alloc_pages_exact(size, gfp)` | 指定sizeのkernel virtual address | 要求sizeの範囲を連続して確保 | `free_pages_exact(addr, size)` |
+
+`alloc_pages()`の戻り値は仮想アドレスではありません。ページ内容へアクセスする場合は、ページのzoneやarchitecture上のmapping条件に合うAPIでkernel addressを得ます。特にHIGHMEMがある構成では、`struct page *`を得られても常時使えるkernel virtual addressがあるとは限りません（8.1.6参照）。
+
+#### GFP flagsの現行の読み方
+
+第3版の表にある`__GFP_WAIT`、`__GFP_COLD`、`__GFP_REPEAT`などの名前と組み合わせを、Linux 6.18のAPIとしてそのまま使わないでください。現行のGFP flagsは、zone選択、ページmobility、回収許可、再試行方針などの複数の観点を表し、公開されている組み合わせ名として`GFP_KERNEL`、`GFP_NOWAIT`、`GFP_ATOMIC`などを使います。
+
+たとえば`GFP_KERNEL`は通常のsleep可能なkernel allocationで、直接回収が起きる可能性があります。`GFP_NOWAIT`は呼び出し元での直接回収を避ける要求であり、失敗時の代替経路が必要です。`GFP_ATOMIC`は一部reserveの利用を許す場合がありますが、確保成功は保証しません。DMA制約は古い`GFP_DMA`を安易に選ぶのではなく、deviceのDMA maskに従ってDMA APIでバッファを確保・mapします。
+
+#### ページの確保と解放を対にする
+
+次のカーネル内部の概念例は、order 0で1ページを取得し、同じorderで解放します。通常の関数文脈で`GFP_KERNEL`を使う例です。割り当てが失敗する可能性を必ず処理します。
+
+```c
+#include <linux/errno.h>
+#include <linux/gfp.h>
+
+static int allocate_one_page(void)
+{
+        struct page *page;
+
+        page = alloc_page(GFP_KERNEL);
+        if (!page)
+                return -ENOMEM;
+
+        /* pageの利用処理をここに置く */
+        __free_page(page);
+        return 0;
+}
+```
+
+複数ページを`alloc_pages(gfp, order)`で確保した場合は、確保時と同じorderを使って解放します。ページを別のsubsystemへ渡した場合は、そのsubsystemの所有権・参照管理規約に従い、呼び出し側が直ちに解放してはいけません。
+
+#### 原文の関数一覧を現行APIへ読み替える
+
+| 第3版に登場する考え方 | Linux 6.18での読み替え |
+|---|---|
+| ページ記述子を返す`alloc_pages()` / `alloc_page()` | 現在もページアロケータの基本API。folio APIや用途別allocatorも併せて使われる |
+| kernel linear addressを返す`__get_free_pages()` | 現在も存在するが、常時mappingされないページには使えない。戻り値型と解放APIを確認する |
+| zeroed pageの取得 | `get_zeroed_page()`または適切なAPIのzero flagを使う |
+| `__GFP_WAIT`などの旧フラグ | `GFP_KERNEL`等の現行組み合わせと、回収・sleep条件へ読み替える |
+| `__GFP_DMA`でDMA用ページを直接確保 | DMA deviceの制約をDMA APIへ伝える方法を優先する |
+| 「zone allocatorがzoneを探す」 | `prepare_alloc_pages()`が要求条件を整理し、`get_page_from_freelist()`やslow pathが候補を試す現行経路として追う |
+
+**Linux 6.18のソースを追う入口**
+
+- `alloc_pages()`、`alloc_page()`、free API: `include/linux/gfp.h`
+- GFP flagsの定義・組み合わせ: `include/linux/gfp_types.h`
+- 要求条件の準備とfast path: `mm/page_alloc.c` (`prepare_alloc_pages()`、`get_page_from_freelist()`)
+- 回収を含むslow path: `mm/page_alloc.c` (`__alloc_pages_slowpath()`)
+- allocation APIの使い分け: `Documentation/core-api/memory-allocation.rst`
+- DMA buffer: `Documentation/core-api/dma-api.rst`
