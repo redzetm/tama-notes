@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」
-- 今回の主題: SLUBでfree objectを連結するfreelist metadataの所在、旧kmem_bufctlとの違い、freepointerの配置と保護
-- 現在の進捗: 8.1〜8.2.8を作成済み。8.2.9以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」
+- 今回の主題: SLUB cacheのalignment要件、object slot stride、`SLAB_HWCACHE_ALIGN`と内部断片化・cache lineの考え方
+- 現在の進捗: 8.1〜8.2.9を作成済み。8.2.10以降は未着手
 
 ## 第8章の見取り図
 
@@ -50,7 +50,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.6 | cacheへのslab割り当てとSLUBのfallback | 作成済み |
 | 8.2.7 | cache内slabの破棄・shrink | 作成済み |
 | 8.2.8 | object descriptorとfree object内のfreelist link | 作成済み |
-| 8.2.9〜8.2.15 | object配置・割り当て・解放、mempool | 未着手 |
+| 8.2.9 | object alignmentとSLUBのslot寸法 | 作成済み |
+| 8.2.10〜8.2.15 | cache coloring、local cache、object割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1257,3 +1258,46 @@ free中のobject領域にlinkを置くため、freeしたobjectの内容を利�
 - `SLAB_TYPESAFE_BY_RCU` cacheのcustom offset: `include/linux/slab.h` (`struct kmem_cache_args::freeptr_offset`)
 - slab単位のfreelist head: `mm/slab.h` (`struct slab::freelist`)
 - freelistの初期構築: `mm/slub.c` (`allocate_slab()`、`setup_object()`)
+
+### 8.2.9 メモリ上でのオブジェクトの境界合わせ
+
+object alignmentは、割り当てられたobjectの先頭アドレスに必要な境界条件です。構造体が特定のalignmentを要求する場合、それを満たさないアドレスへ置くことはできません。また、word境界に揃えることは、freelist pointer等のmetadataを安全に読み書きするためにも関係します。alignmentは「objectを必ずcache line全体に広げる」指定とは異なり、必要な境界を定める条件です。
+
+Linux 6.18のSLUBでは、cache生成時に`calculate_alignment()`がユーザー指定のalignment、`SLAB_HWCACHE_ALIGN`、アーキテクチャの最小alignment等を考慮して`kmem_cache`のalignmentを決めます。objectの配置を決める`calculate_sizes()`では、metadataやdebug用領域を考慮したslot寸法を`align`の倍数へ切り上げます。slab内ではobject slotをこのstrideで並べるので、先頭objectの配置条件を満たせば後続objectも同じ境界に揃います。
+
+```text
+slab base
+  |
+  +-- object 0 (aligned)
+  |       <------ s->size: slot stride ------>
+  +-- object 1 (aligned)
+  |       <------ s->size: slot stride ------>
+  +-- object 2 (aligned)
+
+s->size = ALIGN(実際に必要な寸法 + metadata/padding, s->align)
+```
+
+`object_size`は利用者が要求するobjectの基本サイズ、`size`はfreelist metadata・debug領域・alignment等を含めた内部slotのstrideです。両者が一致しない場合、1 slabに収容できるobject数が減り、ページ内の内部断片化が増えることがあります。サイズ調整は性能だけの問題ではなく、freepointerやred zone等の管理領域を正しく配置するための制約も受けます。
+
+#### `SLAB_HWCACHE_ALIGN`とcache line
+
+`SLAB_HWCACHE_ALIGN`はobject配置をhardware cache lineに関連づける要求です。Linux 6.18の`calculate_alignment()`はcache line sizeを基準にしつつ、objectが小さい場合にはより小さい約数のalignmentを選ぶため、すべてのobjectの先頭を常にcache line境界へ揃えるとは限りません。大きめのobjectはcache line境界に揃うよう要求される場合があります。最終的なslot寸法もalignmentの倍数になるよう調整されます。
+
+狙いの一つは、複数CPUが頻繁に更新する別objectが同一cache lineを共有することによるfalse sharingを抑えることです。ただしcache line分のpaddingはメモリ使用量を増やし、slab当たりのobject数を減らします。また、alignmentだけでfalse sharingが必ずなくなるわけではなく、object size・隣接配置・アクセスpattern・hardware cache line sizeを合わせて検討します。性能上の理由がなければ、専用cacheの全objectをcache line境界に揃える必要はありません。
+
+第3版の「最大alignmentは常に4 KiB」「x86のwordは常に32 bit」という前提は、Linux 6.18全体には適用できません。ページサイズ、word size、cache line size、アーキテクチャの最小alignmentは構成・architectureに依存します。現行の実値は`PAGE_SIZE`、`sizeof(void *)`、`cache_line_size()`、`arch_slab_minalign()`等の定義・実装で確認します。
+
+| 寸法・設定 | Linux 6.18での意味 |
+|---|---|
+| `object_size` | cache利用者が要求するobjectの大きさ |
+| `align` | object先頭に対するcacheのalignment要件 |
+| `size` | SLUB内部で隣り合うobject slot間のstride |
+| word alignment | pointer等のmetadataと基本的な配置に必要 |
+| `SLAB_HWCACHE_ALIGN` | cache lineを考慮したalignment要求。全objectのstrideがline sizeになるとは限らない |
+
+**Linux 6.18のソースを追う入口**
+
+- `SLAB_HWCACHE_ALIGN`とAPI定義: `include/linux/slab.h`
+- cache作成時のalignment計算: `mm/slab_common.c` (`calculate_alignment()`、`arch_slab_minalign()`)
+- object size、metadata、padding、slot strideの計算: `mm/slub.c` (`calculate_sizes()`)
+- 実行時cache属性の観測: `/sys/kernel/slab/<cache>/align`、`/sys/kernel/slab/<cache>/object_size`、`/sys/kernel/slab/<cache>/size`
