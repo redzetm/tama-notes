@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.2を再整備、次は2.4.3）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.4を再整備、次は2.4.5）
 
 ## 2章の研究観点
 
@@ -709,48 +709,97 @@ Linux 6.18 LTSのソース・文書を追う入口:
 
 #### 2.4.3 ハードウェア保護機構
 
-ページングは、単に番地を変換するだけの仕組みではありません。
-ページテーブルの各エントリには、存在しているか、書き込み可能か、ユーザーから触れてよいか、といった保護情報も
-入っています。
-つまり**ページテーブルは、変換表であると同時に保護表でもあります。**
+ページテーブルentryは変換先だけでなくアクセス権も表します。CPUは実際のaccess type（read/write/execute）、現在の特権状態、各levelの権限、制御registerや有効なCPU機能を組み合わせて許可を判定します。禁止されたaccessではpage fault（`#PF`）が起きますが、それが直ちにプロセス終了を意味するわけではありません。Linuxはfaultの理由とVMA・PTEの状態を調べ、COWなどで解決するか、最終的にsignalを通知するかを判断します。
 
-この点が Linux にとってとても重要です。
-ユーザー空間のプロセスがカーネルメモリを勝手に書き換えられないのは、
-単に「そういう約束だから」ではなく、ページング機構がそのアクセスを禁止するからです。
-書き込み禁止ページ、未割り当てページ、カーネル専用ページへ触れたときに例外が起きるのも、そのためです。
+##### x86 pagingの基本的な権限
 
-Linux 6.18 LTS を読むと、ページフォルトはエラーというより制御の入口としても使われます。
-まだ実メモリを貼っていないページへ初回アクセスしたとき、copy-on-write で複製が必要になったとき、
-ファイルマッピングのページを読み込む必要があるときなど、ページフォルトはカーネルが状態を進める契機になります。
-その意味で、ページングと例外処理は密接に結びついています。
+Linux 6.18のx86 page-table entryでまず読むbitは、Present、RW、User/Supervisor、NXです。entryの解釈や使えるbitはpaging modeやCPU機能に依存します。
+
+| 属性 | 意味の要点 | 研究時の注意 |
+|---|---|---|
+| Present (`P`) | hardwareが有効なmappingとしてwalkを継続できるか | non-present entryは未割当てだけでなく、Linuxがswap等の情報を符号化している場合がある。fault後に解決可能かを別途見る |
+| Read/Write (`RW`) | write accessを許すか | 階層の権限を組み合わせて判定する。Linuxは通常`CR0.WP`を有効にし、supervisorによるread-only pageへのwriteも保護する |
+| User/Supervisor (`U/S`) | user-mode accessを許すか | user accessにはwalkの各levelでuser許可が必要。supervisor accessも他の保護機構により制限されうる |
+| No Execute (`NX`) | instruction fetchを禁止する | NXを使えるCPU機能と`EFER.NXE`の設定が必要。NXは「execute許可bit」ではなく「実行禁止bit」 |
+
+古典的な説明でのUser/Supervisorは、CPLのように4段階の権限を表すものではなく、userとsupervisorの大きな区分です。Linuxが通常使うCPL 3とCPL 0に対応します。ただし、ページアクセスの可否はCPLだけでは決まりません。たとえばユーザー読み取り専用mappingへのwriteは、ページ権限違反としてfaultになり得ますが、VMAが書き込み可能なCOW mappingならLinuxが複製を作って解決する場合があります。
+
+##### 階層全体で決まる実効権限
+
+x86の通常のmulti-level pagingでは、権限は最終PTEだけでなくwalk中の上位entryも含めて判定されます。概念的には、途中のlevelでwriteやuser accessを制限すれば、その下により許可的なPTEがあってもアクセスを許可できません。NXについても、walk経路のNX指定が実行可否に関わります。このため、page-table更新を読むときはleaf entryだけでなく、上位levelのentry flagsやarchitecture helperの処理も追います。
+
+ユーザー/カーネル境界では、user page table mappingのU/S、実行中のCPL、syscall/exception entryの流れを合わせて見ます。さらにCPU対応とkernel設定に応じて、SMEPはsupervisor modeからuser page上の命令を実行することを抑止し、SMAPはsupervisor modeからuser pageをdata accessすることを制限します。これらはU/S bitを置き換えるものではなく、supervisor accessに追加の条件を設ける保護機能です。
+
+Protection Keysなど、対応CPU・設定に応じた追加機能もあります。したがって「PTEにRWとU/Sがあるから保護条件は尽きる」「CPL 0なら全てのpageに無条件でアクセスできる」とは考えません。
+
+##### Linuxのpage fault処理とつなぐ
+
+`#PF`は、non-present mappingだけでなく、write/read/execute権限違反などでも発生します。CPUはfault addressや原因を示す情報を保存し、Linuxのx86 fault handlerがそれを解釈します。ユーザー範囲の合法なCOW writeや遅延mappingなら解決して命令を再実行できる一方、VMAが許可しないアクセスやkernelの不正なaccessは別のエラー経路になります。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86 PTE権限bitとNX定義: `arch/x86/include/asm/pgtable_types.h`
+- x86 CPU機能の定義: `arch/x86/include/asm/cpufeatures.h`
+- x86 page fault entry・原因判定: `arch/x86/mm/fault.c`
+- VMA/PTEを使ったfault解決: `mm/memory.c`
+- x86 page-table helperとpermission操作: `arch/x86/include/asm/pgtable.h`
+
+この小節で固定したいこと:
+
+- page tableはmappingだけでなく、Present・write・user/supervisor・execute制御の情報を持つ
+- effective permissionはleaf PTEだけではなく、walkの上位entryやCPUの制御状態にも依存する
+- NXは対応機能と有効化条件を持つ実行禁止bitである
+- SMEP/SMAPやProtection Keysなどが、基本のU/S・RW判定へ追加制約を加える場合がある
+- `#PF`の発生は即座に失敗を意味せず、Linuxがmappingの意味を調べて解決可否を判断する
 
 #### 2.4.4 通常ページングの例
 
-元の本文がまず説明しているのは、4KB ページを使う通常の 32 ビットページングです。
-ここではリニアアドレスをいくつかのフィールドに分け、上位側をページディレクトリやページテーブルの索引として使い、
-下位 12 ビットをページ内オフセットとして使います。
+ここでは原文と同じ非PAE・32-bit x86の通常ページングを使い、addressからdirectory index、table index、offsetを取り出して、仮定したpage-table entryを順にたどります。これはhardware walkの仕組みを追うための例であり、Linux 6.18のx86-64で実際に使われるpage-table構成ではありません。
 
-64 ビット環境の感覚で描くと、アドレスの切り分けは次のようなイメージです。
+#### 原文の範囲を使った例
 
-![64ビット仮想アドレスのビット分割](img/x86_64-address-bit-split.svg)
+仮想範囲`0x20000000`から`0x2003ffff`は256 KiB、4 KiB pageで64 page分です。非PAEの32-bit pagingでは、この全範囲のdirectory indexは`0x080`で同じになり、table indexは`0x000`から`0x03f`までを使います。したがって、この例では一つのPDEが一つのpage tableを参照し、そのtableの先頭64個のentryが範囲に対応します。
 
-図 2-7 64 ビット環境での仮想アドレスの分割イメージ
+例としてaddress`0x20021406`を1 byte読み出すとします。32-bit・4 KiB pageのbit分割は次の通りです。
 
-この方式のポイントは、4KB という固定単位で仮想空間を扱うことにあります。
-4KB は細かすぎず粗すぎず、保護や遅延割り当てや共有を行う単位として実用的です。
-Linux の多くの基本操作も、このページ単位を前提に組み立てられています。
+```text
+31             22 21             12 11             0
++----------------+-----------------+-----------------+
+| directory (10) | table index (10)| offset (12)     |
++----------------+-----------------+-----------------+
+        0x080             0x021             0x406
+```
 
-ここで 64 ビット環境の話を無理に混ぜなくてもよいのは、この節の狙いが「ページングとは何を分割し、何を対応付ける仕組みなのか」
-をいちばん単純な形で掴むことにあるからです。
-32 ビット x86 の通常ページングは、ページディレクトリ、ページテーブル、オフセットという役割分担が見えやすく、
-多段ページテーブルの基本形としてとても追いやすいです。
-そのうえで、64 ビット環境ではこの考え方がより多段に拡張されるだけだ、と読めば流れが崩れません。
+| 段階 | 参照・計算 | この例の値 |
+|---|---|---:|
+| PDE選択 | CR3が示すpage directoryのentry | `0x080` |
+| PTE選択 | PDEが示すpage tableのentry | `0x021` |
+| page内位置 | PTEのmapping先frame内のoffset | `0x406` |
 
-また、**各プロセスは自分専用のページテーブル群を持ちます。**
-このため、同じ仮想アドレス値であっても、プロセス A とプロセス B で別の物理ページフレームを指すことができます。
-これがプロセス分離の基本です。
-各プロセスは自分だけの連続したメモリ世界を持っているように見えますが、実際にはカーネルが個別の対応表を
-持たせているわけです。
+PDEが指すpage tableが物理address`0x00111000`にあり、PTE`0x021`がframe base`0x00abc000`を指すと仮定すると、読み出される物理addressは`0x00abc000 + 0x406 = 0x00abc406`です。page offsetは変換前後で保持されます。ここで示したtable addressとframe baseは説明用の仮定であり、実際のLinux mappingではありません。
+
+Linux 6.18のx86-64で4 KiB pageを使う場合は、indexの段数と幅がこの例とは異なります。4-level pagingなら4つの9-bit indexと12-bit offset、5-level pagingならさらに上位のindexが加わります。変換の考え方は同じですが、32-bit例の`0x080`や`0x021`を64-bitのtable indexと混同しないようにします。
+
+#### ページテーブルにentryがないとき
+
+このアドレスが属する範囲のpage tableが存在しない、または対象PTEがpresentでない場合、MMUのwalkはpage faultになります。しかし、faultの発生だけでは「物理RAMにデータが存在しない」「プロセスが不正アクセスした」とは決められません。Linuxはfault addressがVMAの範囲と権限に合うか、匿名memory・file mapping・COW・swap等の状態がどうなっているかを調べ、mappingを作って命令を再実行できるか判断します。VMAの範囲外や権限違反なら解決できず、通常ユーザープロセスにはsignalとして通知されます。
+
+また、page tableをどのように共有・複製するかはLinuxの実装やmappingに依存します。「各プロセスが自分だけの完全に独立した全page-table群を持つ」と単純化せず、`mm_struct`が表すaddress space、共有memory、copy-on-write、kernel mapping、page-table levelごとの実装を分けて追います。同じ仮想addressが異なる物理pageを指すことはプロセス分離の基本的な例ですが、すべてのmappingが常に別個という意味ではありません。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86のpage-fault entryとfault原因の解釈: `arch/x86/mm/fault.c`
+- VMAとpage tableを調べてfaultを解決する経路: `mm/memory.c`
+- page-table hierarchyとarchitecture helper: `include/linux/pgtable.h`、`arch/x86/include/asm/pgtable.h`
+- address spaceとVMAの構造: `include/linux/mm_types.h`
+
+この小節で固定したいこと:
+
+- 32-bit非PAE・4 KiBの例では、`0x20021406`の各fieldはdirectory=`0x080`、table=`0x021`、offset=`0x406`
+- PDEとPTEをたどってframe baseを得た後、page offsetを加えて物理addressを作る
+- 例示用のentry値はLinuxの実際のmappingではない
+- non-present entryによるpage faultは、Linuxが解決可能な場合と不正アクセスの場合の両方がある
+- process address spaceとpage-table storageの共有・複製を一律に「全て専用」としない
 
 #### 2.4.5 物理アドレス拡張（PAE）ページング
 
@@ -1054,4 +1103,3 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
