@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」
-- 今回の主題: 旧来のslab coloringの原理と、Linux 6.18のSLUBにおけるobject配置・cache aliasing対策との区別
-- 現在の進捗: 8.1〜8.2.10を作成済み。8.2.11以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」
+- 今回の主題: CPUごとの空きobject管理、SLUBのper-CPU freelistとpartial slab cache、旧array_cacheとの違い
+- 現在の進捗: 8.1〜8.2.11を作成済み。8.2.12以降は未着手
 
 ## 第8章の見取り図
 
@@ -52,7 +52,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.8 | object descriptorとfree object内のfreelist link | 作成済み |
 | 8.2.9 | object alignmentとSLUBのslot寸法 | 作成済み |
 | 8.2.10 | slab coloringの原理とLinux 6.18 SLUBとの差 | 作成済み |
-| 8.2.11〜8.2.15 | local cache、object割り当て・解放、mempool | 未着手 |
+| 8.2.11 | per-CPU object cacheとSLUBのCPU-local状態 | 作成済み |
+| 8.2.12〜8.2.15 | object割り当て・解放、汎用object、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1345,3 +1346,53 @@ Linux 6.18のページアロケータにも、ページcoloring由来のcache al
 - slabページからobject列を初期化する経路: `mm/slub.c` (`allocate_slab()`、`setup_object()`)
 - object slotの寸法とalignment: `mm/slub.c` (`calculate_sizes()`)
 - ページ確保batchとcache aliasingへの言及: `mm/page_alloc.c`（ページアロケータのbatch計算）
+
+### 8.2.11 空きスラブオブジェクトのローカルキャッシュ
+
+#### CPUごとに空きobjectを持つ理由
+
+objectの確保・解放のたびに、全CPUで共有するslab listやlockへアクセスすると、CPU間の競合とcache lineの移動が増えます。そこでアロケータは、各CPUが頻繁に使う空きobjectをCPU-localな状態に持たせ、通常の確保・解放を短い経路で処理します。CPU-localな空きobjectが尽きたときやslabの切り替えが必要なときだけ、partial slabの共有管理やpage allocatorへ進みます。
+
+#### 旧`array_cache`とLinux 6.18 SLUBの構造は異なる
+
+第3版の`array_cache`は、空きobjectへのpointerを配列に格納し、`avail`、`limit`、`batchcount`で配列の残量と一括補充・排出を管理する構造です。Linux 6.18の通常のSLUB経路をこの配列モデルで捉えるのは適切ではありません。SLUBのCPU-localな中核は`struct kmem_cache_cpu`です。主な状態は、次の通りです。
+
+| 状態 | 役割 |
+|---|---|
+| `freelist` | 次に割り当てる空きobjectの先頭pointer。次のpointerはfree object内のfreepointerから得る |
+| `slab` | CPUが現在割り当てに使っているslab |
+| `partial` | `CONFIG_SLUB_CPU_PARTIAL`が有効な場合にCPU-localで保持するpartial slabの連鎖 |
+| `tid` | freelist更新の検証に使うtransaction ID。CPU-local fast pathの競合・再試行判定に関わる |
+| `lock` | CPU-local状態を扱うslow path等を保護するlocal lock |
+
+```text
+CPU A の kmem_cache_cpu                    node共有の管理
++----------------------------+             +----------------------+
+| slab: 現在使用中のslab     |             | kmem_cache_node      |
+| freelist -> obj -> obj -> …|             | partial slab list    |
+| partial -> slab -> slab    |             +----------------------+
+| tid / local lock           |
++----------------------------+
+          |
+          +-- object本体はslab内。空きobjectの連結先は各object内にある
+```
+
+`freelist`は空きobject pointerをCPU-localなポインタ配列に複製して保持するのではなく、section 8.2.8で見たようにfree object内のfreepointerをたどる連結構造です。CPU側には現在の先頭と利用中のslabを置きます。通常経路の確保はCPU-local freelist headを更新し、slab/nodeの共有list lockへ毎回入ることを避けます。CPU-local状態が空、NUMA node条件に合わない、debug等でfast pathを使えない場合はslow pathへ進み、partial slabを取得または新しいslabを確保します。
+
+`CONFIG_SLUB_CPU_PARTIAL`が有効なら、CPUは現在割り当て中のslabとは別にpartial slabをいくつか保持できます。これにより、現在のslabが使い切られた際にnode共有listへ行かず次のslabへ移れる場合があります。保持数には上限があり、drainやcache管理時にはslabをnode単位のpartial listへ戻します。したがって「CPU-local cache」はobject pointerの配列だけを指すのではなく、CPU-local freelist/current slabに加え、構成に応じたpartial slab保持まで含む階層として理解します。
+
+Linux 6.18には明示的なbatch object cacheである`slab_sheaf` APIもあります。これは通常の`kmem_cache_alloc()`経路における`kmem_cache_cpu`の代替名ではなく、objectをまとめて事前確保・保持する別の仕組みです。標準のCPU-local freelist、CPU partial slab、node partial listとの役割を混同しないようにします。
+
+#### 並行性と構成上の注意
+
+fast pathは`freelist`と`tid`を組み合わせた更新検証を使い、同一CPUでの割り込み・再入やCPU移動を含む競合に対して操作を再検証します。slow pathではlocal lockやnode list lockを必要に応じて使います。したがって「CPU-localだから同期が不要」ではありません。どの状態を誰が更新し、どの経路でlockまたはatomic操作により整合性を保つかを、`slab_alloc_node()`、`__slab_alloc_node()`、`___slab_alloc()`の順に追うと見通しやすくなります。
+
+`CONFIG_SLUB_CPU_PARTIAL`はSMPかつ`!SLUB_TINY`の場合に有効化できる機能です。CPU partial cacheは割り当てを速めますが、free時に保持slabをdrainする際にlockを取得することがあり、遅延の変動要因にもなります。リアルタイム性を重視する構成ではKconfigの説明と実際のconfigを確認します。`SLUB_TINY`では通常の`kmem_cache_cpu`構造や多くの高速化機構が簡略化されます。
+
+**Linux 6.18のソースを追う入口**
+
+- CPU-local allocator state: `mm/slub.c` (`struct kmem_cache_cpu`)
+- object allocation fast/slow paths: `mm/slub.c` (`__slab_alloc_node()`、`___slab_alloc()`、`slab_alloc_node()`)
+- CPU partial slab cache: `mm/slub.c` (`put_cpu_partial()`、`CONFIG_SLUB_CPU_PARTIAL`)
+- 機能の有効条件とlatency trade-off: `mm/Kconfig` (`SLUB_CPU_PARTIAL`、`SLUB_TINY`)
+- 公開sheaf API: `include/linux/slab.h` (`kmem_cache_prefill_sheaf()`、`kmem_cache_alloc_from_sheaf()`)
