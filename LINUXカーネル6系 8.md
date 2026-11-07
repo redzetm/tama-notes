@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」
-- 今回の主題: 空slabの破棄、partial slabの保持・整理、cache shrinkとページアロケータへの返却
-- 現在の進捗: 8.1〜8.2.7を作成済み。8.2.8以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」
+- 今回の主題: SLUBでfree objectを連結するfreelist metadataの所在、旧kmem_bufctlとの違い、freepointerの配置と保護
+- 現在の進捗: 8.1〜8.2.8を作成済み。8.2.9以降は未着手
 
 ## 第8章の見取り図
 
@@ -49,7 +49,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.5 | slab allocatorとpage allocatorの確保・返却連携 | 作成済み |
 | 8.2.6 | cacheへのslab割り当てとSLUBのfallback | 作成済み |
 | 8.2.7 | cache内slabの破棄・shrink | 作成済み |
-| 8.2.8〜8.2.15 | object管理・割り当て・解放、mempool | 未着手 |
+| 8.2.8 | object descriptorとfree object内のfreelist link | 作成済み |
+| 8.2.9〜8.2.15 | object配置・割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1219,3 +1220,40 @@ RCU遅延解放が適用される場合、slabをpartial listから取り外し�
 - slabのdiscardとbacking page返却: `mm/slub.c` (`discard_slab()`、`free_slab()`、`__free_slab()`、`rcu_free_slab()`)
 - cacheの明示的shrink: `mm/slab_common.c` (`kmem_cache_shrink()`)、`mm/slub.c` (`__kmem_cache_shrink()`、`__kmem_cache_do_shrink()`)
 - memory pressure時のshrinker dispatch: `mm/vmscan.c` (`shrink_slab()`呼び出し)、`mm/shrinker.c`
+
+### 8.2.8 オブジェクトディスクリプタ
+
+第3版のSLABでは、各objectに対応する`kmem_bufctl_t`が、空きobjectの次のindexを保持するfree-list metadataとして説明されます。このdescriptor配列をslabの内側または外側に置く構成がありました。Linux 6.18のSLUBでは、この形式のobject descriptor配列や`kmem_bufctl_t`は使いません。空きobjectをつなぐlink自体を、通常はfree中のobject領域に格納します。
+
+```text
+struct slab
+  freelist ──> free object A ──> free object B ──> free object C ──> NULL
+                 (freepointer)    (freepointer)    (freepointer)
+
+allocated object:
+  object payloadとして利用中。free-list linkとしては使用しない
+```
+
+`struct slab`の`freelist`は最初のfree objectを指し、各free object内のfreepointerが次のfree objectを指します。objectを割り当てると先頭をfreelistから外し、free時にはlinkを設定してfreelistへ戻します。したがってfreepointerは独立したdescriptor配列ではなく、objectの状態に応じて再利用される管理情報です。objectが利用者へ渡されている間は、その位置もobject領域として扱われます。
+
+#### freepointerの位置と例外
+
+通常のSLUB cacheでは、freepointerのoffsetはobject slot内に配置されます。ただしcache flags、constructor、debug設定、`SLAB_TYPESAFE_BY_RCU`等の寿命・検査条件により、freepointerをobjectの外側に置く場合があります。現行実装の`kmem_cache_args`は、`SLAB_TYPESAFE_BY_RCU` cacheで外側配置を避ける必要があるcache creator向けに、明示的な`freeptr_offset`設定を提供します。これは旧版の「全objectにdescriptor配列を割り当てる」モデルと異なる、freepointer一つの配置選択です。
+
+free中のobject領域にlinkを置くため、freeしたobjectの内容を利用側データとして読み書きしてはいけません。特にuse-after-freeや二重freeを避けるため、objectの所有権・参照・寿命を正しく管理します。`CONFIG_SLAB_FREELIST_HARDENED`が有効な構成ではfreepointerの符号化等も行われますが、これは不正なlink改変への緩和策であり、解放済みobjectを参照してよいという意味ではありません。`CONFIG_SLAB_FREELIST_RANDOM`による新規slab上のfreelist順序のrandomizationも、link metadataの保存場所とは別の仕組みです。
+
+| 観点 | Linux 6.18 SLUB |
+|---|---|
+| free listの先頭 | `struct slab::freelist` |
+| 次のfree object | free objectに置かれたfreepointer |
+| object index配列 | 旧`kmem_bufctl_t`形式のdescriptor配列は使わない |
+| pointer offset | cacheのサイズ計算で決定し、条件によってobject外配置や指定offsetがある |
+| pointer hardening | `CONFIG_SLAB_FREELIST_HARDENED`でfreepointerの符号化等を行う |
+
+**Linux 6.18のソースを追う入口**
+
+- freelist linkの読み書き・符号化: `mm/slub.c` (`get_freepointer()`、`set_freepointer()`、`freelist_ptr_encode()`、`freelist_ptr_decode()`)
+- freepointer offsetとobject slot寸法の決定: `mm/slub.c` (`calculate_sizes()`)
+- `SLAB_TYPESAFE_BY_RCU` cacheのcustom offset: `include/linux/slab.h` (`struct kmem_cache_args::freeptr_offset`)
+- slab単位のfreelist head: `mm/slab.h` (`struct slab::freelist`)
+- freelistの初期構築: `mm/slub.c` (`allocate_slab()`、`setup_object()`)
