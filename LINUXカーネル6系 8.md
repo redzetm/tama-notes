@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」
-- 今回の主題: `kmem_cache_free()`のhookとfree fast path、remote free、partial slab化・slab破棄、即時再利用されない条件
-- 現在の進捗: 8.1〜8.2.13を作成済み。8.2.14以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」
+- 今回の主題: `kmalloc()`のsize class選択、cache type・GFP flagsによる分岐、大きな割り当てと`kfree()`の経路
+- 現在の進捗: 8.1〜8.2.14を作成済み。8.2.15以降は未着手
 
 ## 第8章の見取り図
 
@@ -55,7 +55,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.11 | per-CPU object cacheとSLUBのCPU-local状態 | 作成済み |
 | 8.2.12 | object割り当てのfast/slow pathと新規slab確保 | 作成済み |
 | 8.2.13 | objectの解放とSLUB freelist/slab状態の更新 | 作成済み |
-| 8.2.14〜8.2.15 | 汎用object、mempool | 未着手 |
+| 8.2.14 | `kmalloc()`の汎用size classと解放経路 | 作成済み |
+| 8.2.15 | mempoolの予約・枯渇時動作 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1510,3 +1511,57 @@ slab内の全objectがfreeになっても、そのslabページが必ず直ち�
 - sheaf/CPU-local fast free: `mm/slub.c` (`slab_free()`、`do_slab_free()`)
 - remote freeとslab state更新: `mm/slub.c` (`__slab_free()`、`free_to_partial_list()`)
 - CPU partialへ保持: `mm/slub.c` (`put_cpu_partial()`)
+
+### 8.2.14 汎用オブジェクト
+
+#### `kmalloc()`は要求サイズに合うcacheを選ぶ
+
+専用の`kmem_cache`を用意せず、サイズで決まる汎用cacheからbyte領域を確保するAPIが`kmalloc(size, gfp)`です。要求サイズ以上を収容できるsize classが選ばれ、返された領域は要求サイズ分だけ利用できます。サイズclass間の差は内部断片化となるため、頻繁に確保・解放する決まった構造体には専用cacheを使い、任意サイズの小さな一時領域等には`kmalloc()`を使う、という使い分けが基本になります。
+
+```c
+struct entry *e = kmalloc(sizeof(*e), GFP_KERNEL);
+if (e) {
+        /* e は要求サイズ分だけ初期化・参照する */
+        kfree(e);
+}
+```
+
+`kmalloc_array(n, size, flags)`や`kcalloc()`は、配列要素数と要素サイズの積がoverflowしないかを確認してから確保します。配列サイズを単純に`n * size`として`kmalloc()`へ渡すより、積のoverflowを検査するAPIを利用します。ゼロ初期化が必要なら`kcalloc()`等の用途に合ったAPIを選びます。
+
+#### Linux 6.18のsize classとcache type
+
+Linux 6.18では`KMALLOC_MIN_SIZE`やpage size、architectureの設定に応じてkmalloc cache群を初期化します。size classには通常の2のべき乗系列があり、構成によっては64〜96 byte、128〜192 byteなどの中間classも使われます。したがって「すべての要求を最も近い2のべき乗に切り上げる」という旧来の説明は現行実装を正確には表しません。実際のclassは`kmalloc_index()`、index table、`kmalloc_slab()`と初期化されたcache tableを追って確認します。
+
+サイズだけでなくGFP flags等によっても利用するcache群が選ばれます。構成に応じてDMA向け、reclaimable、memcg accounting向けのcache typeがあり、`CONFIG_RANDOM_KMALLOC_CACHES`では通常のkmalloc cacheを複数作り、呼び出し元に基づく選択を加える場合があります。このため「size classが同じなら常に同じ`kmem_cache`」とは限りません。旧版にあるISA DMA cacheという説明も、現在のDMA zone構成・architectureの制約と同一視せず、`__GFP_DMA`と`CONFIG_ZONE_DMA`等の現在の条件を確認します。
+
+```text
+kmalloc(size, flags)
+      |
+      +-- size == 0 -> ZERO_SIZE_PTR
+      |
+      +-- size <= KMALLOC_MAX_CACHE_SIZE
+      |       +-- size -> kmalloc_index / cache table index
+      |       +-- flags, config, caller -> kmalloc cache type
+      |       +-- selected kmem_cache -> SLUB object allocation
+      |
+      +-- larger request -> page allocator-backed large kmalloc
+```
+
+#### slab cacheを使う上限と大きな要求
+
+Linux 6.18のSLUBでは、`KMALLOC_MAX_CACHE_SIZE`は`1UL << (PAGE_SHIFT + 1)`、すなわち2ページ分です。それ以下のkmalloc要求はsize class cacheから割り当てられ、それを超える要求はpage allocatorを使うlarge-kmalloc経路へ進みます。たとえばpage sizeが4 KiBの構成ではcache経由の上限は8 KiBですが、これは固定の普遍値ではありません。最大要求サイズは別に`KMALLOC_MAX_SIZE`で制限され、architecture/configに依存します。
+
+large-kmallocはfolio/page allocatorから必要なorderの連続ページを得て要求領域を管理します。従って小さいcache objectと大きなkmalloc割り当てでは、確保単位・断片化・解放経路が異なります。大きな連続領域が必要な場面ではサイズだけでなく物理連続性の要件も検討し、代替として`kvmalloc()`が適切かを判断します（`kvmalloc()`は状況によりvmalloc領域へfallbackし得ます）。
+
+#### `kfree()`と要求サイズの扱い
+
+`kfree(ptr)`は、`kmalloc()`系で得たポインタからfolioを特定し、それがslabかlarge-kmallocかに応じて対応する解放経路へ進みます。`NULL`およびzero-size sentinelはno-opです。旧版のように利用者が`virt_to_page()->lru`からcache descriptorを直接読み出すと考える必要はありません。Linux 6.18ではfolio/slab metadata等を使って分類し、slab objectならそのcacheのSLUB free pathへ、large-kmallocならページを解放する経路へ進みます。
+
+割り当てサイズのclass余剰分が存在しても、要求サイズを超えて書き込んではいけません。`ksize()`で実割り当てサイズを問い合わせることはできますが、通常は要求サイズを超えるアクセスの根拠にせず、必要な余裕を確保前に扱う場合は`kmalloc_size_roundup()`を使って丸めたサイズを要求します。配列確保では`kmalloc_array()`等を使い、サイズ計算overflowを防ぎます。
+
+**Linux 6.18のソースを追う入口**
+
+- `kmalloc()`のcompile-time/dynamic経路とsize class: `include/linux/slab.h` (`kmalloc_noprof()`、`kmalloc_index()`、`kmalloc_type()`)
+- cache tableの作成とsize class初期化: `mm/slab_common.c` (`create_kmalloc_caches()`、`kmalloc_size_roundup()`)
+- 要求サイズからcacheを選び、large要求を振り分ける箇所: `mm/slub.c` (`__do_kmalloc_node()`、`kmalloc_slab()`、`___kmalloc_large_node()`)
+- ポインタからslab/large-kmallocを判定する解放: `mm/slub.c` (`kfree()`、`free_large_kmalloc()`)
