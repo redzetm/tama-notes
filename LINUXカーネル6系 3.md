@@ -1,8 +1,8 @@
 ---
-title: "LINUXカーネル6系の研究３　プロセス"
+title: "LINUXカーネル6系の研究３ プロセス"
 ---
 
-# LINUXカーネル6系の研究　３
+# LINUXカーネル6系の研究３ プロセス
 
 この 3 章では、Linux 6.18 LTS を読むときに避けて通れない、プロセスという実行主体の見方を整理していきます。
 1 章ではカーネル全体の構造を先に眺め、2 章では仮想アドレス空間と物理メモリの結び付き方を確認しました。
@@ -301,6 +301,14 @@ PID namespace があるため、同じ task でも namespace ごとに見える�
 - PID、TGID、PGID、SID のように、複数の識別軸がある。
 - そのため、番号と task の対応付けは単純配列ではなく、共有可能な pid オブジェクトを介して扱う。
 
+原文の PID hash table は、PID 番号から task_struct を検索する仕組みを理解するための歴史的な図として読みます。
+Linux 6.18 では、PID namespace ごとの `idr` が番号から `struct pid` を検索できるようにし、
+`struct pid` は namespace ごとの番号情報と PID type ごとの task リストを持ちます。
+各 task 側には PID 関連付け用の `pid_links[]` があり、task の検索は `find_pid_ns()` と `pid_task()` などを通じて行われます。
+番号の割り当て・検索、task への関連付け、namespace ごとの番号の見え方はそれぞれ別の処理です。
+そのため、原文の「PID をハッシュして task_struct を直接得る」モデルを現行実装へそのまま当てはめず、
+`kernel/pid.c`、`include/linux/pid.h`、`find_pid_ns()` や `pid_task()` 周辺を対応させて確認します。
+
 #### 3.2.2.1 プロセスディスクリプタ処理
 
 原文では、`thread_info` とカーネルスタックを固定サイズ領域に置き、スタックポインタから現在 task を求める x86-32 の配置を説明しています。
@@ -330,11 +338,11 @@ current->mm、current->files、current->cred、current->pid のような形で�
 #### 3.2.2.3 双方向リスト
 
 原文の 3.2.2.3 では、Linux の双方向リストを構成する `list_head` の考え方を説明しています。
-task_struct は単独で存在するのではなく、全 task のリスト、親子リスト、スレッドグループ、runqueue など、
-複数の連結関係の中に埋め込まれています。
+task_struct は単独で存在するのではなく、全 task の走査、親子関係、スレッドグループなど、
+複数の関係構造に参加します。scheduler の runqueue は、これらのリストとは目的も実装も別の管理構造です。
 
 Linux の list_head は「コンテナ自身ではなく、要素の中にリンクを埋め込む」設計です。
-このため 1 つの task_struct が、tasks、children、sibling、thread_group など複数のリストに同時参加できます。
+このため 1 つの task_struct が、`tasks`、`children`、`sibling`、`thread_node` など複数の関係に同時参加できます。
 これは Linux カーネル全体に広く出てくる重要な設計なので、ここで慣れておく価値があります。
 
 #### 3.2.2.4 プロセスリスト
@@ -342,6 +350,17 @@ Linux の list_head は「コンテナ自身ではなく、要素の中にリン
 カーネルは task をリストなどの関係構造に接続し、全体を走査したり、親子やスレッドグループをたどったりできるようにします。
 ただし「全 task の管理リスト」と「CPU ごとの runnable task を選ぶ runqueue」は目的が異なります。
 Linux 6.18 では、runqueue は scheduler class ごとの構造を持つため、全 task の一覧をそのまま実行順序の一覧と見なしてはいけません。
+
+現行コードを読むときは、リストごとに目的と要素を区別します。
+
+- `task_struct.tasks`: システム全体を走査するため、スレッドグループリーダをつなぐリスト。`for_each_process()` はこのリストをたどります。
+- `task_struct.children` / `sibling`: 親子関係をたどるリスト。runqueue ではありません。
+- `signal->thread_head` と各 task の `thread_node`: 同じスレッドグループに属する task の関係を表します。`for_each_process_thread()` はプロセスリーダの走査と各 thread group 内の走査を組み合わせます。
+- per-CPU runqueue: 実行可能 task を scheduler class ごとの規則で管理し、次に実行する task を選ぶための構造です。
+
+これらの関連付けや走査には、task list lock や RCU などの同期規則が関係します。
+「全 task を列挙するリスト」と「実行可能 task を選ぶためのキュー」を混同せず、
+`include/linux/sched.h`、`kernel/sched/core.c` の走査マクロとロック条件を合わせて確認します。
 
 #### 3.2.2.5 TASK_RUNNING 状態プロセスのリスト
 
@@ -521,15 +540,20 @@ TLB の整合性も問題になります。
 
 ##### 3.3.4.1 FPU レジスタの退避
 
-task が FPU/SIMD 命令を使った後は、その task の拡張 CPU 状態を必要に応じて保存し、別 task の状態と混ざらないようにします。
+task ごとの FPU/SIMD 状態は、別 task の実行状態と混ざらないように管理されます。
 現代 x86 では x87、SSE、AVX などの状態が対象になり、XSAVE 系機構とカーネルの FPU state 管理が関係します。
-古い `TS_USEDFPU` や task switch のたびに必ず全状態を保存する説明を現行 Linux の固定手順とは見なしません。
+Linux 6.18 の x86 を、原文にある `TS_USEDFPU` を使った旧来の trap 駆動の lazy switching と同じ仕組みとして読んではいけません。
+現在の保存・復元は task の FPU 状態、CPU が保持する状態、復元が必要であることを示すフラグを連携させて行われます。
+たとえば `TIF_NEED_FPU_LOAD` は task の FPU 状態を CPU へ再ロードする必要があることを示し、
+`switch_fpu_return()` などの経路が復元に関係します。どの時点で保存し、ユーザー空間へ戻る前のどの経路で復元するかは実装を確認し、
+「task switch ごとに全レジスタを無条件にコピーする」とも「使われるまで古い状態を残す」とも単純化しないでください。
 
 ##### 3.3.4.2 FPU レジスタの回復
 
-保存した状態は、task が再び FPU/SIMD 状態を必要とする場面で復元されます。
-どのタイミングで保存・復元するかは CPU 機能とカーネル実装に依存し、Linux は不要な状態転送を避けながら task 間の独立性を保ちます。
-研究では、汎用レジスタの context switch と、拡張状態の保存回復を別の処理として追います。
+保存した状態は、その task が再び FPU/SIMD 状態を使う前に、CPU が参照する状態へ復元されます。
+復元のタイミングや対象は CPU 機能とカーネル実装に依存し、不要な状態転送を避けながら task 間の独立性を保ちます。
+研究では、汎用レジスタの context switch と、拡張状態の保存・復元を別の処理として追い、
+`arch/x86/kernel/fpu/` の scheduler 連携コードとユーザー空間復帰経路を合わせて確認します。
 
 ##### 3.3.4.3 カーネルモードにおける FPU/SIMD の利用
 
@@ -585,6 +609,11 @@ CLONE_VFORK などは、現在でも本質的です。
 - そのほかの実行資源共有: CLONE_FILES、CLONE_FS、CLONE_SIGHAND、CLONE_SYSVSEM。
 - スレッドグループ化や生成補助: CLONE_THREAD、CLONE_SETTLS、CHILD_CLEARTID 系、CLONE_VFORK。
 
+clone 系フラグには組み合わせ上の制約もあります。たとえば `CLONE_THREAD` は `CLONE_SIGHAND` を必要とし、
+`CLONE_SIGHAND` は `CLONE_VM` を必要とします。また、新しい mount namespace を作る `CLONE_NEWNS` と
+`CLONE_FS` の同時指定は許されません。カーネルは生成時にこうした制約を検査するため、
+フラグ表は独立したスイッチの一覧ではなく、相互依存を持つ指定として読みます。
+
 ここで特に重要なのは、CLONE_THREAD が単に「軽い task を作るフラグ」ではないことです。
 これは thread group を作り、親子通知や signal の扱いまで含めて、
 「この task は既存プロセスの別スレッドとして振る舞う」ことを意味します。
@@ -607,14 +636,17 @@ Linux 6.18 では古い `do_fork()` を現行の入口名として探すので�
 
 1. ユーザー空間が fork / clone / clone3 を呼ぶ。
 2. カーネル入口が clone 引数を正規化する。
-3. copy_process() が task_struct と共有対象の参照関係を組み立てる。
-4. PID を結び付け、親子関係や thread group を接続する。
-5. sched 側初期化を行い、runqueue に載せる。
-6. あとは scheduler が選んだときに ret_from_fork 系経路から子が走り始める。
+3. `copy_process()` が task_struct を準備し、共有・複製する資源の参照関係を組み立てる。
+4. PID、親子関係、thread group などを設定し、scheduler 用の task 初期化も行う。この時点では子 task はまだ通常の runnable task として実行されていない。
+5. `copy_process()` が成功して戻った後、`kernel_clone()` 側が `wake_up_new_task()` を呼び、子 task を実行可能にして runqueue へ投入する。
+6. scheduler が選んだ後、アーキテクチャ固有の fork 復帰経路から子 task が初回実行を始める。
 
 このうち最も重要なのは 3 です。
 copy_process() は、親の何を共有し、何を複製し、何を新規生成するかを決める中心点です。
 mm、files、fs、signal、sighand、namespace、cred、sched 情報などが、ここで整理されます。
+ただし、scheduler 用データの初期化と runqueue への投入は同じ段階ではありません。
+ソースを読むときは `kernel/fork.c` の `copy_process()`、`kernel_clone()` と、
+`kernel/sched/core.c` の `wake_up_new_task()` を分けて追います。
 
 #### copy-on-write と子プロセスの開始位置
 
@@ -741,9 +773,9 @@ task は終了コードを確定し、資源を外し、親へ通知し、必要
 1. もう終わる task だと印を付ける。
 2. 実行中タイマや同期対象から外す。
 3. mm、files、fs、signal、namespace、thread 固有資源を参照解除する。
-4. 親への通知条件を判断する。
-5. 自分を zombie か dead へ進める。
-6. schedule() して二度と通常実行へ戻らない。
+4. `exit_notify()` が親子関係と通知条件を処理し、通常は task をゾンビ状態にして親へ終了を通知する。
+5. task は `schedule()` して通常の実行へ戻らない。親の `wait()` / `waitpid()` / `waitid()` などが終了状態を回収すると、task は最終解放へ進む。
+6. SIGCHLD に明示的に `SIG_IGN` を設定した場合や `SA_NOCLDWAIT` などでは自動回収される場合があるため、終了した task が必ずゾンビとして観測できるとは限らない。
 
 ここで注目すべきは、メモリやファイルが「終了した瞬間に無条件解放」ではないことです。
 共有されていれば参照カウントが減るだけで、最後の参照が落ちたときに初めて本当に解放されます。
@@ -755,7 +787,9 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 
 ここで大事なのは、ゾンビが「後始末漏れのバグ」ではなく、UNIX の親子モデルを成立させるための仕様上の
 中間状態だということです。
-親が wait すれば回収されますし、親が先に死ねば PID 1 側が引き取って回収します。
+親が wait 系システムコールで終了状態を受け取ると、カーネルはその子を回収します。
+親が先に終了した場合は、孤児を適切な reaper へ再親化します。これは常にホスト全体の PID 1 とは限らず、
+より近い subreaper や、その PID namespace の init が受け皿になる場合があります。
 
 #### 3.5.2 プロセスの削除
 
@@ -770,8 +804,10 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 - 利用カウンタを減らし、最後なら task_struct 自体のメモリも回収する。
 
 という処理が進みます。
-つまり kill -9 した瞬間が最終削除点ではなく、親の回収や内部参照の解放まで含めた最後の段階で、
-ようやく完全に消えます。
+ただし、task list や PID 関連付けから外す処理と、task_struct のメモリが物理的に解放される時点は同一とは限りません。
+参照カウントや RCU による遅延解放が関わるため、`release_task()` を見ただけで即時に全メモリが解放されると考えないでください。
+つまり kill -9 した瞬間が最終削除点ではなく、親の回収や内部参照の解放まで含めた段階を経て、
+ようやく task の管理情報も解放可能になります。
 
 #### シグナル、wait、孤児再親化
 
@@ -780,7 +816,8 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 終了経路の見え方が変わります。
 
 特に研究上重要なのは、親子関係が「単に木構造」ではなく、終了通知契約でもあることです。
-親は wait 系システムコールで子の死を回収し、init あるいは PID 1 相当の監督者は孤児の最終受け皿になります。
+親は wait 系システムコールで子の死を回収し、親がいなくなった子は subreaper またはその PID namespace の init など、
+カーネルが選ぶ reaper に引き継がれます。
 この意味で、3.2 の親子関係の節は、3.5 の終了処理で初めて本格的に効いてきます。
 
 ## 3章のまとめ
@@ -812,9 +849,4 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 この章を足場にすると、Linux 6.18 LTS を読むときに「これは task のどの共有関係の話か」「これは task のどの状態遷移か」
 という軸で見られるようになります。そこまで見えると、プロセス管理は個別機能の寄せ集めではなく、
 カーネル全体を貫く骨格として見えてきます。
-
-
-
-
-
 
