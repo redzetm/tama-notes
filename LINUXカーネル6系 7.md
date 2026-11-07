@@ -23,9 +23,9 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 
 ## 今回扱う範囲
 
-- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」、7.4「スケジューラが使用する関数」、7.4.1〜7.4.4
-- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報、tick・起床・sleep・scheduleの経路
-- 現在の進捗: 7.1〜7.4.4を作成。次は7.5「マルチプロセッサにおける実行キューの負荷均衡化処理」を節単位で扱う
+- 原文対応: 7.1「スケジューリング方針」、7.1.1「プロセスプリエンプション」、7.1.2「最適なクォンタムの長さ」、7.2「スケジューリングアルゴリズム」、7.2.1「従来型プロセスのスケジュール」、7.2.2「リアルタイムプロセスのスケジュール」、7.3「スケジューラが使用するデータ構造」、7.3.1「runqueueデータ構造」、7.3.2「プロセスディスクリプタ」、7.4「スケジューラが使用する関数」、7.4.1〜7.4.4、7.5「マルチプロセッサにおける実行キューの負荷均衡化処理」、7.5.1〜7.5.4
+- 今回の主題: Linux 6.18のスケジューリングクラスとpolicy、通常taskの公平性、nice値、リアルタイム・deadline方針、再スケジュール要求、固定クォンタムという見方の限界、EEVDF・FIFO/RR・EDF/CBSの選択規則、CPUごとのrunqueueとtask_struct内のスケジューリング情報、tick・起床・sleep・scheduleの経路、scheduler domainによるCPU topology-aware負荷分散
+- 現在の進捗: 7.1〜7.5.4を作成。次は7.6「スケジューリング関連のシステムコール」を節単位で扱う
 
 ## 7章の見取り図
 
@@ -35,7 +35,7 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測環�
 | 7.2、7.2.1〜7.2.2 | 通常taskとリアルタイムtaskのスケジューリング | 作成済み |
 | 7.3、7.3.1〜7.3.2 | 実行キューとtaskのスケジューリング情報 | 作成済み |
 | 7.4、7.4.1〜7.4.4 | tick、起床、選択、scheduleの経路 | 作成済み |
-| 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 未着手 |
+| 7.5、7.5.1〜7.5.4 | SMPの負荷均衡とtask移動 | 作成済み |
 | 7.6、7.6.1〜7.6.4 | nice、affinity、リアルタイム関連API | 未着手 |
 
 ## 7.1 スケジューリング方針
@@ -559,6 +559,135 @@ tick、taskのwake-up、policy変更などで再スケジュールが必要に�
 - sleepによるscheduleと、need-reschedを記録して後でscheduleする経路を区別する
 - `schedule()` が呼ばれても、別taskへのcontext switchが必ず起きるとは限らない
 - task状態fieldを直接変更せず、wait queueなどの同期APIを使う
+
+## 7.5 マルチプロセッサにおける実行キューの負荷均衡化処理
+
+SMP環境では各CPUにrunqueueがあるため、taskは同時に一つのCPUでしか実行されません。一方、どのCPUに配置するかは単純な「空いているCPUへ移す」だけでは決まりません。CPU topology、taskのaffinity、キャッシュ局所性、CPU capacity、NUMA距離、scheduler classなどを考慮し、配置の利点とtask migrationのコストを比較します。
+
+Linux 6.18の負荷分散は、Linux 2.6当時のtickごとの `rebalance_tick()`、`load_balance()`、`move_tasks()` の固定的な関数分担をそのまま持つわけではありません。現行実装ではscheduler domain hierarchy、各classのbalance iterator、periodic balancing、idle balancing、wake-up時のCPU選択など複数の経路が関与します。
+
+### 7.5.1 スケジューリングドメイン
+
+`struct sched_domain` は、負荷を均衡させるCPUの範囲と、その上位・下位の関係を表します。各CPUには基礎となるdomainがあり、`parent` をたどる階層を形成します。domain内のCPUはscheduler groupに分かれ、group単位の負荷を比較して必要ならtaskを移動します。
+
+```text
+NUMA全体のdomain
+   ├─ node 0のgroup
+   │     └─ node内のCPU/SMT domain
+   └─ node 1のgroup
+         └─ node内のCPU/SMT domain
+```
+
+この図は概念例です。実際のdomain構成はarchitecture、CPU topology、NUMA構成、cpuset partition、kernel configurationなどによって変わります。SMT siblingをどうまとめるか、NUMA node間をいつ比較するかも固定ではありません。Linuxは可能な範囲で近いtopology levelから負荷を比較し、必要な場合に広いdomainへ検討を進めます。
+
+SMPは「全CPUが同じで、どのCPUにも常に同じコストでtaskを移せる」という意味ではありません。big.LITTLE等の非対称capacity、共有cache、SMT sibling、NUMA memory localityなどが存在するため、schedulerはCPU capacityとtopology情報を用います。task affinityやcpusetは、配置可能CPUを制限します。
+
+現行のdomainは2.6時代の「全物理CPUのphys_domains」「論理CPUのcpu_domains」のような固定global配列名をそのまま使うものではありません。Linux 6.18ではCPUごとの `rq->sd` などからdomain階層をたどり、domain・groupの実装を `kernel/sched/sched.h` と `kernel/sched/topology.c` で確認します。
+
+### 7.5.2 周期的な負荷均衡の起動
+
+負荷均衡は、毎tickに全CPUの全taskを走査する処理ではありません。schedulerはtickや他のscheduler eventからbalanceの必要性を判定し、必要な場合にSCHED_SOFTIRQ等の処理へつなぎます。idle CPUが新しいtaskを必要とする場合には、idle balanceの経路が別途動くことがあります。
+
+負荷分散の周期はdomainごとに管理され、偏りの有無やidle状態、過去のbalance結果によって再試行の時期が変化します。NO_HZ環境ではtickの止まったCPUもあるため、2.6のように各CPUでtickごとに同一関数が必ず実行されるとは考えません。
+
+```text
+tick / wakeup / CPU idle等
+          |
+          +--> domainごとにbalanceが必要か判定
+                    |
+                    +--> periodic balancing (SCHED_SOFTIRQ等)
+                    +--> idle balancing
+                    +--> wake-up時のplacement/pull
+                              |
+                              v
+                    不均衡・affinity・capacityを評価
+```
+
+**ソースコードの入口**
+
+- tickからbalance triggerへの共通経路: `kernel/sched/core.c`
+- domainを反復してbalanceする処理: `kernel/sched/fair.c`
+- topologyからscheduler domainを構築: `kernel/sched/topology.c`
+- domain flagの意味: `include/linux/sched/sd_flags.h`
+- scheduler domain設計資料: `Documentation/scheduler/sched-domains.rst`
+
+### 7.5.3 負荷均衡の判定とtask移動
+
+負荷均衡では、単純にrunqueue上のtask数だけを等しくするわけではありません。taskごとの重みやestimated utilization、CPU capacity、group単位の負荷、affinity、taskを動かせるかどうかを考慮し、移動して有効な改善が得られると判断した場合に限ってtaskをpull/pushします。
+
+概念的なpull balancingは次のように整理できます。
+
+1. local CPUのscheduler domainを選び、group間の負荷を評価する
+2. 移動元候補となるbusiest group/CPUを探す
+3. taskのclass iteratorを通じて移動可能な候補を探す
+4. affinity、実行中状態、migration制約などを確認する
+5. runqueue lockを取得してsourceからdequeueし、destinationへenqueueする
+6. destination CPUでより優先すべきtaskになった場合、必要に応じてrescheduleを要求する
+
+実際の実装にはlock競合やbalanceの再試行、task group、NUMA balancing、asymmetric capacityなどがあり、この手順は概要です。Linux 6.18では、移動候補の列挙やclass固有制約をscheduler classのiterator interfaceと連携させます。2.6の `move_tasks()` がexpired arrayから移すという手順は現行構造には当てはまりません。
+
+task migrationにはcache localityを失うコストがあります。そのため、多少の負荷差があれば常に移動するのではなく、CPUの遊休、負荷差、migration cost、taskの利用可能CPUなどを見て判断します。負荷均衡は「全CPUのrunqueue長を必ず同一にする」機能ではなく、性能や応答性を高めるための調整機構です。
+
+#### CPUごとの実行可能task数を確認する例
+
+ユーザー空間からは `/proc/schedstat` などでCPU単位のscheduler統計を調べられる場合があります。以下はファイルを開いて内容を表示するだけの最小例です。列の意味や版ごとの形式はカーネル文書と照合してください。
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+        FILE *file = fopen("/proc/schedstat", "r");
+        char line[512];
+
+        if (file == NULL) {
+                perror("fopen /proc/schedstat");
+                return 1;
+        }
+
+        while (fgets(line, sizeof(line), file) != NULL)
+                fputs(line, stdout);
+
+        if (ferror(file)) {
+                perror("fgets /proc/schedstat");
+                fclose(file);
+                return 1;
+        }
+        if (fclose(file) == EOF) {
+                perror("fclose");
+                return 1;
+        }
+        return 0;
+}
+```
+
+`/proc/schedstat` の出力は `CONFIG_SCHEDSTATS` 等の構成やカーネルversionに依存します。また、統計値は時間経過とともに変化するため、単発の値から負荷分散が正常・異常と結論づけず、該当カーネルの `Documentation/scheduler/sched-stats.rst`、trace event、CPU topologyと合わせて観測します。
+
+### 7.5.4 taskを別CPUへ移動する条件
+
+taskは、CPU affinity maskの外にあるCPUへ移動できません。加えて、実行中taskの移動にはCPU間の同期が必要で、migration-disabled領域にあるtaskやCPU hotplug処理中など、ただちに移せない場合があります。schedulerはtaskの状態とsource/destination runqueueを同期し、class固有のenqueue/dequeue処理を通して移動させます。
+
+移動できるtaskが見つからないこともあります。affinityによる制約、source CPU上で実行中、migration制約、taskのclassやscheduler policy、負荷を減らす効果が不十分といった理由が考えられます。したがって「CPU Aの負荷が高くCPU Bがidleなら、必ずAのtaskがBへ移る」とは限りません。
+
+taskが移動した後も、destination CPUの次の選択はscheduler class規則に従います。移動の完了と移動先での即時実行は別であり、現在taskの再スケジュールが必要かどうかも別途判断されます。
+
+**ソースコードの入口**
+
+- periodic/idle balancingとtask pulling: `kernel/sched/fair.c`
+- task CPU選択、affinity、migration共通処理: `kernel/sched/core.c`
+- scheduler classのbalance iterator: `kernel/sched/sched.h`、各class実装
+- scheduler domain構築・topology: `kernel/sched/topology.c`
+- sched trace event: `include/trace/events/sched.h`
+- scheduler統計の形式: `Documentation/scheduler/sched-stats.rst`
+
+### 7.5で区別しておきたいこと
+
+- runqueueはCPUごとだが、task配置はaffinity・topology・capacity・localityを考慮して調整される
+- scheduler domainは負荷を比較するCPU範囲を表し、ハードウェア構成ごとに階層が異なり得る
+- periodic balancing、idle balancing、wake-up placementは関連するが同一経路ではない
+- balancingはtask数を機械的に同数にそろえる処理ではない
+- task migrationが成功しても、移動先CPUで即座に実行されるとは限らない
+- 2.6の`rebalance_tick()`・`move_tasks()`やexpired arrayの記述を、Linux 6.18の関数構成と混同しない
 
 ## Linux 6.18 LTSのソースを追う入口
 
