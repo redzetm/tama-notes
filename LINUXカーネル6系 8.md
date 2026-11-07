@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」
-- 今回の主題: ベースページとページフレーム、PFNと`struct page`、NUMA nodeとlocal allocation、zoneの役割とzonelistによる割り当て先選択
-- 現在の進捗: 8.1〜8.1.3を作成済み。8.1.4以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」
+- 今回の主題: ベースページ、`struct page`、NUMAとzone、zone watermark、割り当て文脈とGFP flags
+- 現在の進捗: 8.1〜8.1.4を作成済み。8.1.5以降は未着手
 
 ## 第8章の見取り図
 
@@ -36,7 +36,7 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 |---|---|---|
 | 8.1、8.1.1 | ページフレーム、`struct page` | 作成済み |
 | 8.1.2〜8.1.3 | NUMA、メモリゾーン | 作成済み |
-| 8.1.4 | 予約ページとwatermark | 未着手 |
+| 8.1.4 | 空きページのwatermarkとGFP allocation context | 作成済み |
 | 8.1.5〜8.1.9 | ページ割り当て、highmem、buddy、per-CPU cache、zone allocator | 未着手 |
 | 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
@@ -287,3 +287,78 @@ node 0:  +-------------------+-------------------+------------------+
 - zonelist構築、watermark判定、allocator経路: `mm/page_alloc.c`
 - zone/nodeの概念と構成例: `Documentation/mm/physical_memory.rst`
 - DMA bufferの確保要件: `Documentation/core-api/dma-api.rst`
+
+### 8.1.4 空きページフレームの予約
+
+ページアロケータは、単に「空きページが1枚でもあれば割り当てる」のではありません。各zoneにwatermark（空きページのしきい値）を設定し、通常割り当て、回収の開始・進行、低メモリ予約などの判断に使います。要求のGFP flags、order、zone/nodeの制約によって判定は変わります。
+
+```text
+空きページが多い
+    |
+    |  WMARK_HIGH  … kswapdが回収を止める目安
+    |  WMARK_LOW   … 非同期回収を起こす目安
+    |  WMARK_MIN   … zoneの最低watermark。通常割り当ての保護基準
+    v
+空きページが少ない
+```
+
+watermarkは、一定数のページを固定的に専用保管する単純な予約箱ではありません。通常の割り当てがzoneをどこまで使えるか、ページ回収をいつ促すか、どの割り当てがreserveへ近づけるかを制御するしきい値です。Linux 6.18では`WMARK_MIN`、`WMARK_LOW`、`WMARK_HIGH`に加えて、NUMA balancing向けの`WMARK_PROMO`も定義されています。
+
+#### `min_free_kbytes`とzone watermark
+
+`/proc/sys/vm/min_free_kbytes`は、watermark計算の基礎となる値です。起動時のLinux 6.18ではlowmemの量を基に概ね次の式で初期値を計算し、128 KiBから256 MiBの範囲に収めます。
+
+```text
+min_free_kbytes ≈ sqrt(lowmem_kbytes × 16)
+```
+
+ここでの値は、空きページの固定予約量をそのまま示すものではありません。`mm/page_alloc.c`はzoneごとのmanaged pagesなどを使って最低watermarkを配分し、low/high watermarkとの距離も設定します。HIGHMEMやMOVABLE zoneの最低watermarkには別の上限処理があります。また、`watermark_scale_factor`、`lowmem_reserve_ratio`、watermark boostなども実際の割り当て可能性に影響します。
+
+`min_free_kbytes`を極端に大きくすると、通常の割り当てに使えるメモリが減り、早期の回収やOOMを招くことがあります。小さくし過ぎると、カーネルが必要とする低メモリ領域の余裕を損なう可能性があります。理由なく調整する値ではなく、変更前後のwatermark・回収・割り当て失敗を測定して判断します。
+
+#### GFP flagsは割り当て時の実行条件を伝える
+
+GFP flagsは、どのzoneを使えるかだけでなく、呼び出し元がsleepできるか、直接回収やI/Oを許すか、失敗時にどこまで再試行するかをallocatorへ伝えます。
+
+| 要求の例 | 呼び出し側が示す条件 | 重要な注意 |
+|---|---|---|
+| `GFP_KERNEL` | sleep可能。直接回収が起きる可能性がある | interrupt contextやspinlock保持中など、sleepできない文脈では使わない |
+| `GFP_NOWAIT` | 直接回収でsleepしない割り当て | reserveを通常利用するものではなく、メモリ圧迫時は失敗し得る |
+| `GFP_ATOMIC` | sleepできない文脈で、必要に応じて一部のreserveを利用する割り当て | 成功保証ではない。割り当てサイズを小さくし、失敗時の経路を用意する |
+| `GFP_NOIO` / `GFP_NOFS` | 回収中の再入やdeadlockを避けるため、I/Oやfilesystem経路を制約する | 必要な範囲に限り、現行のscope APIも含めて設計する |
+
+第3版の「不可分な要求には`GFP_ATOMIC`を使う」という記述は入口としては有用ですが、Linux 6.18でも`GFP_ATOMIC`が成功を保証するわけではありません。通常は直接回収を行わず、状況によってreserveへアクセスできるものの、枯渇時には失敗します。interrupt handlerで大きな領域を都度確保するのではなく、事前確保、pool、deferred workなどが適切か検討します。
+
+```c
+#include <linux/errno.h>
+#include <linux/slab.h>
+
+struct request {
+        unsigned int id;
+};
+
+static int create_request(unsigned int id)
+{
+        struct request *req;
+
+        req = kmalloc(sizeof(*req), GFP_ATOMIC);
+        if (!req) {
+                /* 実際の呼び出し側では適切な代替経路を選ぶ */
+                return -ENOMEM;
+        }
+
+        req->id = id;
+        kfree(req);
+        return 0;
+}
+```
+
+一方、sleep可能な通常経路で`GFP_KERNEL`を使う場合も、全ての割り当てが必ず成功するとは限らないため、戻り値を検査します。`__GFP_NOFAIL`は安易な代替策ではなく、呼び出し箇所の保証条件やkernel API規約を調べずに付けてはいけません。
+
+**Linux 6.18のソースを追う入口**
+
+- watermarkの定義: `include/linux/mmzone.h` (`enum zone_watermarks`)
+- `min_free_kbytes`からwatermarkを設定: `mm/page_alloc.c` (`calculate_min_free_kbytes()`、`setup_per_zone_wmarks()`)
+- zone watermarkを使う割り当て判定: `mm/page_alloc.c`
+- GFP flagsと割り当て文脈: `include/linux/gfp.h`、`Documentation/core-api/memory-allocation.rst`
+- 実行環境の値: `/proc/sys/vm/min_free_kbytes`、`/proc/zoneinfo`
