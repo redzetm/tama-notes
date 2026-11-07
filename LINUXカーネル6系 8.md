@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」
-- 今回の主題: 空きobjectの探索からCPU partial・node partial・新規slabへ至るSLUB割り当て経路とNUMA/GFP制約
-- 現在の進捗: 8.1〜8.2.6を作成済み。8.2.7以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」
+- 今回の主題: 空slabの破棄、partial slabの保持・整理、cache shrinkとページアロケータへの返却
+- 現在の進捗: 8.1〜8.2.7を作成済み。8.2.8以降は未着手
 
 ## 第8章の見取り図
 
@@ -48,7 +48,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.4 | 汎用cache・特定用途cacheとcache merge | 作成済み |
 | 8.2.5 | slab allocatorとpage allocatorの確保・返却連携 | 作成済み |
 | 8.2.6 | cacheへのslab割り当てとSLUBのfallback | 作成済み |
-| 8.2.7〜8.2.15 | slab回収、object配置・割り当て・解放、mempool | 未着手 |
+| 8.2.7 | cache内slabの破棄・shrink | 作成済み |
+| 8.2.8〜8.2.15 | object管理・割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1165,3 +1166,56 @@ cacheの通常orderでページ確保に失敗した場合、SLUBは最小order�
 - CPU partial・node partial探索: `mm/slub.c` (`get_partial()`、`get_partial_node()`、`get_any_partial()`)
 - 新規slab確保と初期化: `mm/slub.c` (`new_slab()`、`allocate_slab()`、`alloc_slab_page()`)
 - ページ確保・order fallbackの前提: `mm/page_alloc.c` (`__alloc_frozen_pages_noprof()`)、8.2.5
+
+### 8.2.7 キャッシュからのスラブの解放
+
+cacheに空きobjectが生じたからといって、そのslabのページがただちにページアロケータへ返るわけではありません。SLUBは空きobjectをpartial slabとして再利用できるよう保持し、空のslabをcacheの保持方針や回収要求に応じて破棄します。slabを破棄するときに初めて、そのfolioがページアロケータへ返され、他の用途に使える状態になります。
+
+```text
+objectを解放
+     |
+     v
+slabに空きobjectが残る
+     |
+     +-- partial slabとして保持し、後続の割り当てに再利用
+     |
+     +-- slabが空になる
+             |
+             +-- cacheの保持量の範囲内 --> 再利用候補として保持
+             |
+             +-- discard/shrink対象 --> slab metadataを解除
+                                        folioをpage allocatorへ返却
+```
+
+#### 自動的な破棄と保持方針
+
+object解放やCPU slabのdeactivate時、SLUBは空になったslabをnodeのpartial管理へ戻すか、`min_partial`等の保持条件に応じて破棄します。CPU partialをnode partialへ戻す経路でも、すでに空のslabを余分に保持しないようにdiscardする場合があります。この判断により、頻繁なalloc/freeでpage allocatorへ戻して再確保するコストを抑えつつ、保持量を調整します。
+
+第3版の「定期的なタイマ関数が空slabを解放する」という説明を、Linux 6.18にそのまま当てはめることはできません。現行SLUBではslabの状態遷移・保持数に伴う破棄のほか、cache利用者が登録するshrinkerや明示的なcache shrink等が関係します。slab reclaimの発生点は、`mm/vmscan.c`からshrinkerを呼ぶ経路と、各利用者のshrink callbackを追って確認します。すべての専用cacheが一律にタイマで走査・解放されるわけではありません。
+
+#### 明示的なcache shrink
+
+`kmem_cache_shrink()`は指定cacheを可能な範囲で縮小し、空slabを解放します。Linux 6.18のSLUB実装では、CPU側に保持されたslab状態をflushした後、nodeごとのpartial一覧を調べます。空slabは破棄候補となり、残るpartial slabは比較的充填度の高いものを先頭側へ寄せるなど、将来の割り当てで空になるslabを作りやすくします。全てのslabを解放できたかどうかは戻り値にも反映されます。使用中objectのあるslabを強制的に解放するAPIではありません。
+
+slab破棄時の概略は次のとおりです。
+
+1. node/CPU側の管理からslabを外し、node単位のslab数などのaccountingを更新する
+2. debug構成ならpadding等の整合性を検査する
+3. `SLAB_TYPESAFE_BY_RCU` cacheならRCU callbackを登録し、grace period後に実際のページ返却を行う
+4. それ以外はslab/folioの識別情報とaccountingを解除し、`free_frozen_pages()`でページアロケータへ返す
+
+RCU遅延解放が適用される場合、slabをpartial listから取り外した時点と、物理ページが再利用可能になる時点は一致しません。また、SLUBはobjectごとの一般的なdestructorを一律に呼び出してからfreeする設計ではありません。objectが保持する参照や外部資源を解放し、cacheの寿命規約に従う責任はcache利用者にあります。constructorも新しいslab上のobject初期化に関わるもので、各object解放時のdestructorと同じ意味ではありません。
+
+| 操作 | 主な効果 | 注意点 |
+|---|---|---|
+| object解放 | slab内のfreelistへ返し、必要ならpartial状態へ移す | 空slabでも即時にpage allocatorへ返るとは限らない |
+| 自動discard | 保持方針を超える空slab等を解放 | CPU/node側の保持・同期状態が関係する |
+| `kmem_cache_shrink()` | cacheのCPU側状態をflushし、解放可能な空slabを縮小 | 使用中objectのあるslabは解放できない |
+| RCU遅延破棄 | grace period後にslab backing pagesを返す | listから外れた後もしばらく物理ページを保持し得る |
+
+**Linux 6.18のソースを追う入口**
+
+- object解放後の空slab/partial処理: `mm/slub.c` (`__slab_free()`、`deactivate_slab()`、`__put_partials()`)
+- slabのdiscardとbacking page返却: `mm/slub.c` (`discard_slab()`、`free_slab()`、`__free_slab()`、`rcu_free_slab()`)
+- cacheの明示的shrink: `mm/slab_common.c` (`kmem_cache_shrink()`)、`mm/slub.c` (`__kmem_cache_shrink()`、`__kmem_cache_do_shrink()`)
+- memory pressure時のshrinker dispatch: `mm/vmscan.c` (`shrink_slab()`呼び出し)、`mm/shrinker.c`
