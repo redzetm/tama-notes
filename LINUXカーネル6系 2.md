@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入を再整備、次は2.4.1）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1を再整備、次は2.4.2）
 
 ## 2章の研究観点
 
@@ -585,15 +585,9 @@ page table entryが有効な物理pageを指していない場合でも、それ
 
 #### ページとページフレーム
 
-まず区別しなければいけないのは、ページとページフレームです。
-**ページは仮想アドレス空間を一定サイズで区切った単位**であり、**ページフレームは物理メモリ側を同じサイズで区切った単位です。**
-この 2 つを混同すると、仮想記憶の話がかなり分かりにくくなります。
+仮想アドレス空間は一定サイズの**仮想ページ**に分けられ、物理アドレス空間も同じ粒度の**ページフレーム**に分けられます。4 KiB pageを使う構成なら、仮想page内のoffsetは12 bitで、対応する物理page frame内の同じoffsetへ引き継がれます。基本page sizeはarchitectureとkernel configurationに依存するため、4 KiBはx86の通常ページングを説明する例として扱います。
 
-プロセスが使っているのは仮想空間側のページです。
-一方、RAM 上で実際に確保されるのは物理側のページフレームです。
-Linux カーネルの仕事は、ある仮想ページをどの物理ページフレームへ対応付けるか、あるいはまだ何にも対応付けないかを
-管理することです。
-つまり、仮想ページは見せ方の単位、ページフレームは実体の単位です。
+page tableが表すのは仮想pageと物理page frameの対応です。仮想pageが常に専用のframeを一つ持つとは限りません。複数の仮想mappingが同じ物理pageを共有することもあれば、まだpresentなmappingを持たず、アクセス時のpage faultで解決される場合もあります。Linuxの`struct page`は主に物理メモリ側のpageを表すdescriptorであり、仮想pageそのものを表すものではありません。
 
 図にすると、関係は次のように見られます。
 
@@ -601,35 +595,56 @@ Linux カーネルの仕事は、ある仮想ページをどの物理ページ�
 
 図 2-5 仮想ページと物理ページフレームの対応イメージ
 
-**Linux 6.18 LTS の研究では、この区別は最重要級です。**
-あとでページキャッシュ、匿名メモリ、copy-on-write、swap、NUMA、huge page を読むとき、
-常に「いま話しているのは仮想ページなのか、物理ページフレームなのか」を見失わないことが大事になります。
+ページキャッシュ、匿名メモリ、copy-on-write、swap、NUMA、huge pageを読むときは、仮想mapping、物理page、backing objectのどれを指しているかを区別します。用語としての「page」は文脈によって物理pageを指す場合もあるため、Linuxの型や関数を読む際には対象を確認します。
 
 #### ページテーブルという対応表
 
-仮想ページと物理ページフレームの対応関係を持つのがページテーブルです。
-CPU は仮想アドレスそのものでは RAM に届けません。
-そのため、いま参照しようとしている仮想アドレスが、どの物理ページフレームの、どのオフセットに対応するのかを
-調べる必要があります。
-**この対応表を OS が用意し、MMU が実際の変換に使います。**
+page tableは、仮想addressから物理page frameへの変換と、変換に付随するアクセス属性を保持する階層構造です。MMUは現在のpage-table rootを起点に各levelをたどり、最終entryからframeのbaseを得て、仮想addressのpage offsetを加えます。変換結果はTLBに見つかればpage-table walkを省略できることがあります。
 
-元の本文では、32 ビット x86 の通常ページングとして、ページディレクトリとページテーブルの 2 段階構造が説明されています。
-これは「大きな仮想空間全部に対して、最初から巨大な 1 枚表を持つのは非効率なので、必要なところだけ下位表を作る」
-という考え方です。
-この考え方自体は今でも変わりません。
-多段ページテーブルの本質は、広い仮想空間を細かく分割し、必要な部分にだけ変換表を実体化して RAM を節約することです。
+##### 32-bit x86・4 KiBページの2段階例
 
-Linux 6.18 LTS では 64 ビット環境が主流ですが、考え方は同じです。
-段数が増えても、やっていることは「アドレスのビット列を何段かの索引に分けて、順番にたどって最後に
-物理ページフレームへ到達する」ということです。
+原文の通常ページングは、PAEを使わない32-bit x86の2段構造です。linear addressはpage directory index 10 bit、page table index 10 bit、page offset 12 bitに分かれます。page directoryはCR3が指し、各PDEが次のpage tableを指し、PTEが物理page frameを指します。
 
-図にすると、64 ビット環境の多段ページテーブルは次のようなイメージです。
+```text
+31             22 21             12 11             0
++----------------+-----------------+-----------------+
+| directory (10) | table index (10)| offset (12)     |
++----------------+-----------------+-----------------+
+        │                 │                 │
+        v                 v                 v
+   CR3 -> directory -> page table -> page frame + offset
+```
+
+各表は4 KiBで、4-byte entryを1024個格納します。1つのpage tableは1024個の4 KiB page、すなわち4 MiBの仮想範囲を記述できます。全4 GiBを単一levelのleaf entryで表すなら約4 MiB分のentry storageが要りますが、2段構造ならpage directoryに加え、実際に必要な範囲のpage tableだけを割り当てられます。ここでいう「必要なtableの割り当て」と、データ用の物理page frameを割り当てることは別の管理です。
+
+数値例として、非PAE・4 KiB pageを仮定し、linear address `0x12345678`を分解します。
+
+| 部分 | 計算 | 値 |
+|---|---|---:|
+| directory index | `(address >> 22) & 0x3ff` | `0x48` |
+| table index | `(address >> 12) & 0x3ff` | `0x345` |
+| page offset | `address & 0xfff` | `0x678` |
+
+CR3から始まるwalkで、説明用にPDEが物理address `0x00111000`のpage tableを指し、そのtableのPTEがframe base `0x00abc000`を指すとします。このとき最終的な物理addressは`0x00abc000 + 0x678 = 0x00abc678`です。PDE/PTEの値は計算を示すための仮定であり、Linuxの実mappingを表すものではありません。
+
+##### Linux 6.18のページテーブル階層
+
+この32-bit例の「addressをindexに分けて段階的にたどる」という原理は現在も有効ですが、表の段数やentryの幅はarchitectureとpaging modeで異なります。x86-64ではpage-table entryは64 bitで、4 KiB pageを用いる標準的な4-level pagingでは、各levelに9-bit indexを使い、下位12 bitをpage offsetとして扱います。CPUとkernelが5-level pagingを有効にする構成では、さらに上位levelが加わり、利用できるlinear-address幅も広がります。どちらのmodeかは対象のCPU・起動構成を確認します。
+
+Linuxのgeneric page-table modelでは、上から`PGD`、`P4D`、`PUD`、`PMD`、`PTE`という名前で階層を表します。hardware levelが少ない構成では一部のlevelを**fold**し、同じ汎用コードを複数architectureで使えるようにします。したがって、これら5つの名前が常に5つの別々なhardware tableを意味するわけではありません。huge-page mappingでは、walkが通常の最終PTEより上のlevelで終わる場合もあります（2.4.2参照）。
 
 ![64ビット環境の多段ページテーブル](img/x86_64-multi-level-pagetable.svg)
 
-図 2-6 64 ビット環境での多段ページテーブルのたどり方
+図 2-6 64ビット環境での多段ページテーブルの概念図
 
-だから 32 ビット時代の 2 段ページングは、いまでも多段ページングを理解する良い入口になります。
+Linux 6.18のソースを追う入口:
+
+- genericなpage-table操作とlevel folding: `include/linux/pgtable.h`
+- x86-32の2-level/PAE構成: `arch/x86/include/asm/pgtable_32_types.h`
+- x86-64の4/5-level paging定義: `arch/x86/include/asm/pgtable_64_types.h`
+- process address spaceとpage fault処理の接点: `mm/memory.c`
+
+実際のmappingを追う際は、hardwareが読むPTEだけでなく、Linuxが保持するVMA・`mm_struct`、page allocationやpage cacheとの関係も併せて確認します。page fault時の解決とPTE設定は、すべての仮想pageにdata frameを事前割り当てする方式とは異なります。
 
 #### 2.4.2 拡張ページングと巨大ページ
 
@@ -1009,6 +1024,5 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
 
 
