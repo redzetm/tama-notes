@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.2、GDT/LDTを再整備、次は2.2.3）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.3を再整備、次は2.2.4）
 
 ## 2章の研究観点
 
@@ -367,21 +367,45 @@ LinuxのLDTは「各プロセスに必ず固有の追加セグメントを持た
 
 #### 2.2.3 セグメントディスクリプタへの高速アクセス
 
-元の本文では、CPU がセグメントレジスタに対応する内部レジスタを持ち、
-毎回メモリ上のテーブルを引き直さなくてもよい仕組みが説明されています。
-ここで見ておきたいのは、CPU がアドレス変換を速く行うために、変換に必要な情報を内部へ取り込んで使う、
-という発想です。
+##### セレクタをロードするとdescriptor情報がCPU内部に取り込まれる
 
-これは、後で TLB（Translation Lookaside Buffer） を考えるときにもつながります。
-ページングでも、毎回ページテーブルを最初から全部たどっていたら遅すぎです。
-だから CPU は、よく使う変換結果や関連情報を内部に保持して高速化します。
-セグメントディスクリプタのキャッシュ的な扱いは、そうしたハードウェアの設計思想の前段として見ると
-面白いです。
+CPUが`CS`、`DS`、`ES`、`SS`、`FS`、`GS`のsegment registerへselectorをロードすると、selectorの値だけでなく、参照先descriptorの属性もCPU内部の非プログラマブルな状態へ取り込まれます。原文の図2-4は、プログラムから見えるselectorと、CPU内部に保持されるdescriptor情報を分けて示しています。
 
-Linux 6.18 LTS の研究では、この節は「CPU が変換情報を内部に保持することで高速化する」
-という原理を理解する場所として読むとよいです。
-細かなレジスタ名やビット幅よりも、変換のたびに全部をゼロから調べ直しているわけではない、
-という点が重要です。
+そのため通常のメモリアクセスごとにGDT/LDTを読み直す必要はありません。CPUはロード済みのsegment状態を使い、segment baseや権限など、該当modeで必要な情報を参照します。descriptor tableをメモリ上で書き換えただけでは、すでにsegment registerにロードされた内部状態が自動的に更新されるとは限りません。変更を反映するには、architectureの規則に従った再ロードなどが必要です。
+
+一般的な8-byte code/data descriptorで、selectorのIndexが2なら、テーブル内のentry位置は`2 * 8 = 16` byteです。選択先のdescriptor addressは、概念上「選択した表のbase + 16」となります。TIが0ならGDTRが指すGDT、TIが1ならLDTRが指すLDTのbaseを使います。この計算は通常の8-byte entryの例です。x86-64のTSS/LDT system descriptorは16-byteを占有することがあるため、表全体のentry配置を考える際は別途サイズを確認します。
+
+##### descriptor cacheとTLBは別の仕組み
+
+両者は「変換に必要な情報をCPU内部に保持する」という点では似ていますが、同じcacheではありません。
+
+| CPU内部の状態 | 保持するもの | 主に関係する変換 |
+|---|---|---|
+| segment registerに付随するdescriptor state | selectorに対応するbase、limit、属性など | x86の論理addressからlinear addressへのsegment処理 |
+| TLB | 仮想pageから物理page frameへの変換と関連する権限情報 | pagingによるlinear/virtual addressからphysical addressへの変換 |
+
+したがって、descriptorをロードし直す話と、ページテーブル更新に伴うTLB invalidationを混同してはいけません。TLBについては2.4.8と2.5.7.2で改めて扱います。
+
+##### Linux 6.18を読むときの位置付け
+
+x86-64では通常のCS/DS/ES/SS base/limitによる領域分割が限定的なため、この内部descriptor stateを毎回のメモリアドレス変換の主役と考える必要はありません。一方、selectorやFS/GS baseの変更、LDTの切替・更新、特権遷移の経路を読むときには、このCPU内部状態が重要になります。LinuxのLDT更新経路では、関連する`mm`を実行中のCPUへの反映やsegment registerの更新も考慮されるため、メモリ上のdescriptor tableだけ見て切替の完了を判断しません。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- segment selectorのロード命令を包むhelper: `arch/x86/include/asm/segment.h`
+- GDTR/LDTRのロードとdescriptor table操作: `arch/x86/include/asm/desc.h`
+- FS/GSなどのsegment stateの切替: `arch/x86/kernel/process_64.c`
+- LDTのCPUへのロード・更新と反映: `arch/x86/kernel/ldt.c`
+
+この小節では、segment registerを直接操作するサンプルコードは置きません。特権状態や実行CPU、既存のdescriptor、context switch時の反映に依存するため、数行の命令例だけでは安全な操作条件を表せないからです。原文の図2-4が示す「selectorのロード時に対応するdescriptor情報もCPU側へ取り込まれ、以後のアクセスで利用される」という関係を、Linuxのload/switch経路で確かめます。
+
+この小節で固定したいこと:
+
+- selectorをsegment registerへロードすると、descriptor情報もCPU内部状態へ取り込まれる
+- 通常の8-byte descriptorのentry位置はIndexに8を掛けて求める。GDTかLDTかはTIで選ぶ
+- descriptor tableを書き換えただけで、すでにロード済みの内部descriptor stateまで更新されたと仮定しない
+- descriptor stateはsegment処理用、TLBはpage mapping用であり、invalidatingの対象も目的も異なる
+- Linux 6.18ではLDTやFS/GSの切替・更新経路まで追い、テーブルのメモリ内容だけでCPU状態を判断しない
 
 #### 2.2.4 セグメンテーション回路
 
@@ -994,7 +1018,6 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
 
 
 
