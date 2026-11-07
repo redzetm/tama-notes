@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」、5.3.1.3「遅延処理がアクセスするデータの保護」、5.3.1.4「例外と割り込みがアクセスするデータの保護」、5.3.1.5「例外と遅延処理がアクセスするデータの保護」、5.3.1.6「割り込みと遅延処理がアクセスするデータの保護」
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」、5.3「カーネルデータアクセスの同期」導入、5.3.1「スピンロック、セマフォおよび割り込み禁止の選択」、5.3.1.1「例外がアクセスするデータの保護」、5.3.1.2「割り込みがアクセスするデータの保護」、5.3.1.3「遅延処理がアクセスするデータの保護」、5.3.1.4「例外と割り込みがアクセスするデータの保護」、5.3.1.5「例外と遅延処理がアクセスするデータの保護」、5.3.1.6「割り込みと遅延処理がアクセスするデータの保護」、5.3.1.7「例外処理、割り込み処理、遅延処理がアクセスするデータの保護」
 - 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.6を作成。続きは 5.3.1.7 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12、5.3導入、5.3.1、5.3.1.1〜5.3.1.7を作成。続きは 5.4 を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1688,3 +1688,86 @@ PREEMPT_RTではIRQの多くがthreaded IRQとなり、`spinlock_t`のIRQ suffix
 - ローカルIRQ制御だけでは他CPUのアクセスを防げない。ロック保持区間は短くする
 - softirq coreによる実行管理を、共有データの排他保証と混同しない
 - PREEMPT_RTではhard IRQ、threaded IRQ、softirqを区別し、通常の `spinlock_t` suffixがhard IRQを止めると仮定しない
+
+#### 5.3.1.7 例外処理、割り込み処理、遅延処理がアクセスするデータの保護
+
+##### 共有する状態に到達する経路を一つの規約で結ぶ
+
+task context（システムコールや例外処理）、hard IRQ、softirqなどの遅延処理が同じ状態を更新するなら、各経路を別々に眺めるだけでは足りません。すべてのアクセスを一つの同期規約に参加させ、どの経路でも同じ不変条件が保たれるようにします。特に、各経路で異なるロックを取ると、個別にはロックされていても相互の排他にはならないことがあります。
+
+文脈ごとに確認する観点は次のとおりです。
+
+| 実行経路 | 同じCPU上で割り込まれる可能性 | sleep可能性 | 設計上の確認点 |
+|---|---|---|---|
+| task context | hard IRQやsoftirqに割り込まれうる | 状態と呼び出し位置が許せば可能 | ロック待ちの間に割り込む経路が同じロックを取らないか |
+| hard IRQ | より優先度の高いIRQなどが入りうる | 不可 | 短い処理に限定し、sleepするロックを使わない |
+| softirqなど | hard IRQに割り込まれうる。種類や構成により並行実行も考慮 | 原則として不可 | 同じCPUでhard IRQに割り込まれた際のロック待ちを避ける |
+| workqueue / threaded IRQ | taskとしてスケジュールされる | 呼び出し規約が許せば可能 | softirq系とは別の実行文脈として扱う |
+
+「例外処理」はここでは特定のCPU例外handlerに限定せず、システムコールやページフォルト処理を含むtask contextを指します。実際のhandlerがsleep可能かどうかは、単に入口の名前では決まらず、呼び出し中の状態やsubsystemの制約も確認します。
+
+##### 非 PREEMPT_RT での一つのロックを使う例
+
+次はtask、hard IRQ、softirqが同じイベント状態を操作する構造を示す模式例です。非 PREEMPT_RTを前提に、全経路が同じロックを使い、ロック取得中に同じCPUのhard IRQがロックを取りに来て停止しないよう、各経路でIRQ状態を保存して保護区間を設けています。
+
+```c
+static DEFINE_SPINLOCK(state_lock);
+static unsigned long pending_events;
+
+static void record_from_task(unsigned long events)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&state_lock, flags);
+	pending_events |= events;
+	spin_unlock_irqrestore(&state_lock, flags);
+}
+
+static irqreturn_t device_irq(int irq, void *data)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&state_lock, flags);
+	pending_events |= DEVICE_EVENT;
+	spin_unlock_irqrestore(&state_lock, flags);
+
+	raise_softirq(DEVICE_EVENT_SOFTIRQ);
+	return IRQ_HANDLED;
+}
+
+static void device_event_softirq(struct softirq_action *action)
+{
+	unsigned long flags;
+	unsigned long events;
+
+	spin_lock_irqsave(&state_lock, flags);
+	events = pending_events;
+	pending_events = 0;
+	spin_unlock_irqrestore(&state_lock, flags);
+
+	process_events(events);
+}
+```
+
+ロックはCPU間を含む共有状態への排他を担い、IRQ状態の保存・復元は同じCPU上のhard IRQ再入を避けます。IRQを止める範囲はロック内の短い状態更新だけにし、イベント処理そのものはロック外へ移します。softirqを起こす手段やIRQ handlerの構成はsubsystemごとに異なるため、このコードの関数呼び出しは同期の形を示すもので、そのまま貼り付ける実装ではありません。
+
+##### PREEMPT_RT ではアクセス経路を再分類する
+
+PREEMPT_RTでは `spinlock_t` とIRQ制御の意味が非RTと異なり、`spin_lock_irqsave()` がhard IRQを実際に無効化するとは限りません。多くのIRQ処理はthreaded IRQへ移されますが、primary handlerなどhard IRQ文脈に残る経路もありえます。どの経路が対象データに触れるかを調べ直し、task/threaded handler同士で済むならsleep可能なロックへ集約できるかを検討します。
+
+hard IRQ文脈と共有する短い低レベル区間が残る場合は、通常の `spinlock_t` で保護できると決めつけず、Linux 6.18のlocking規則に従って `raw_spinlock_t` の必要性と取得順序を検討します。raw spinlock保持中はsleepできず、区間を極小にする必要があります。softirqや `WQ_BH` の制約も別に確認し、`local_irq_disable()` や `local_bh_disable()` をCPU間ロックの代用にしません。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- IRQ・softirq・task間で共有するロックの選び方: `Documentation/locking/spinlocks.rst`
+- `spinlock_t`、`raw_spinlock_t`、PREEMPT_RTでの意味: `Documentation/locking/locktypes.rst`
+- softirqの実行と再実行の管理: `kernel/softirq.c`
+- IRQ primary handlerとthread functionの実装: `kernel/irq/manage.c`、`include/linux/interrupt.h`
+- 対象データへの全アクセス箇所を検索し、ロック取得順序と実行文脈を照合する
+
+##### この小節で固定したいこと
+
+- task、hard IRQ、softirqなどのすべての経路で、共有状態を守る同一の同期規約を成立させる
+- ロックはCPU間排他、IRQ制御は同じCPU上の割り込み再入を扱う。両者の役割を混同しない
+- sleep可能性とIRQ制御の効き方はPREEMPT_RTで変わりうるため、実際のhandler文脈と構成に基づいて選ぶ
+- ロック範囲を短く保ち、状態の受け渡しやイベント処理は必要に応じてロック外へ分離する
