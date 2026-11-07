@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」
-- 今回の主題: CPUごとの空きobject管理、SLUBのper-CPU freelistとpartial slab cache、旧array_cacheとの違い
-- 現在の進捗: 8.1〜8.2.11を作成済み。8.2.12以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」
+- 今回の主題: SLUBのobject割り当て経路、CPU-local fast pathからpartial slab・新規slab確保への遷移、GFP/NUMA条件
+- 現在の進捗: 8.1〜8.2.12を作成済み。8.2.13以降は未着手
 
 ## 第8章の見取り図
 
@@ -53,7 +53,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.9 | object alignmentとSLUBのslot寸法 | 作成済み |
 | 8.2.10 | slab coloringの原理とLinux 6.18 SLUBとの差 | 作成済み |
 | 8.2.11 | per-CPU object cacheとSLUBのCPU-local状態 | 作成済み |
-| 8.2.12〜8.2.15 | object割り当て・解放、汎用object、mempool | 未着手 |
+| 8.2.12 | object割り当てのfast/slow pathと新規slab確保 | 作成済み |
+| 8.2.13〜8.2.15 | object解放、汎用object、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1396,3 +1397,65 @@ fast pathは`freelist`と`tid`を組み合わせた更新検証を使い、同�
 - CPU partial slab cache: `mm/slub.c` (`put_cpu_partial()`、`CONFIG_SLUB_CPU_PARTIAL`)
 - 機能の有効条件とlatency trade-off: `mm/Kconfig` (`SLUB_CPU_PARTIAL`、`SLUB_TINY`)
 - 公開sheaf API: `include/linux/slab.h` (`kmem_cache_prefill_sheaf()`、`kmem_cache_alloc_from_sheaf()`)
+
+### 8.2.12 スラブオブジェクトの割り当て
+
+#### APIと割り当て要求
+
+専用cacheからobjectを得る基本APIは`kmem_cache_alloc()`です。`kmem_cache_alloc_node()`はnodeを指定して割り当てを要求します。いずれも成功時はobject pointer、失敗時は`NULL`を返します。`gfp_t` flagsは、slabに空きがない場合にページを新しく確保する経路で、どの状況・制約の下でメモリを要求できるかを伝えます。CPU-local freelistに空きobjectがあればpage allocatorへ進まないため、GFP flagsは「毎回ページを確保する指定」ではありません。
+
+```c
+void *obj = kmem_cache_alloc(my_cache, GFP_KERNEL);
+if (!obj)
+        return NULL; /* 呼び出し元へ失敗を伝える */
+```
+
+`GFP_KERNEL`のように直接reclaimを許す要求と、atomic context向けの制約を持つ要求では、slow pathが実行できる処理が異なります。割り当てが必要な文脈に適したGFP flagsを選びます。`kmem_cache_alloc_node()`でも他nodeへのfallbackが起こり得るため、指定nodeに限定したいときは`__GFP_THISNODE`などの条件を含めてAPI契約を確認します。
+
+#### Linux 6.18の割り当て階層
+
+SLUBの通常のcache allocationは、hookや構成に応じた経路を経て、空きobjectが得られる最も近い層から順に探索します。主な見取り図は次の通りです。
+
+```text
+kmem_cache_alloc[_node]()
+        |
+        +-- pre-allocation hook / failslab判定
+        +-- KFENCE等のinstrumentation経路
+        +-- 利用可能ならCPU sheafからobject
+        +-- CPU-local freelist + current slab (fast path)
+                |
+                +-- 空きがあればobjectを返す
+                |
+                +-- slow path
+                      +-- current slab / CPU partialを補充・切替
+                      +-- node partial slabを取得
+                      +-- 条件に応じて他nodeを探索
+                      +-- 新しいslab用のページを確保
+        |
+        +-- KASAN、初期化、memcg等のpost-allocation処理
+        +-- object pointerまたはNULL
+```
+
+毎回この全段階を通るわけではありません。CPU sheafが設定されている場合はその経路が先に試され、そこからobjectを得られなければ`__slab_alloc_node()`へ進みます。通常のSLUB fast pathでは、現在のCPUの`freelist`先頭からobjectを取り出し、次のfreepointerへheadを進めます。`slab`がない、freelistが空、要求nodeとslab nodeが合わない、またはlockless fast pathを使えない場合はslow pathへ移ります。freepointerはfree object内にあるため、array_cacheのような外付けpointer配列をこの経路に必要とするわけではありません。
+
+#### slow path: 再利用から新規slabまで
+
+`___slab_alloc()`は、まずCPUが現在使っているslabとそのfreelistを再確認します。slabを使い切っている場合、構成上CPU partialが有効ならCPU-local partial slabを調べます。次に`get_partial()`がnodeのpartial listから利用可能なslabを探し、node指定やGFP条件に応じて他nodeも候補にします。見つかったslabはCPU用にactivate/freezeされ、空きobjectのfreelistがCPU-local状態へ渡されます。
+
+再利用できるpartial slabがなければ、`new_slab()`からページアロケータへ進み、slabを構成するページを確保します。確保したslabではobject数やfreelistを初期化し、CPU allocatorがそこからobjectを取り出せる状態にします。高orderのslab確保が失敗した場合、SLUBはcacheのminimum orderへfallbackを試すことがあります。これは1 slab当たりのobject数を減らしつつ、断片化で高order確保が難しい状況でも割り当てを継続するための経路です。必要なページが確保できない場合は失敗し、割り当てAPIは`NULL`を返します。
+
+NUMA指定時の動作は単純な「必ずそのnodeから確保」ではありません。許可される範囲の中で対象nodeのpartial slabや新規ページ確保を試し、`__GFP_THISNODE`がなければfallbackする経路があります。`__GFP_THISNODE`はnode fallbackの可否に関わりますが、メモリ不足時にも成功を保証するものではありません。
+
+#### 成功後の処理と失敗の読み方
+
+objectをfreelistから取り出した後も、SLUBは初期化要求、KASAN/KMSAN、kmemleak、allocation tagging、memory cgroup accounting等のhookを適用します。zeroingが要求される場合やdebug機能が有効な場合は、利用者へ返す前に追加処理が走ります。そのため「freelistからpointerを取り出す」ことがAPI全体の終了ではありません。割り当て結果の観察では、debug/configやmemcgによるpost-allocation処理も考慮します。
+
+また、page allocatorへの失敗やreclaimの有無はGFP flagsと実行文脈に依存します。割り当て失敗を無条件に再試行したり、atomic contextでsleep可能な経路を前提にしたりせず、呼び出し側は返り値を処理します。`__GFP_NOFAIL`など特殊な要求の意味も、対象API・呼び出し箇所の制約と併せて確認します。
+
+**Linux 6.18のソースを追う入口**
+
+- 公開APIから共通割り当て処理へ: `mm/slub.c` (`kmem_cache_alloc_noprof()`、`slab_alloc_node()`)
+- CPU freelist fast pathとslow-path分岐: `mm/slub.c` (`__slab_alloc_node()`、`___slab_alloc()`)
+- CPU/node partial slab取得: `mm/slub.c` (`get_partial()`、`get_partial_node()`)
+- 新規slabとorder fallback: `mm/slub.c` (`new_slab()`、`allocate_slab()`、`alloc_slab_page()`)
+- post-allocation hooks: `mm/slub.c` (`slab_pre_alloc_hook()`、`slab_post_alloc_hook()`)
