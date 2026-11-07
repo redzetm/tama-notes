@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore の役割と実行文脈上の制約
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.9 を作成。続きは 5.2.10 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.10 を作成。続きは 5.2.11 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1065,3 +1065,70 @@ Linux 6.18 の locking 文書では、非 PREEMPT_RT の rwsem 実装は writer 
 - `down_*_trylock()` は成功 1、失敗 0。通常 semaphore の trylock と戻り値が逆
 - 非 PREEMPT_RT と PREEMPT_RT では内部実装と公平性の性質が同じではない
 - `downgrade_write()` は write から read への移行であり、read から write への昇格ではない
+
+### 5.2.10 完了通知
+
+#### 「完了した」というイベントを待つ
+
+completion（完了通知）は、ある処理が特定の地点まで到達したことを別の実行経路へ知らせる同期プリミティブです。典型的には、task が作業を開始し、別の task やデバイス割り込みハンドラが処理完了を通知し、待っていた task が再開します。セマフォのように資源の利用枠を管理するのではなく、「このイベントが起きたか」を待ち合わせるために使います。
+
+```c
+struct request_state {
+	struct completion finished;
+	int result;
+};
+
+static void finish_request(struct request_state *req, int result)
+{
+	req->result = result;
+	complete(&req->finished);
+}
+
+static int wait_request(struct request_state *req)
+{
+	int ret;
+
+	ret = wait_for_completion_interruptible(&req->finished);
+	if (ret)
+		return ret;
+
+	return req->result;
+}
+```
+
+要求を発行する側は、非同期処理へ渡す前に `init_completion(&req->finished)` を呼びます。`req` とその completion は、通知側がアクセスを終えるまで有効でなければなりません。
+
+completion は待つ側と通知側のどちらが先に動いても成立します。通知が先なら完了状態が記録され、後から `wait_for_completion*()` を呼んだ側は待たずに進みます。まだ通知されていなければ、wait API が task を待たせます。これにより、通知側が先に動いた場合を見落とすための独自フラグと待ちキューの競合処理を、利用側で組み立てずに済みます。
+
+#### 待つ側と通知側の API
+
+- `wait_for_completion()` は完了まで無期限に待ちます。通常は uninterruptible wait です
+- `wait_for_completion_interruptible()` / `wait_for_completion_killable()` は中断可能な待ち合わせで、戻り値を確認します
+- timeout 付き variant は、完了・タイムアウト・signal 中断の戻り値を区別して扱います。jiffies 単位の timeout は `msecs_to_jiffies()` などで変換します
+- `complete()` は完了を記録し、待ち task があれば一つを起床させます。待ち手がまだいない場合でも通知は保持されます
+- `complete_all()` は待ち手すべてを起床させ、以後の待ち手も完了扱いにします。再利用する場合は、前の利用サイクルが終了してから `reinit_completion()` します
+
+`complete()` は IRQ / atomic context から呼べますが、待ち API は task を sleep させるため、IRQ、softirq、その他の atomic context では呼べません。`complete_all()` も通常の文脈では通知側で使えますが、Linux 6.18 の実装は PREEMPT_RT で threaded context を要求する assertion を持つため、hard IRQ から呼ぶ設計にはせず、対象構成で許される文脈を確認します。完了通知を送る処理と完了を待つ処理で、許される実行文脈が異なる点が重要です。
+
+#### 生存期間と再利用の同期
+
+completion オブジェクトは、通知側と待ち側の双方が最後にアクセスし終えるまで有効でなければなりません。スタック上の completion を使う場合、wait API が timeout や signal で先に戻っても、非同期の通知側が後からそのアドレスへアクセスする可能性があります。オブジェクトを解放・関数から復帰する前に、通知側の処理終了まで別途同期する必要があります。長寿命の要求・デバイス構造体に埋め込む設計は、この寿命管理をしやすくします。
+
+同じ completion を複数回使うとき、`init_completion()` を再度呼ぶと待ちキューを再初期化して待ち手を失うおそれがあります。再利用には `reinit_completion()` を使いますが、並行する wait / complete / reinit の競合を自動解決するものではありません。前の利用サイクルの待ち手と通知側がいなくなったことを確かめてから再初期化します。`complete_all()` 後の再初期化にも同じサイクル管理が必要です。
+
+completion は共有データを排他的に保護するロックではありません。通知前に生成した結果を待ち手が使うなら、適切な同期関係とオブジェクト寿命を保ちます。複数 task が共有状態を継続的に更新する場合は、別途 mutex や spinlock などで保護します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- completion 型、初期化、wait / signal API: `include/linux/completion.h`
+- 完了通知の利用上の注意、寿命、戻り値、実行文脈: `Documentation/scheduler/completion.rst`
+- 待ち合わせと `complete()` / `complete_all()` の実装: `kernel/sched/completion.c`
+- 実デバイスでの利用例: `drivers/` 配下で `init_completion()`、`wait_for_completion*()`、`complete()` の組を追い、エラー・timeout 時の寿命管理も読む
+
+#### この小節で固定したいこと
+
+- completion は資源の排他ではなく、特定イベントの完了を待つための仕組み
+- 通知が待機より先でも状態が保持される。`complete()` は通常一つ、`complete_all()` はすべての待ち手を通す
+- `complete()` は IRQ / atomic context から使えるが、sleep する wait API は task context に限る。PREEMPT_RT では `complete_all()` の実行文脈も確認する
+- timeout / signal で待ちが先に戻る経路を含め、非同期の通知側が使い終わるまでオブジェクトを生存させる
+- 再利用時は `reinit_completion()` を使い、前サイクルの wait / complete が残らないよう別途同期する
