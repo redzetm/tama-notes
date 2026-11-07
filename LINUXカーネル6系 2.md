@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.2を再整備、次はGDT/LDT）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.2、GDT/LDTを再整備、次は2.2.3）
 
 ## 2章の研究観点
 
@@ -334,28 +334,36 @@ x86-64のlong modeでは、通常のCS/DS/ES/SS descriptorのbaseとlimitによ�
 
 #### GDT と LDT
 
-セグメントディスクリプタは単独で宙に浮いているのではなく、テーブルに並べて管理されます。
-代表が GDT と LDT です。
-GDT はシステム全体で共有する基本的なセグメント記述を置く場所、LDT は必要であればプロセスごとに
-追加の記述を持たせるための仕組み、という理解で入ると分かりやすいです。
+GDT（Global Descriptor Table）とLDT（Local Descriptor Table）はdescriptorを格納する表です。セレクタのTI bitが0ならGDT、1ならLDTを選びます。CPUのGDTRは現在のGDTのbaseとlimitを保持し、LDTRは現在のLDTを参照するselectorとdescriptor情報を保持します。LDT自身はGDT内のsystem descriptorによって登録されます。
 
-古い x86 解説では、GDT や LDT の構造そのものがかなり細かく出てきます。
-もちろん CPU の設計を理解するうえでは大切です。
-しかし Linux 6.18 LTS の研究で優先度が高いのは、
-**x86 の CPU が持っている機能を Linux が全部そのまま、全部使っているわけではない**、
-という点を押さえることです。
-CPU 側には GDT、LDT を含むかなり豊富なセグメント管理機能がありますが、OS は与えられた機能を全部同じ重さで
-採用するとは限りません。
-Linux はその中から、自分の設計に必要なものを選んで使い、逆に必要ないものは土台や補助へ回しています。
-つまり、x86 が用意した豊富な機能のうち、Linux は必要な土台だけを使い、
-メモリ空間管理の中心はもっと別の場所、つまりページング側へ置いているわけです。
+名前に「Global」とありますが、Linux 6.18のx86-64ではGDTを単純に一つの全CPU共有表とみなせません。LinuxはGDTをCPUごとに持ち、CPUごとのTSSやper-CPU状態に対応するdescriptorを置きます。各CPUは自身のGDTをGDTRへロードして使います。一方、LDTは通常のプロセスすべてに必ず用意されるものではなく、必要な`mm`にだけ関連付けられる任意の仕組みです。
 
-この視点はとても大事です。
-**CPU が持つ機能を全部フル活用するのが良い設計とは限りません。**
-Linux は、移植性、単純さ、保守性、そしてページング中心の仮想記憶設計を優先して、
-セグメント機構の使い方をかなり限定しています。
-言い換えると、x86 の CPU は「できること」が多いのですが、Linux はその全部を前面には出さず、
-多くのアーキテクチャで共通化しやすい形に整理して使っている、ということです。
+表の役割を現在のLinuxに引き付けると、次のように整理できます。
+
+| 表 | CPUからの選択 | Linux 6.18での位置付け |
+|---|---|---|
+| GDT | selectorのTI=0。GDTRがbase/limitを保持 | x86ではCPUごとに構成され、kernel/user code・data、TSS、必要に応じてLDT descriptorなどを置く |
+| LDT | selectorのTI=1。LDTR経由で現在のLDTを参照 | すべての`mm`に必須ではない。legacyなユーザー空間ABI等で必要な場合に設定される |
+
+LinuxのLDTは「各プロセスに必ず固有の追加セグメントを持たせる標準機構」ではありません。実際には`mm_struct`のarchitecture-specific contextに保持され、タスクが別の`mm`へ切り替わる際に必要に応じて現在のLDTをロード・更新します。同じ`mm`を共有するタスクはそのLDT状態も共有します。ユーザー空間からの設定経路や対応範囲はアーキテクチャ・ABIに依存するため、LDTが使われていると一般化せず、対象環境の実装を確認します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- CPUごとのGDT領域とGDT初期値: `arch/x86/include/asm/desc.h`、`arch/x86/kernel/cpu/common.c`
+- GDTR/LDTRのロード、TSS descriptor、LDT descriptorの登録: `arch/x86/include/asm/desc.h`
+- GDT selector番号とselector値: `arch/x86/include/asm/segment.h`
+- LDTの`mm`単位の保持、切替、更新: `arch/x86/kernel/ldt.c`
+- `modify_ldt` system callの入口とABI: `arch/x86/kernel/ldt.c`、`arch/x86/include/asm/ldt.h`
+
+この小節ではGDT/LDTを直接書き換えるサンプルコードは置きません。descriptorの更新はCPUごとの状態、特権遷移、TSS、場合によっては他CPUへの反映と結び付いており、単独のテーブル操作例では安全な手順を示せないためです。構造体定義から初期化・ロード・context switchの経路へ進みます。
+
+#### この小節で固定したいこと
+
+- GDT/LDTはdescriptorの表であり、selectorのTI bitが参照先を選ぶ
+- GDTRはGDTのbase/limitを持つ。LDTRはLDTを選択し、LDT descriptor自体はGDTに置かれる
+- Linux 6.18 x86-64のGDTはCPUごとに構成され、「Global」を全CPUで一つと解釈しない
+- LDTは各プロセスに必須ではなく、必要な`mm`で保持・切替される限定的な機能
+- 実際のGDT/LDT管理はデータ構造だけでなくロード命令・CPU切替経路と一緒に追う
 
 #### 2.2.3 セグメントディスクリプタへの高速アクセス
 
@@ -986,8 +994,6 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
-
 
 
 
