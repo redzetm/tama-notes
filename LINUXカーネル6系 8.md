@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」
-- 今回の主題: `kmalloc()`のsize class選択、cache type・GFP flagsによる分岐、大きな割り当てと`kfree()`の経路
-- 現在の進捗: 8.1〜8.2.14を作成済み。8.2.15以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」
+- 今回の主題: mempoolの予約保証、backing allocatorと予約要素の優先関係、枯渇時の待機・非sleep経路
+- 現在の進捗: 8.1〜8.2.15を作成済み。8.3以降は未着手
 
 ## 第8章の見取り図
 
@@ -56,7 +56,7 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.2.12 | object割り当てのfast/slow pathと新規slab確保 | 作成済み |
 | 8.2.13 | objectの解放とSLUB freelist/slab状態の更新 | 作成済み |
 | 8.2.14 | `kmalloc()`の汎用size classと解放経路 | 作成済み |
-| 8.2.15 | mempoolの予約・枯渇時動作 | 未着手 |
+| 8.2.15 | mempoolの予約・枯渇時動作 | 作成済み |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -1565,3 +1565,74 @@ large-kmallocはfolio/page allocatorから必要なorderの連続ページを得
 - cache tableの作成とsize class初期化: `mm/slab_common.c` (`create_kmalloc_caches()`、`kmalloc_size_roundup()`)
 - 要求サイズからcacheを選び、large要求を振り分ける箇所: `mm/slub.c` (`__do_kmalloc_node()`、`kmalloc_slab()`、`___kmalloc_large_node()`)
 - ポインタからslab/large-kmallocを判定する解放: `mm/slub.c` (`kfree()`、`free_large_kmalloc()`)
+
+### 8.2.15 メモリプール
+
+#### mempoolが担うのは「予約要素へのfallback」
+
+`mempool`は、通常のメモリ割り当てが難しい局面でも特定の処理が進行できるよう、あらかじめ確保した要素を保持する仕組みです。poolは特定の用途・所有者に結びつけ、要素の確保・解放にはbacking allocator（alloc/free callback）を使います。要素はslab object、`kmalloc`領域、ページなどから構成できます。
+
+通常の`mempool_alloc(pool, gfp)`は、予約要素だけを見るのではなく、まずbacking allocatorを試します。通常割り当てが失敗した場合にpool内の要素を取り出し、通常経路を支えるためのreserveを使います。したがってmempoolはpage allocatorのwatermark reserveと同一ではなく、システム全体の空きページを誰でも使えるようにする仕組みでもありません。poolを使う処理のために、特定サイズ・型の要素を予約するものです。
+
+```text
+mempool_alloc(pool, gfp)
+       |
+       +-- backing allocatorを制約付きで試す
+       |       +-- 成功 -> その要素を返す（pool reserveは温存）
+       |
+       +-- 失敗 -> poolの予約要素が残っているか
+               +-- あり -> 予約から取り出して返す
+               +-- なし -> gfpがsleep/reclaim可能なら返却待ち・再試行
+                           非sleep可能ならNULL
+```
+
+#### `min_nr`と予約要素の初期化
+
+`mempool_t`の主要状態は次の通りです。Linux 6.18では`min_nr`はpoolが維持する要素数の目標・最低保証数で、`curr_nr`は現在pool内部に保持している個数です。通常`curr_nr`は`min_nr`を超えず、要素の返却はpoolがその数に満たない場合にreserveへ格納されます。満杯ならbacking free callbackで解放します。特殊な`min_nr == 0`の場合には、初期化・待機者wake-upを扱うための例外的な要素保持経路があります。
+
+| `mempool_t`の状態 | Linux 6.18での役割 |
+|---|---|
+| `min_nr` | poolが維持する事前確保要素数。成功した初期化時にこの数を用意する |
+| `curr_nr` | 現在poolの要素配列に保持している数 |
+| `elements` | 予約要素のpointerを保持する配列 |
+| `alloc` / `free` | 要素のbacking allocator / deallocator callback |
+| `pool_data` | callbackへ渡すcache、サイズ、order等の用途別データ |
+| `lock` / `wait` | 要素配列・数の同期と、枯渇時に要素返却を待つための状態 |
+
+`mempool_create()`はpool構造体を動的に作り、`mempool_init()`は呼び出し側が保持する構造体を初期化します。初期化では要素pointer用配列を確保し、backing allocatorを呼んで最低保証数の要素を事前確保します。必要数を確保できなければ初期化は失敗し、確保済み要素を片付けます。したがってpool作成時点でのメモリ需要・失敗処理も設計に含めます。Linux 6.18には`mempool_create_slab_pool()`、`mempool_create_kmalloc_pool()`、`mempool_create_page_pool()`等のhelperがあります。
+
+#### 枯渇時のblockingとnon-blocking
+
+Linux 6.18の`mempool_alloc()`は、backing allocatorの初回試行では直接reclaimやI/Oを抑え、失敗後に予約要素を確認します。reserveが空で、`gfp`が直接reclaim可能なら、より許容範囲の広いflagsでもう一度backing allocatorを試し、それでも得られなければ別の処理が要素を返すまで待って再試行します。sleepできない文脈では待てず、通常割り当てもreserveも使えない場合は`NULL`になり得ます。通常APIのblocking動作をIRQ/NMI等から呼ぶことはできません。
+
+`mempool_alloc_preallocated()`は通常の`mempool_alloc()`と異なり、backing allocatorを呼ばず、pool内の予約要素だけを取り出します。待機もしないため、即時に予約要素が必要な経路で使いますが、reserveが空なら`NULL`です。関数名だけを根拠に「必ず成功」と考えず、返り値と予約容量の条件を設計します。
+
+予約数は、障害時にその処理が同時に必要とする要素数と、循環待ち・再帰的な割り当てを考慮して決めます。予約を使い切った後に、解放側が同じ処理の完了を待つなどの循環依存があれば、mempoolの存在だけではdeadlockを防げません。block layerのbio poolのように、再入やstackingによって同一poolから複数要素を必要とする場合、rescue workqueue等でprogressを確保する設計が必要になることがあります。
+
+`mempool_alloc()`では`__GFP_ZERO`はサポートされず、実装も警告します。zero初期化が必要なら、要素取得後に利用側で適切に初期化するか、要件に合う設計を確認します。またpoolのalloc/free callbackがsleepするかどうかは呼び出し可能な文脈に影響します。poolの破棄前には利用者を停止・同期し、並行するallocation/freeがない状態にします。
+
+```c
+mempool_t *pool = mempool_create_slab_pool(min_nr, cache);
+if (!pool)
+        return -ENOMEM;
+
+void *obj = mempool_alloc(pool, GFP_NOIO);
+if (!obj) {
+        mempool_destroy(pool);
+        return -ENOMEM;
+}
+
+/* objを処理する */
+mempool_free(obj, pool);
+mempool_destroy(pool); /* pool利用者が停止した後に破棄 */
+```
+
+この例の`GFP_NOIO`は一つの利用例に過ぎず、実際のflagsはI/O再入や reclaim の循環依存を避ける設計に合わせます。`min_nr`も万能な成功保証ではなく、同時使用数と処理の進行条件に対して十分かを見積もる必要があります。
+
+**Linux 6.18のソースを追う入口**
+
+- `mempool_t`、callback typedef、helper API: `include/linux/mempool.h`
+- 予約要素の初期化と破棄: `mm/mempool.c` (`mempool_init_node()`、`mempool_exit()`、`mempool_destroy()`)
+- backing allocatorとreserve・waitの順序: `mm/mempool.c` (`mempool_alloc_noprof()`、`mempool_alloc_preallocated()`)
+- 返却時のreserve refillとwaiter wake-up: `mm/mempool.c` (`mempool_free()`)
+- 実利用時のGFP制約・再入対策例: `block/blk-crypto.c` (`bio_crypt_set_ctx()`)、`block/bio.c` (`bio_alloc_bioset()`)
