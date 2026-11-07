@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、アトミック RMW、メモリ順序、spinlock / rwlock / seqlock / RCU の保護範囲と実行文脈上の制約
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU の役割と PREEMPT_RT の意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.7 を作成。続きは 5.2.8 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.8.1 を作成。続きは 5.2.9 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -898,3 +898,106 @@ RCU は主にポインタの公開・読み取りと、読み手が参照中の�
 - 古いオブジェクトは公開先から外した後、grace period を経てから回収する
 - grace period 後の回収でも、read-side critical section を越えてポインタを使うなら別の寿命管理が必要
 - RCU の read-side 区間を任意に sleep できるとは限らず、必要に応じて SRCU などを選ぶ
+
+### 5.2.8 セマフォ
+
+#### カウント資源の取得と待ち合わせ
+
+Linux のカーネル semaphore は、一定数の利用枠を表す counting semaphore です。
+初期値を `n` にすると、取得可能な枠がある間は最大 `n` 回まで取得でき、枠がなくなった後の取得要求はタスクを待たせます。単一の所有者による相互排他だけでなく、同時に許可する利用数を制限したい場合に意味があります。
+
+```c
+static DEFINE_SEMAPHORE(io_slots, 3);
+
+static int perform_io(void)
+{
+	if (down_interruptible(&io_slots))
+		return -EINTR;
+
+	do_io();
+	up(&io_slots);
+	return 0;
+}
+```
+
+取得できなかったタスクは wait queue で待機し、`up()` で枠が返ると再び実行可能になります。
+semaphore は mutex と異なり owner を記録せず、取得した task と別の task や割り込み文脈から `up()` して枠を返すことができます。この性質は設計上の用途を広げる一方、誰が取得・解放の対応を管理するかをコード側で明確にする必要があります。
+
+#### mutex・completion と使い分ける
+
+一つの task が取得し、同じ task が解放する相互排他には、owner semantics とデバッグ支援を持つ mutex が通常適しています。
+Linux の locking 文書は、semaphore を新しい用途で相互排他と待ち合わせの両方に使うより、mutex と completion などの別機構に分けることを勧めています。
+セマフォは「同時にいくつまで入れるか」という数の制限が本質であり、単なる binary mutex の代替として選ぶものではありません。
+
+ユーザー空間の System V semaphore とカーネル内の `struct semaphore` も別の API です。この節で扱うのはカーネル内部の counting semaphore で、ユーザー空間 IPC の操作とは混同しません。
+
+#### 利用できる実行文脈
+
+`down()`、`down_interruptible()`、`down_killable()`、`down_timeout()` は枠がなければ task を sleep させるため、sleep 可能な task context から呼び出します。ハード IRQ や softirq のように待ち時間中に sleep できない文脈からは使えません。
+
+`down_trylock()` は待たずに取得を試みる API で、成功時は 0、取得できない場合は 1 を返します。この戻り値は `spin_trylock()` や `mutex_trylock()` と逆向きなので注意します。
+Linux 6.18 の実装では `down_trylock()` と `up()` は interrupt context から呼べる旨が `include/linux/semaphore.h` に明記されています。ただし「待たない」操作でも、保護対象や呼び出し側の実行文脈の制約がすべて消えるわけではありません。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- semaphore 型と公開 API: `include/linux/semaphore.h`
+- acquire / release、wait queue、`down_trylock()` の実装: `kernel/locking/semaphore.c`
+- mutex・semaphore の使い分けと lock type: `Documentation/locking/locktypes.rst`
+- completion によるイベント待ち合わせ: `include/linux/completion.h`、`kernel/sched/completion.c`
+
+### 5.2.8.1 セマフォの取得と解放
+
+#### `down*()` の選択と戻り値
+
+Linux 6.18 では待機時の中断条件に応じて複数の acquire API が用意されています。
+
+- `down_interruptible()`: signal による中断を許し、中断時は負の errno（通常 `-EINTR`）を返す
+- `down_killable()`: fatal signal による中断を許す
+- `down_timeout()`: 指定時間内に取得できない場合、`-ETIME` を返す
+- `down_trylock()`: sleep せずに試み、成功なら 0、失敗なら 1 を返す
+- `down()`: 無期限に待つが、現行の実装文書では deprecated とされ、通常は中断可能または killable な variant を選ぶ
+
+戻り値を無視すると、取得できていないのに保護対象を使う経路が生じます。`down_interruptible()` などの結果を確認し、取得に成功した場合にだけ対応する `up()` を実行する構造にします。
+
+```c
+static int use_slot(void)
+{
+	int ret;
+
+	ret = down_interruptible(&io_slots);
+	if (ret)
+		return ret;
+
+	do_io();
+	up(&io_slots);
+	return 0;
+}
+```
+
+実際の関数では、取得後のすべての exit path が枠を返すことを確認します。エラー分岐や早期 return がある場合、解放漏れは後続 task を永久に待たせる可能性があります。スコープ cleanup を使う場合も、対象の kernel API と既存コードの書き方に合わせます。
+
+#### `up()` は owner に縛られない
+
+`up()` は利用可能な枠を戻し、待ち task があれば起床対象にします。mutex の unlock と異なり、semaphore は owner を持たないため、必ずしも `down*()` を実行した task 自身が `up()` する必要はありません。
+このため、取得 task と解放 task が異なる設計では、枠を返す責任と一回だけ返される保証を、状態遷移やエラー処理を含めて明確にします。二重の `up()` は意図しない並行数を許す原因になります。
+
+#### 排他用途とカウント用途の違い
+
+初期値 1 の semaphore は一度に一つの取得だけを許せますが、owner semantics がなく、mutex のような誤用検出・優先度継承の性質も同じではありません。
+排他目的で使う既存コードを変更するときは、`up()` を別 task が呼ぶ必要が本当にあるか、sleep・signal・優先度 inversion の振る舞いが変わらないかを確認せず、機械的に mutex へ置換しないでください。
+新しい設計では、数に基づく枠管理なら semaphore、task 所有の排他なら mutex、イベント完了の通知なら completion を候補として比較します。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- `down()` の deprecated 注記、各 acquire variant と戻り値: `kernel/locking/semaphore.c`
+- semaphore の構造と interrupt-context に関する注記: `include/linux/semaphore.h`
+- wait queue と起床処理: `kernel/locking/semaphore.c` の `__down_common()` / `__up()` 周辺
+- mutex の owner semantics・RT の扱い: `Documentation/locking/locktypes.rst`
+
+#### この小節で固定したいこと
+
+- semaphore はカウント資源を管理し、所有者を持たない。mutex の単純な別名ではない
+- sleep する `down*()` は task context のみで使い、戻り値を処理する
+- `down_trylock()` は失敗時 1、成功時 0 という戻り値に注意する
+- `up()` は取得 task 以外からも呼べるため、解放責任と二重解放防止を設計する
+- 新しい用途では排他に mutex、イベント待ちに completion、並行数制限に semaphore を使い分ける
