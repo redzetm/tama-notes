@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8を再整備、次は2.5）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1を再整備、次は2.5.2）
 
 ## 2章の研究観点
 
@@ -980,49 +980,68 @@ Linux 6.18 LTSのソース・文書を追う入口:
 
 ### 2.5 Linux のページング機構
 
-ここまでで、x86 が持つハードウェアのアドレス変換機構と、ページングが Linux の仮想記憶の中心であることを見てきました。
-この 2.5 では、さらに一歩進めて、Linux 自身がそのハードウェア機構をどう抽象化し、どう管理しているかを見ていきます。
-ここは、この章全体の到達点に近い節です。
+2.4では、MMUがhardware page tableをたどり、translationとpermissionを処理する仕組みを見ました。ここからはLinuxがそのpage tableをどう表現・更新し、hardwareやarchitectureの違いをmemory-management codeからどう隠すかを追います。
 
-重要なのは、Linux が単に x86 のページテーブルをそのまま直書きしているわけではないことです。
-Linux 6.18 LTS は、多数のアーキテクチャに対応するために、できるだけ汎用的なページングモデルを内部に持っています。
-そのうえで、各 CPU が持つ実際のページテーブル形式へ落とし込むわけです。
-つまり、Linux のページング機構を理解するというのは、ハードウェアの仕様だけでなく、
-カーネルがそれをどう抽象化して使っているかを理解することでもあります。
+Linux 6.18の共通コードは、概念上`PGD → P4D → PUD → PMD → PTE`という階層を使います。一方、hardwareの階層数はarchitecture、CPU機能、paging modeで異なります。hardware levelが少ない構成ではLinux側のlevelをfoldするため、共通コードは同じ種類のAPIで階層をたどれます。したがって、Linuxのlevel名と実際にCPUが読むtable levelを同一視せず、architectureの定義・helperと一緒に確認します。
+
+この節では、まずaddress bitの分割と汎用階層を見てから、entry型・属性の読み書き、table walkやmemory管理との接続、領域の初期化へ進みます。以後の記述では、hardwareが参照するpage-table entryだけでなく、VMAや`mm_struct`が表す仮想領域、物理pageの割り当て、page fault時の更新も別の層として追います。
 
 図にすると、この節で見たい関係は次のようなイメージです。
 
 ![Linux の汎用ページングモデルと各アーキテクチャの関係](img/linux-generic-paging-model.svg)
 
-図 2-11 Linux の汎用ページングモデルと各 CPU 形式の橋渡し
+図 2-11 Linuxの汎用階層とarchitecture固有のhardware page tableとの関係
 
 #### 2.5.1 リニアアドレスフィールドと汎用ページングモデル
 
-元の本文でまず重要なのは、Linux が 32 ビットでも 64 ビットでも扱える汎用的な多段ページモデルを採用している、という点です。
-大事なのは、Linux がページテーブル階層を抽象化し、アーキテクチャ差をなるべく共通コードで吸収しようとしていることです。
+##### addressをlevel indexとpage内offsetに分ける
 
-この発想は Linux らしいです。
-ある CPU では使う階層が 2 段で済み、別の CPU では 4 段や 5 段必要だったとしても、カーネル内部ではできるだけ同じ考え方で
-ページテーブルをたどり、同じ考え方でエントリを操作できるようにしています。
-このおかげで、メモリ管理コード全体をアーキテクチャごとに完全分裂させずに済みます。
+Linuxのgeneric page-table modelでは、仮想addressを各levelのindexと最下位のpage内offsetとして扱います。各levelのentry数やbit幅はarchitecture・page size・paging modeで定まり、Linuxはそれらを定数やhelperにまとめます。したがって、原文の図2-12のlevel名はLinux側の抽象階層を示し、全architectureで同じbit分割やhardware table数を示すものではありません。
 
-Linux 6.18 LTS をいま読むなら、ここはさらに重要です。
-x86_64 だけ見ても 4 段あるいは 5 段ページテーブルが視野に入りますし、arm64 や riscv でも多段ページングは自然な前提です。
-だから「昔の 32 ビット x86 の都合」ではなく、「Linux の仮想記憶を共通化するための骨格」として読む方が実りが大きいです。
+```text
+virtual address
+      │
+      ├─ pgd_index ─> PGD
+      ├─ p4d_index ─> P4D   (hardware levelでない構成ではfold)
+      ├─ pud_index ─> PUD
+      ├─ pmd_index ─> PMD
+      ├─ pte_index ─> PTE
+      └─ page offset ─> page/frame内のbyte位置
+```
+
+indexの考え方は共通です。level `X`のentry indexは概念上、addressをそのlevelのshift量だけ右へ移動し、levelのentry数から求めるmaskを適用して得ます。page offsetは`PAGE_SHIFT`未満のbitです。Linux 6.18の`include/linux/pgtable.h`には`pte_index()`、`pmd_index()`、`pud_index()`、`pgd_index()`等があり、generic codeがaddressの該当fieldからentryを選ぶために使います。architecture固有のshift、entry数、型定義は`asm/pgtable*`側で提供されます。
 
 #### アドレスのビット分割を抽象化する意味
 
-元の本文では PAGE_SHIFT、PMD_SHIFT、PGDIR_SHIFT のようなマクロが並びます。
-最初は細かい定義集に見えますが、実はここには重要な思想があります。
-Linux は「このアドレスのどこがページ内オフセットで、どこが何段目の索引か」を、ハードコードではなく抽象化して扱います。
+代表的な定義の役割は次のとおりです。
 
-この抽象化があるからこそ、同じ種類のコードを異なるページテーブル階層へ適用できます。
-たとえば 4KB ページを前提にしたオフセット長、ある段の 1 エントリが何バイトぶんを覆うか、何個のエントリを持つか
-といった情報をマクロでまとめておくことで、ページングコード全体の見通しがよくなります。
+| 定義 | 意味 |
+|---|---|
+| `PAGE_SHIFT` / `PAGE_SIZE` | base page内offsetのbit数とbyte size |
+| `PMD_SHIFT` / `PUD_SHIFT` / `PGDIR_SHIFT` | 各levelの一entryがcoverするaddress範囲の大きさを決めるshift |
+| `PTRS_PER_PTE`等 | そのlevelのtableにあるentry数 |
+| `pte_index()`等 | 仮想addressからそのlevelのentry番号を計算するhelper |
 
-研究ノートとしてここで押さえたいのは、Linux がビット演算の細部を隠したいのではなく、アーキテクチャ差を吸収しながらも
-同じ論理で歩けるように整理している、ということです。
-この見方を持つと、マクロ群も単なる定数一覧ではなく、移植性のための言語だと見えてきます。
+x86-64の4 KiB base-page・4-level pagingを例にすると、各table pageに512 entryがあるため、各indexは9 bit、page offsetは12 bitです。Linuxのgeneric modelでは`PGD → P4D → PUD → PMD → PTE`と表現しますが、この構成ではP4Dがfoldされ、hardwareはそのlevelの別tableをたどりません。5-level paging構成ではP4Dがhardware levelとなり、さらにPGD側にPML5相当のlevelが現れます。実際の設定による差は2.4.6を参照してください。
+
+folded levelもgeneric APIからは消えません。対応するlevelのentry数を1として扱い、そのindex helperは0を返すため、上位・下位levelを順にたどる共通コードを維持できます。これが「汎用階層」の具体的な仕組みです。一方、hardwareが実際に参照するentry layoutや属性の意味はarchitecture依存なので、共通helperだけで全動作を説明できるわけではありません。
+
+また、walkが常にPTEまで進むとは限りません。huge-page mappingではPMDやPUDがleafになる場合があり、そこでtranslationが完了します。address fieldのindex計算、Linuxの抽象level、hardwareのleaf levelは、対応付けて読みます。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- generic index helperとlevel foldingの前提: `include/linux/pgtable.h`
+- foldされたlevelの実装例: `include/asm-generic/pgtable-nop4d.h`、`include/asm-generic/pgtable-nopmd.h`
+- x86-64のlevel shiftとentry数: `arch/x86/include/asm/pgtable_64_types.h`
+- x86-32のPAE/non-PAE別定義: `arch/x86/include/asm/pgtable_32_types.h`、`arch/x86/include/asm/pgtable-3level_types.h`
+
+この小節で固定したいこと:
+
+- addressはarchitecture定義のshift・entry数を使って各level indexとpage offsetに分ける
+- `PGD/P4D/PUD/PMD/PTE`はLinuxのgeneric hierarchyで、hardware level数と常に一対一ではない
+- folded levelはgeneric APIに残りながら、実質1 entry/index 0として扱われる
+- huge-page mappingではPTEより上のPMD/PUD等がleafになり得る
+- generic helperは共通の階層操作を支えるが、entry形式・権限bitの解釈はarchitecture側も読む
 
 #### 2.5.2 ページテーブルの処理とエントリ操作
 
