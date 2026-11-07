@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」
-- 今回の主題: GFP条件からzone候補・watermarkを経てページを得るfast/slow path、direct reclaim・compaction・OOM、ページ解放と参照管理
-- 現在の進捗: 8.1〜8.1.9.1を作成済み。8.2以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」
+- 今回の主題: ページフレームから小さなカーネルオブジェクトを切り出す理由、cache/slab/objectの階層、Linux 6.18のSLUBと主要API
+- 現在の進捗: 8.1〜8.2.1を作成済み。8.2.2以降は未着手
 
 ## 第8章の見取り図
 
@@ -42,7 +42,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.1.7、8.1.7.1〜8.1.7.3 | buddy systemの構造、割り当て、解放 | 作成済み |
 | 8.1.8、8.1.8.1〜8.1.8.2 | CPUごとのページキャッシュ、割り当て・解放経路 | 作成済み |
 | 8.1.9、8.1.9.1 | ページ割り当て判断とページ解放 | 作成済み |
-| 8.2、8.2.1〜8.2.15 | slab系アロケータとオブジェクト管理 | 未着手 |
+| 8.2、8.2.1 | 小さな領域の管理とSLUBの基本モデル | 作成済み |
+| 8.2.2〜8.2.15 | cache/slab構造、割り当て・解放、mempool | 未着手 |
 | 8.3、8.3.1〜8.3.4 | 非連続メモリ領域の管理 | 未着手 |
 
 ## 8.1 ページフレームの管理
@@ -776,3 +777,104 @@ static void release_page_block(struct page *page, unsigned int order)
 - slow path、direct reclaim、compaction、retry/OOM: `mm/page_alloc.c` (`__alloc_pages_slowpath()`、`__alloc_pages_direct_reclaim()`、`__alloc_pages_direct_compact()`)
 - 解放・PCP/buddyへの経路: `mm/page_alloc.c` (`__free_pages()`、`___free_pages()`、`__free_frozen_pages()`)
 - allocatorの設計説明: `Documentation/core-api/memory-allocation.rst`、`Documentation/mm/physical_memory.rst`
+
+## 8.2 メモリ領域の管理
+
+8.1で扱ったページアロケータは、ページサイズ単位の物理メモリを管理します。しかしカーネル内のデータ構造には、ページよりずっと小さい数十〜数百バイト程度のオブジェクトが多くあります。それぞれにページを割り当てると、オブジェクト本体に使われない領域が大きくなり、ページの内部断片化が生じます。
+
+この粒度の違いを埋めるのがslab allocatorです。ページアロケータから得たページをアロケータ内部で管理し、その中を複数のオブジェクト用スロットに分けます。したがって、slab allocatorはページアロケータを置き換えるものではなく、ページの上に構築されたオブジェクト単位の層です。
+
+```text
+ページアロケータ
+  物理ページを確保
+        |
+        v
+slab allocator
+  同種・同サイズのオブジェクト用領域を管理
+        |
+        +-- object 0
+        +-- object 1
+        +-- object 2
+        +-- ...
+```
+
+### 8.2.1 スラブアロケータ
+
+スラブアロケータの基本的な考え方は、同じ種類のオブジェクトを繰り返し作成・破棄するカーネルの利用形態を、専用のcacheとして扱うことです。cacheから空きobjectを返し、解放されたobjectを同じcacheで再利用することで、個々の小さな要求ごとにページを確保・解放する処理を避けます。
+
+```text
+kmem_cache (同種のobjectを管理するcache)
+        |
+        +-- slab/page群
+                |
+                +-- object: 使用中
+                +-- object: 空き
+                +-- object: 使用中
+```
+
+この「cache」はCPUのL1/L2 cacheとは異なり、カーネルオブジェクトを供給・再利用するための管理単位です。たとえば構造体型専用のcacheでは、同じサイズ・同じレイアウトのobjectを繰り返し確保できます。別のAPIである`kmalloc()`は、サイズクラスに対応した汎用cache群から要求サイズを満たす領域を返します。
+
+| 層 | Linux 6.18での役割 |
+|---|---|
+| page allocator | slab用のページを物理ページ単位で供給する |
+| slab allocator (SLUB) | ページをobject slot群として管理し、cache単位で再利用する |
+| 呼び出し側 | `kmem_cache_alloc()`や`kmalloc()`でobjectを確保し、対応するAPIで解放する |
+
+要求サイズと実際のobject slotのサイズは常に一致するわけではありません。slot管理情報やアラインメント、デバッグ機能などのための領域も必要で、サイズクラスに切り上げられる場合にはその差が内部断片化になります。一方、cacheを再利用することで、同じ種類のobjectを作るたびに初期化やページアロケータ処理を一から繰り返す必要を減らせます。cache固有のconstructorを設定することもできますが、一般のobject初期化・破棄をすべてconstructor/destructorに任せる仕組みではありません。objectごとの値の初期化と資源解放は、呼び出し側の寿命管理として明示します。
+
+Linux 6.18では、通常のslab allocator実装はSLUBです。SLUBはper-CPUの高速経路とslab単位の空きobject管理を組み合わせます。これは第3版の古典的なslab構造や、旧実装で使われた管理リストをそのまま現在の内部構造とみなせないことを意味します。ここではcache/slab/objectという概念階層は有効な道具として使い、具体的なdescriptorやfreelistの構造は後続節で現行ソースに照らして確認します。
+
+#### APIの使い分け
+
+| 目的 | 主なAPI | 解放API |
+|---|---|---|
+| 特定の構造体型を繰り返し割り当てる | `kmem_cache_create()`、`kmem_cache_alloc()` | `kmem_cache_free()` |
+| 任意の小さなbyte数を割り当てる | `kmalloc()`、`kzalloc()` | `kfree()` |
+| ページ単位の領域が必要 | `alloc_pages()`等 | 対応するpage解放API |
+
+```c
+struct sample_object {
+        unsigned long state;
+        void *payload;
+};
+
+static struct kmem_cache *sample_cache;
+
+static int __init sample_cache_init(void)
+{
+        sample_cache = kmem_cache_create("sample_object",
+                                         sizeof(struct sample_object),
+                                         0, 0, NULL);
+        return sample_cache ? 0 : -ENOMEM;
+}
+
+static struct sample_object *sample_alloc(gfp_t gfp)
+{
+        if (!sample_cache)
+                return NULL;
+        return kmem_cache_alloc(sample_cache, gfp);
+}
+
+static void sample_free(struct sample_object *obj)
+{
+        if (obj)
+                kmem_cache_free(sample_cache, obj);
+}
+
+static void __exit sample_cache_exit(void)
+{
+        kmem_cache_destroy(sample_cache);
+}
+```
+
+この例では、cacheの作成に成功してからobjectを割り当てます。終了処理で`kmem_cache_destroy()`を呼ぶ前に、そのcacheから確保したobjectをすべて返しておく必要があります。確保したobjectのフィールド初期化は必要に応じて呼び出し側で行い、`kmem_cache_free()`後にそのポインタを使い続けてはいけません。`gfp`はobject確保時の実行文脈と回収可否を表すため、interrupt等のatomic contextで`GFP_KERNEL`を使う、といったsleep可能性の不整合を避けます。
+
+**Linux 6.18のソースを追う入口**
+
+- allocator選択とSLUB構成: `mm/Kconfig` (`CONFIG_SLUB`、`CONFIG_SLUB_TINY`)
+- 公開API: `include/linux/slab.h` (`kmem_cache_create()`、`kmem_cache_alloc()`、`kmem_cache_free()`、`kmalloc()`系)
+- cache/SLUB内部構造: `mm/slab.h` (`struct kmem_cache`、`struct slab`)
+- 共通cache管理と汎用cache: `mm/slab_common.c`
+- SLUB実装: `mm/slub.c`
+- slab allocatorの利用者向け説明と観測: `Documentation/admin-guide/mm/slab.rst`
+- GFP flagsと割り当てAPIの選択: `Documentation/core-api/memory-allocation.rst`
