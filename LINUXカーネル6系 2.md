@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.3を再整備、次は2.2.4）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4を再整備、次は2.3）
 
 ## 2章の研究観点
 
@@ -409,20 +409,62 @@ Linux 6.18 LTSのソースを追う入口:
 
 #### 2.2.4 セグメンテーション回路
 
-セグメンテーション回路は、論理アドレスからリニアアドレスを得るまでの流れを担当します。
-セグメントセレクタから対応するディスクリプタを見つけ、そのベースにオフセットを足し、
-必要な保護チェックを行いながら次の段階へ進めます。
+##### 古典的なセグメント変換の手順
 
-この説明自体は x86 固有ですが、OS を考えるうえではかなり意味があります。
-なぜなら、アドレス変換というのは単なる足し算ではなく、
-「どの空間に属するか」「どの権限なら許されるか」「その範囲に収まっているか」という確認を
-伴う処理だからです。
-Linux カーネルは、このような CPU 側の保護機能を前提にして、安全なユーザー空間と特権空間を
-成り立たせています。
+原文の図2-5は、selectorとoffsetからlinear addressを得る処理を示しています。概念上、selectorをsegment registerへロードするときにdescriptorが選ばれ、その後のアドレス形成ではCPU内部に保持されたdescriptor stateが使われます。
 
-ただし、現代 Linux の本筋としては、この段階を細かく追うだけで満足してはいけません。
-本当に効いてくるのは、このあとページングによって仮想アドレス空間をどう構成するか、という話です。
-つまり、セグメンテーション回路は入口であり、主役は次のページングへ渡される、と見るのがよいです。
+```text
+selector (Index, TI) ── selectorのロード時 ──> GDTまたはLDTのdescriptor
+                                                    │
+                                                    v
+                                       CPU内部のdescriptor state
+                                                    │
+logical address = selector:offset                  │
+                  │                                 │
+                  └──────── offset + segment base ──┘
+                                  │
+                                  v
+                           linear address
+                                  │
+                               paging
+                                  v
+                          physical address
+```
+
+古典的なprotected modeでdescriptorを選ぶ流れは、次のように読めます。
+
+1. selectorのTI bitでGDTかLDTかを選ぶ。GDTのbaseはGDTRから、現在のLDTのbaseはLDTRが選択するLDT descriptorから得る。
+2. selectorのIndexにdescriptorの大きさを掛け、選択した表のbaseに加えてentry位置を求める。通常のcode/data descriptorなら8 byte単位である。
+3. selectorをロードする命令に対してCPUがdescriptorの存在・種類・権限などを検査し、必要な情報をsegment registerに付随する内部状態へ取り込む。
+4. アドレス形成では、該当するsegment baseとoffsetからlinear addressを作る。従来の保護モードではsegmentのlimitやアクセス種別なども保護判定に関係する。
+5. pagingが有効ならlinear addressを入力としてページ変換・アクセス権確認を行い、physical addressへ進む。
+
+手順1〜3を毎回のメモリアクセスでやり直すわけではありません。descriptor選択とロード時の検査はselectorをsegment registerへロードするときの処理であり、通常のアドレス形成では2.2.3で見たCPU内部状態が使われます。また、segmentの保護検査とpagingの保護検査は別段階です。一方を通過しても、もう一方の権限確認が不要になるわけではありません。
+
+##### Linux 6.18のx86-64ではどこが異なるか
+
+上の手順は、segment baseやlimitがアドレス空間の分割に使われる古典的なモデルです。Linux 6.18のx86-64が通常動作する64-bit modeでは、CS/DS/ES/SSのbaseは通常のアドレス形成に使われず、これらのsegment limitによる従来型の範囲制限も適用されません。FS/GS baseは例外で、対応する参照ではlinear addressの形成に使われます。したがって、selector:offsetを見ただけで全segmentについて「descriptor base + offset」と計算するのは誤りです。
+
+64-bit modeでもsegment registerとdescriptorは不要になるわけではありません。特権レベルの遷移やsegment selectorのロードに関する規則は残り、FS/GS baseはTLSやper-CPU accessなどに関わります。ただし、一般的なプロセス仮想アドレスの中心的なmappingと保護はpagingが担います。x86-64ではlinear addressの形式がcanonicalであることも必要で、pagingによる変換・権限確認と合わせて実際のアクセス可否が決まります。
+
+例えばFS-relative accessは、概念的には「FS base + 命令が指定するoffset」からlinear addressを作り、そのaddressをpagingへ渡します。これはselectorのIndexで指したsegmentが任意の領域を切り出す古典モデルとは異なる使い方です。Linuxが設定するFS/GS baseや、実際にどの経路で保存・復元するかは、汎用的な足し算の例だけで決めつけず、x86の実装を追います。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- selector定義とsegment関連helper: `arch/x86/include/asm/segment.h`
+- descriptor構造・GDT/LDTR操作: `arch/x86/include/asm/desc.h`
+- FS/GS baseとthread contextの切替: `arch/x86/kernel/process_64.c`
+- LDTの保持・ロード・更新: `arch/x86/kernel/ldt.c`
+
+この小節では、segment registerを直接操作するC/assembly例は置きません。selectorのロードにはCPU mode、権限、descriptorの妥当性が関係し、64-bit modeではregisterごとにbase/limitの扱いも異なります。代わりに、古典的な変換の段階と64-bit modeで実際に使われる部分を分けて、Linuxの設定・切替経路を読むことを優先します。
+
+この小節で固定したいこと:
+
+- 古典的なモデルでは、selectorがGDT/LDTのdescriptorを選び、segment baseとoffsetからlinear addressを作る
+- descriptorの選択・検査・内部状態へのロードと、通常のアドレス形成を区別する
+- 64-bit modeではCS/DS/ES/SSのbase/limitを古典モデルのように適用しない。FS/GS baseは用途が残る
+- segment段階の保護とpaging段階のmapping・権限確認は別の仕組み
+- Linux 6.18の通常の仮想記憶の中心はpagingであり、x86固有のsegmentの例外的な用途は実装と合わせて読む
 
 #### この節を Linux 6.18 LTS の研究へつなぐ
 
@@ -1018,7 +1060,6 @@ Linux 6.18 LTS は、これらを全部すでに巨大な形で解いていま�
 なので、この 2 章は UmuOS のためにもかなり大事です。
 単に Linux の事情を知るためではなく、自作 OS をこれからどこまで育てるか、その設計地図を得るための章として読む価値が
 あります。
-
 
 
 
