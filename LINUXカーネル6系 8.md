@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」、8.3.2「非連続メモリ領域のディスクリプタ」、8.3.3「非連続メモリ領域の割り当て」
-- 今回の主題: `vmalloc()`における仮想領域予約、物理page確保、page table mappingと失敗時の後始末
-- 現在の進捗: 8.1〜8.2.15、8.3〜8.3.3を作成済み。8.3.4以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」、8.3.2「非連続メモリ領域のディスクリプタ」、8.3.3「非連続メモリ領域の割り当て」、8.3.4「非連続メモリ領域の解放」
+- 今回の主題: `vfree()`と`vunmap()`の責務の違い、mapping解除、page ownership、仮想領域と関連資源の解放
+- 現在の進捗: 第8章の8.1〜8.3.4を作成済み
 
 ## 第8章の見取り図
 
@@ -61,7 +61,7 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.3.1 | vmalloc領域の仮想アドレス空間 | 作成済み |
 | 8.3.2 | `vm_struct`と`vmap_area`による領域・mapping管理 | 作成済み |
 | 8.3.3 | `vmalloc()`の仮想領域・物理page確保とmapping | 作成済み |
-| 8.3.4 | 非連続メモリ領域の解放 | 未着手 |
+| 8.3.4 | `vfree()`/`vunmap()`によるmapping解除と資源解放 | 作成済み |
 
 ## 8.1 ページフレームの管理
 
@@ -1841,3 +1841,65 @@ vmalloc(size)
 - page arrayと実pageの割り当て: `mm/vmalloc.c` (`__vmalloc_area_node()`、`vm_area_alloc_pages()`)
 - page table mappingとcache flush: `mm/vmalloc.c` (`vmap_pages_range()`、`__vmap_pages_range_noflush()`)
 - `vmalloc()`の返却値と契約: `include/linux/vmalloc.h`、`mm/vmalloc.c`内の`vmalloc_noprof()`
+
+### 8.3.4 非連続メモリ領域の解放
+
+割り当て時のAPIに対応する解放APIを選ぶには、仮想mappingの解除と、mapping先の物理pageの所有権を分けて考えます。Linux 6.18では、通常の`vmalloc()`で得た領域には`vfree()`を使い、`vmap()`で既存pageをmappingした領域には、page群の所有権に応じて`vunmap()`または`vfree()`を使います。
+
+```c
+/* vmalloc()が確保したpageも含めて解放 */
+vfree(buf);
+
+/* callerが所有し続けるpage群をvmap()した場合 */
+vunmap(mapped);
+/* caller側で各pageの参照・寿命を別途管理する */
+```
+
+#### `vfree()`と`vunmap()`の違い
+
+| 割り当て経路 | 解放API | mapping先のpage |
+|---|---|---|
+| `vmalloc()`、`vmalloc_32()`等 | `vfree(addr)` | vmalloc側が確保したpageを解放する |
+| 通常の`vmap(pages, ...)` | `vunmap(addr)` | page自体は解放せず、呼び出し側が所有・管理する |
+| `vmap()`に`VM_MAP_PUT_PAGES`を指定 | `vfree(addr)` | `vmap()`へ移したpage参照とpage配列の所有権を`vfree()`側が処理する |
+
+最後のケースはLinux 6.18の`vmap()` API契約に基づきます。`VM_MAP_PUT_PAGES`を指定すると、page配列（kmallocまたはvmallocで確保したもの）と各pageへの参照が呼び出し側から`vmap()`へ移り、戻りaddressに対する`vfree()`で解放・putされます。したがって、`vmap()`を呼んだという理由だけで常に`vunmap()`を選ぶのではなく、flagとpage ownershipを確認します。逆に、通常の`vmap()`で借りた/呼び出し側所有のpageを`vfree()`してpage所有権まで解放してはいけません。
+
+#### `vfree()`の処理の流れ
+
+Linux 6.18の`vfree()`は、概ね次の順で進みます。
+
+1. `remove_vm_area(addr)`で開始addressに対応する領域descriptorを見つけ、vmap管理から取り外します。
+2. `free_unmap_vmap_area()`経由でkernel virtual mappingのpage table entryを解除し、cache処理を行います。vmap address範囲の再利用やTLB処理はlazy purge等を含む汎用管理機構と連携するため、旧版のようにすべてのpage table階層をその場で単純にたどる実装として捉えないでください。
+3. `VM_FLUSH_RESET_PERMS`が付く特殊な領域ではdirect mapのpermission resetと関連flushを行います。
+4. vmallocが所有するpage referenceを`__free_page()`で解放し、page countを更新します。次にpage pointer arrayを`kvfree()`し、`vm_struct`を`kfree()`します。`VM_MAP_PUT_PAGES`の場合はflagが示すownership規則に従います。
+
+処理の見取り図は次のとおりです。
+
+```text
+vfree(addr)
+    |
+    +-- remove_vm_area()
+    |      +-- descriptor検索・busy領域からunlink
+    |      +-- page table mapping解除
+    |      +-- vmap領域をlazy purge対象へ
+    |
+    +-- ownershipに従ってpage referenceを解放
+    +-- page pointer arrayを解放
+    +-- vm_structを解放
+```
+
+`vunmap(addr)`も領域を検索してvirtual mappingを解除し、`vm_struct`を解放しますが、通常は`vm->pages`の各pageを解放しません。これは`vmap()`が呼び出し側所有の既存pageをmappingするAPIだからです。こうして「mappingを外す」と「pageを返却する」を切り分けることで、利用中のpageを誤って解放することを避けます。
+
+#### 呼び出し文脈と寿命
+
+`vfree()`はsleep可能な処理を含み、NMI contextでは呼び出せません。interrupt contextからの呼び出しは内部でdeferred処理へ回され、`vfree_atomic()`もNMI以外のatomic contextで使えますが、同期的にその場で全解放が完了するわけではありません。通常の経路ではsleep可能な文脈から呼び出すのが基本です。`vunmap()`はinterrupt contextで呼び出せません。
+
+どちらも、解放後に古いポインタを参照してはなりません。領域descriptorと仮想範囲が管理から外れた後、そのaddressが将来別のmappingに再利用される可能性があります。解放APIの呼び分けに加え、全利用者がmappingへのアクセスを終えたことを同期してから解放する必要があります。
+
+**Linux 6.18のソースを追う入口**
+
+- `vfree()`、interrupt時のdeferred処理、page ownership: `mm/vmalloc.c` (`vfree()`、`vfree_atomic()`、`delayed_vfree_work()`)
+- `vunmap()`のmappingのみを解除する経路: `mm/vmalloc.c` (`vunmap()`)
+- descriptor取り外しとunmap: `mm/vmalloc.c` (`remove_vm_area()`、`free_unmap_vmap_area()`、`vunmap_range_noflush()`)
+- `VM_MAP_PUT_PAGES`時の所有権契約: `include/linux/vmalloc.h`、`mm/vmalloc.c` (`vmap()`、`vfree()`)
