@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.4を再整備、次は2.4.5）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.7を再整備、次は2.4.8）
 
 ## 2章の研究観点
 
@@ -803,55 +803,130 @@ Linux 6.18 LTSのソースを追う入口:
 
 #### 2.4.5 物理アドレス拡張（PAE）ページング
 
-元の本文は次に PAE を説明しています。
-PAE は Physical Address Extension の略です。
-これは 32 ビット時代に、**仮想アドレス幅はほぼそのままに、物理アドレス側だけを広げる** ための仕組みです。
-つまり PAE の要点は、「プロセスから見える空間を大きくする」のではなく、
-「OS が裏側で結び付けられる物理ページフレームの候補を増やす」ところにあります。
+##### 32-bit PAEが変えるもの
 
-ただし、Linux 6.18 LTS を今から学ぶ立場では、PAE 自体を細かく追う優先度は高くありません。
-ここで本当に理解したいのは、**仮想アドレス幅と物理アドレス幅は必ずしも同じではない** という見方です。
-この見方は、そのまま 64 ビット環境の読解につながります。
+PAE（Physical Address Extension）は、32-bit x86のlinear addressを32 bitのまま保ちながら、page-table entryの形式と階層を変えて、より広いphysical addressを扱う機構です。従って、PAEだけで一つの32-bit processに4 GiBを超える連続した仮想address spaceを与えるわけではありません。一方、カーネルはシステム全体のRAMをより広いphysical address範囲で管理し、異なる物理pageを各processの限られた仮想範囲へ順次mappingできます。
 
-x86_64 でも、理論上の 64 ビット全部をそのまま使うわけではありません。
-実際に CPU が有効として扱う仮想アドレス幅や物理アドレス幅には制約があり、その制約に合わせてページテーブルの段数や
-エントリの持ち方が決まります。
-つまり現代 Linux の研究で重要なのは、PAE の歴史的細部そのものよりも、
-**アドレス空間は「型名のビット数」で機械的に決まるのではなく、CPU と OS の設計で運用される構造だ**
-と理解することです。
+原文が前提にする36-bit physical addressなら理論上の範囲は2^36 byte、すなわち64 GiBです。ただし、これは原文のCPU世代の説明値であり、実際に利用できるRAM容量はCPU、platform、kernel configurationなどで決まります。Linux 6.18のx86-32 PAE用定義でもphysical address幅の上限を36 bitとして扱いますが、ハードウェアがその全範囲を必ず実装しているという意味ではありません。
+
+##### PAEでのpage-table walk
+
+32-bit PAEではentry幅が32 bitから64 bitになり、4 KiBのtable pageに512 entryを置きます。また、CR3が指す4-entryのPDPTが加わり、通常pageのwalkはPDPT → page directory → page table → page frameの順になります。
+
+```text
+31       30 29                 21 20                 12 11          0
++-----------+-------------------+-------------------+--------------+
+| PDPT (2)  | directory (9)     | table (9)         | offset (12)  |
++-----------+-------------------+-------------------+--------------+
+      │              │                    │                 │
+      v              v                    v                 v
+     PDPT ─────> page directory ─────> page table ─────> 4 KiB frame
+```
+
+各entryに物理addressの上位bitを保持できるため、32-bit virtual addressから36-bit physical addressへの変換が可能になります。PAEではPDEのPS bitを使う2 MiB pageもあります。その場合はpage tableを経由せず、linear addressの下位21 bitが2 MiB page内offsetです（2.4.2参照）。これは非PAE時代の4 MiB PSE mappingとは別のサイズ・table形式です。
+
+この方式の限界は、virtual addressが依然32 bitであることです。個々のprocessの仮想範囲は最大4 GiBの枠内で、kernel/userのsplitや実際に使える範囲はOS構成に依存します。また、32-bit kernelが高位physical memoryを扱う方法には追加の制約・mapping管理があります。したがって「PAEなら各processが64 GiBを直接使える」と読み替えてはいけません。
+
+##### Linux 6.18とx86-64を混同しない
+
+Linux 6.18のx86-32では、PAE構成と非PAE構成でpage-table entryの幅やhierarchyが異なります。`arch/x86/include/asm/pgtable-3level_types.h`には64-bit entry、4-entry top level、36-bit physical address上限などが定義されています。x86-32のpage-table type選択は`arch/x86/include/asm/pgtable_32_types.h`から追えます。
+
+x86-64のlong modeも64-bit paging entryとPAEに由来する階層形式を使い、hardware上PAEを前提とします。しかし、それは「x86-64が32-bit PAEを使って4 GiB超のRAMを足している」という意味ではありません。long modeではvirtual addressのcanonicality、4/5-level paging、CPUごとのvirtual/physical address widthが関わります。32-bit PAEは「virtual widthとphysical widthを別々に扱える」ことを示す比較対象として捉えます。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86-32 PAEのentry型、level数、physical address幅: `arch/x86/include/asm/pgtable-3level_types.h`
+- x86-32でPAE/non-PAEの型を選ぶ定義: `arch/x86/include/asm/pgtable_32_types.h`
+- x86-64のphysical/virtual maskとpaging level: `arch/x86/include/asm/page_64_types.h`、`arch/x86/include/asm/pgtable_64_types.h`
+
+この小節で固定したいこと:
+
+- 32-bit PAEは32-bit virtual addressを保ち、より広いphysical addressを指せるようにする
+- Linux 6.18のx86-32 PAE定義は36-bit physical addressを上限とするが、実装容量はCPU・platform等に依存する
+- PAEは64-bit entry、4-entry PDPTを含む階層を用い、4 KiB pageはPDPT→directory→tableをたどる
+- 32-bit processの仮想空間を4 GiBより広げる機構ではない
+- x86-64のlong-mode pagingと32-bit PAEはentry形式に歴史的な関係があるが、同じ動作modeとして混同しない
 
 #### 2.4.6 64 ビットアーキテクチャにおけるページング
 
-現代の Linux 6.18 LTS を実際に読むなら、こちらの方が本筋です。
-x86_64 では、32 ビット時代の単純な 2 段階では足りず、より多段のページテーブルを使います。
-仮想アドレス空間が大きくなったぶん、それを現実的な RAM 消費で管理するために段数を増やしているわけです。
+64-bit architectureでは、address幅が広くなるため、階層を増やしてpage tableを疎に構成します。ただし、x86-64で「64 bitすべてがvirtual addressとして使える」わけではありません。CPUが実際に対応するvirtual/physical address幅と、kernelが選択したpaging modeを区別して読みます。
 
-ここで重要なのは、段数が増えても本質は変わらないことです。
-仮想アドレスをいくつかの索引とオフセットに分け、上位から順にテーブルをたどり、最後に実ページへ到達する。
-この枠組みは同じです。
-そのため、32 ビットの 2 段ページングを理解しておくことは、64 ビットの 4 段や 5 段ページングを理解するための土台に
-なります。
+##### x86-64の4-levelと5-level paging
 
-Linux 6.18 LTS の実コードでは、アーキテクチャ差を吸収するために、できるだけ汎用的なページテーブル階層の見方を
-採っています。
-したがって研究ノートとしては、「x86_64 は何段か」という暗記よりも、
-Linux が多段ページテーブルという一般モデルの上で各アーキテクチャをどう吸収しているかを見る方が価値があります。
+4 KiB pageを使うx86-64ではoffsetに12 bitを使い、各page-table pageは512 entryを持つため、各levelのindexは9 bitです。4-level pagingは`9 + 9 + 9 + 9 + 12 = 48` bitを変換に使います。LA57に対応したCPUと有効なkernel構成では5-level pagingとなり、`9 + 9 + 9 + 9 + 9 + 12 = 57` bitを使います。
+
+```text
+4-level: [ PML4 9 ][ PDPT 9 ][ PD 9 ][ PT 9 ][ offset 12 ] = 48 bits
+5-level: [ PML5 9 ][ PML4 9 ][ PDPT 9 ][ PD 9 ][ PT 9 ][ offset 12 ] = 57 bits
+```
+
+4-levelでaddress translationに使われる48 bitの上位側は、canonical address規則に従いbit 47を上位bitへsign-extendした形でなければなりません。5-levelではbit 56がsign bitになります。範囲の間にある非canonical addressを使うと、page-table walkによる通常のmappingとは別にCPU例外の対象になります。従って、アプリケーションのpointer widthが64 bitであることと、任意の64-bit値が有効なuser pointerであることは同じではありません。
+
+4-level pagingのcanonical範囲は低位側128 TiBと高位側128 TiBに分かれ、その間はholeです。5-levelではそれぞれ64 PiBずつの範囲となります。Linuxのuser address spaceがその全範囲を必ず使うという意味ではなく、kernelのtask sizeやmemory layout、compat ABI、設定等の制約も受けます。x86-64のLinux memory mapは4-level/5-level別に確認し、古い本の48-bitモデルを5-level環境にも無条件に当てはめないようにします。
+
+##### Linuxの汎用階層とhardware level
+
+Linuxのgeneric page-table modelは、概念上`PGD → P4D → PUD → PMD → PTE`の階層を持ちます。x86-64の4-level pagingでは`P4D`がfoldされ、5-level pagingでは実際のhardware levelとして使われます。他のarchitectureやpaging modeでも不足するlevelをfoldできるため、generic codeは共通の階層APIを使えます。ソースに5種類のlevel名があることから、必ずhardwareが5回tableを読むと結論しないことが重要です。
+
+通常の4 KiB mappingならwalkはPTEまで進みますが、2 MiB/1 GiB mappingではPMD/PUD entryがleafになる場合があります（2.4.2参照）。hardware上のtable構造と、Linuxがgeneric APIで表現するlevel、実際のmapping sizeを照合しながら読むと、抽象化の役割が見えてきます。
+
+また、physical address widthはvirtual address widthとは別にCPU・platformで定まります。Linux 6.18のx86-64定義は最大52-bit physical memory幅を想定しますが、個々のCPUが使える実幅は異なります。4-level/5-levelの選択だけから搭載RAMの上限を決めず、CPU featureと起動後のkernel情報を確認します。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- x86-64 paging level、index幅、物理アドレス上限: `arch/x86/include/asm/pgtable_64_types.h`
+- 4-level/5-levelでのvirtual/physical address幅とmemory map: `arch/x86/include/asm/page_64_types.h`、`Documentation/arch/x86/x86_64/mm.rst`
+- Linux共通のpage-table levelとfolding: `include/linux/pgtable.h`、`include/asm-generic/pgtable-nop4d.h`
+- address-space layoutの実際の定義: `arch/x86/mm/`
+
+この小節で固定したいこと:
+
+- x86-64の4 KiB pageでは各indexが9 bit、offsetが12 bitで、4-levelは48-bit、5-levelは57-bitのcanonical addressを扱う
+- canonical addressは上位bitのsign extension条件を満たす必要があり、64-bit pointer値すべてが有効とは限らない
+- LA57による5-level pagingは対応CPUとkernelの構成に依存する
+- LinuxのPGD/P4D/PUD/PMD/PTEはgenericな階層で、hardware levelが少ない場合は一部がfoldされる
+- virtual address幅、physical address幅、user task sizeは別々に確認する
 
 #### 2.4.7 ハードウェアキャッシュ
 
-ページングの話は、変換表だけで終わりません。
-もし CPU が毎回 RAM 上のページテーブルを深くたどっていたら、速度が出ません。
-そのため CPU は、キャッシュや TLB を使って、データアクセスやアドレス変換を高速化しています。
+##### CPU cacheが隠すmemory latency
 
-まずキャッシュは、RAM より速い内部記憶を使って、よく使うデータや命令へのアクセスを速くする仕組みです。
-Linux カーネルの設計でも、キャッシュライン、局所性、偽共有、アラインメントなどが性能に大きく効きます。
-マルチコア環境ではキャッシュコヒーレンシも重要で、単にメモリへ書いたから終わり、とはなりません。
+CPU cacheは、DRAMより近く速い記憶階層に最近・頻繁に使われる命令やdataを保持し、平均的なaccess latencyを下げます。これは時間的局所性（同じdataを再利用する）と空間的局所性（近接addressを続けて参照する）を利用する仕組みです。L1、L2、最終level cacheなどの構成や共有関係はCPU microarchitectureに依存します。
+
+CPUは通常、byte単位ではなく**cache line**単位でdataを転送・保持します。そのため、隣接要素を順番に読む処理は局所性を活かしやすい一方、複数CPUが同じcache line上の別々の変数を頻繁に更新すると、必要以上にlineの所有権がCPU間を移動することがあります。これはfalse sharingと呼ばれ、変数自体が別でも性能に影響します。cacheline sizeやalignmentが性能設計に関係する理由の一つです。
 
 図にすると、CPU 内部のキャッシュと外側の DRAM の関係は次のようなイメージです。
 
 ![CPU 内部キャッシュと DRAM の関係](img/cpu-cache-and-dram.svg)
 
 図 2-10 プロセッサのハードウェアキャッシュ
+
+この図は概念図です。現代のCPUではL1 instruction/data cache、複数levelのcache、複数coreで共有するcacheなどがあり、単純に「SRAM cacheがpaging回路とDRAMの間に一つある」とは限りません。またcacheとTLBは別の仕組みです。data/instruction cacheはmemory内容を保持し、TLBはaddress translationと権限情報を保持します（次の2.4.8参照）。
+
+##### cache coherenceとLinuxの同期を区別する
+
+一般的なx86 SMP systemでは、CPU core間のcache coherenceをhardwareが維持し、同じ通常memory addressについて各CPUのcacheが異なる値を恒久的に返すことを防ぎます。しかし、coherenceは「複数CPUの更新順序をプログラムの意図どおりにする」「複数fieldの更新をatomicにする」「raceをなくす」機能ではありません。共有dataへの並行アクセスには、Linuxのlock、atomic operation、適切なmemory orderingが必要です。hardware coherenceをspinlockの代わりとして扱ってはいけません。
+
+##### device DMAとCPU cacheは別の整合性経路
+
+deviceがDMAでmemoryを読み書きするとき、CPU cacheとdeviceの観測が必ず自動で一致するとは限りません。coherent DMAとnon-coherent DMAの差はarchitectureやplatformに依存し、driverはCPU physical addressを勝手にdevice addressとみなさず、DMA APIでmapping・同期を行います。LinuxのDMA APIは必要なcache maintenanceやIOMMU/bus address変換をarchitecture側で扱うための抽象化です。deviceとmemoryのownershipを移す前後に、適切なDMA APIを使うことが重要です。
+
+ここでのcache maintenanceとmemory barrierも別物です。cache clean/invalidateはcache lineとmemory/device間のdata visibilityに関係し、memory barrierはCPUやcompilerによるmemory operationの順序を制御します。barrierを置くだけでnon-coherent device向けのcache同期が完了するわけではなく、逆にcache invalidateだけで複数CPU間のraceが解決するわけでもありません。
+
+Linux 6.18 LTSのソース・文書を追う入口:
+
+- cacheとTLB flushのLinux VM interface: `Documentation/core-api/cachetlb.rst`
+- DMA mappingとdevice向けcache同期: `Documentation/core-api/dma-api-howto.rst`、`include/linux/dma-mapping.h`
+- cacheline・alignmentに関するarchitecture定義: `include/linux/cache.h`、`arch/x86/include/asm/cache.h`
+- CPU間のmemory ordering: `Documentation/memory-barriers.txt`
+
+この小節で固定したいこと:
+
+- CPU cacheはmemory data/instructionをcacheline単位で保持し、TLBはaddress translationを保持する別の機構
+- cache階層・共有構成はCPU依存であり、原文の単純な直列図は概念図として読む
+- CPU間のcache coherenceはdataの一貫性を支えるが、race防止・atomicity・必要なorderingを提供するlockの代替ではない
+- DMAの整合性はCPU cache coherenceだけで一般化せず、driverはDMA APIのmapping/sync規約に従う
+- cache maintenance、memory barrier、lockはそれぞれ異なる問題を扱う
 
 #### 2.4.8 アドレス変換バッファ（TLB）
 
