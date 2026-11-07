@@ -93,7 +93,7 @@ KVM の second-stage mapping（EPT/NPT）
 - 主な論点: 論理/リニア/物理アドレス、x86 セグメント機構、ページング、Linux の汎用ページテーブル、物理メモリ layout、TLB/cache 整合性
 - Linux 6.18 LTS の視点: x86-32 の説明を入口にし、現在の x86-64 と Linux 共通の仮想記憶モデルを中心に読む
 - UmuOS の視点: QEMU/KVM ゲスト内の仮想アドレス・ゲスト物理アドレスと、ホスト側 memory mapping の境界を分ける
-- 現在の進捗: 原文の 2.1〜2.5.7.2 は一通り反映済み。内容の再確認と補強を小節単位で進行中（2.1、2.2.1〜2.2.4、2.3、2.4導入、2.4.1〜2.4.8、2.5導入、2.5.1〜2.5.6を再整備、次は2.5.7）
+- 現在の進捗: 原文の 2.1〜2.5.7.2 を反映し、各節の再整備と2章全体の通読確認が完了
 
 ## 2章の研究観点
 
@@ -273,11 +273,11 @@ CPUには`cs`、`ss`、`ds`、`es`、`fs`、`gs`のセグメントレジスタ�
 | DS / ES | データ参照用 | 64-bit modeでは通常base/limitがアドレス形成に使われず、主役ではない |
 | FS / GS | データ参照用 | 64-bit modeでもbaseが有効。ユーザーTLSのFS baseや、カーネルのper-CPU領域に使われるGS baseが重要 |
 
-#### CPL・RPLと保護を混同しない
+##### CPL・RPLと保護を混同しない
 
 CSのselectorにあるRPLはCPLの判定に関係しますが、ユーザー空間とカーネル空間の保護全体をセレクタだけで説明することはできません。セグメントの特権属性に加え、ページテーブルのuser/supervisor権限や、特権遷移の入口・復帰規則も関わります。Linuxでは主にCPL 0（kernel）とCPL 3（user）を用いますが、「CSが違うだけで仮想アドレス空間の全mappingが切り替わる」と理解しないようにします。
 
-#### FS/GS baseを追うときの入口
+##### FS/GS baseを追うときの入口
 
 x86-64でTLSやper-CPU参照を調べる場合は、selectorのIndexだけでなくFS/GS baseがどこで設定され、context switch時にどう扱われるかを見ます。CPU capabilityによってFSGSBASE命令を使える場合もあります。Linuxの実際の設定・保存・復元はアーキテクチャ固有コードで確認し、一般的なCコードからFS/GS baseを直接操作する前提にはしません。
 
@@ -286,7 +286,7 @@ x86-64でTLSやper-CPU参照を調べる場合は、selectorのIndexだけでな
 - GDT初期化とper-CPU segment setup: `arch/x86/kernel/cpu/common.c`
 - FS/GS baseとthread contextの扱い: `arch/x86/kernel/process_64.c`
 
-#### この小節で固定したいこと
+##### この小節で固定したいこと
 
 - selectorはdescriptorを選ぶ値であり、ベースアドレスや物理アドレスそのものではない
 - TIはGDT/LDTの選択、RPLは要求側特権レベルを示す。Index・TI・RPLのbit位置を原文図2-2と対応させる
@@ -317,14 +317,14 @@ x86-64のlong modeでは、通常のCS/DS/ES/SS descriptorのbaseとlimitによ�
 
 このdescriptorを操作するCコード例はここでは省きます。GDTの更新はCPU状態や実行CPUごとの初期化と結び付いており、単なる構造体代入を示す例では安全な更新手順を伝えられないためです。代わりにLinuxの定義・初期化コードを追います。
 
-#### Linux 6.18 LTS のソースを追う入口
+##### Linux 6.18 LTS のソースを追う入口
 
 - descriptorのbit定義と通常descriptor構造: `arch/x86/include/asm/desc_defs.h`
 - descriptorの作成・GDT操作・TSS設定: `arch/x86/include/asm/desc.h`
 - kernel/user code/data descriptorの初期値: `arch/x86/kernel/cpu/common.c`
 - selectorとGDT entry番号: `arch/x86/include/asm/segment.h`
 
-#### この小節で固定したいこと
+##### この小節で固定したいこと
 
 - descriptorはセレクタが選ぶ属性情報であり、base・limit・種別・権限などを持つ
 - limitとGの解釈、P bitの意味をページの常駐状態と混同しない
@@ -347,7 +347,7 @@ GDT（Global Descriptor Table）とLDT（Local Descriptor Table）はdescriptor�
 
 LinuxのLDTは「各プロセスに必ず固有の追加セグメントを持たせる標準機構」ではありません。実際には`mm_struct`のarchitecture-specific contextに保持され、タスクが別の`mm`へ切り替わる際に必要に応じて現在のLDTをロード・更新します。同じ`mm`を共有するタスクはそのLDT状態も共有します。ユーザー空間からの設定経路や対応範囲はアーキテクチャ・ABIに依存するため、LDTが使われていると一般化せず、対象環境の実装を確認します。
 
-#### Linux 6.18 LTS のソースを追う入口
+##### Linux 6.18 LTS のソースを追う入口
 
 - CPUごとのGDT領域とGDT初期値: `arch/x86/include/asm/desc.h`、`arch/x86/kernel/cpu/common.c`
 - GDTR/LDTRのロード、TSS descriptor、LDT descriptorの登録: `arch/x86/include/asm/desc.h`
@@ -357,7 +357,7 @@ LinuxのLDTは「各プロセスに必ず固有の追加セグメントを持た
 
 この小節ではGDT/LDTを直接書き換えるサンプルコードは置きません。descriptorの更新はCPUごとの状態、特権遷移、TSS、場合によっては他CPUへの反映と結び付いており、単独のテーブル操作例では安全な手順を示せないためです。構造体定義から初期化・ロード・context switchの経路へ進みます。
 
-#### この小節で固定したいこと
+##### この小節で固定したいこと
 
 - GDT/LDTはdescriptorの表であり、selectorのTI bitが参照先を選ぶ
 - GDTRはGDTのbase/limitを持つ。LDTRはLDTを選択し、LDT descriptor自体はGDTに置かれる
@@ -583,7 +583,7 @@ page table entryが有効な物理pageを指していない場合でも、それ
 
 #### 2.4.1 通常のページング
 
-#### ページとページフレーム
+##### ページとページフレーム
 
 仮想アドレス空間は一定サイズの**仮想ページ**に分けられ、物理アドレス空間も同じ粒度の**ページフレーム**に分けられます。4 KiB pageを使う構成なら、仮想page内のoffsetは12 bitで、対応する物理page frame内の同じoffsetへ引き継がれます。基本page sizeはarchitectureとkernel configurationに依存するため、4 KiBはx86の通常ページングを説明する例として扱います。
 
@@ -597,11 +597,11 @@ page tableが表すのは仮想pageと物理page frameの対応です。仮想pa
 
 ページキャッシュ、匿名メモリ、copy-on-write、swap、NUMA、huge pageを読むときは、仮想mapping、物理page、backing objectのどれを指しているかを区別します。用語としての「page」は文脈によって物理pageを指す場合もあるため、Linuxの型や関数を読む際には対象を確認します。
 
-#### ページテーブルという対応表
+##### ページテーブルという対応表
 
 page tableは、仮想addressから物理page frameへの変換と、変換に付随するアクセス属性を保持する階層構造です。MMUは現在のpage-table rootを起点に各levelをたどり、最終entryからframeのbaseを得て、仮想addressのpage offsetを加えます。変換結果はTLBに見つかればpage-table walkを省略できることがあります。
 
-##### 32-bit x86・4 KiBページの2段階例
+###### 32-bit x86・4 KiBページの2段階例
 
 原文の通常ページングは、PAEを使わない32-bit x86の2段構造です。linear addressはpage directory index 10 bit、page table index 10 bit、page offset 12 bitに分かれます。page directoryはCR3が指し、各PDEが次のpage tableを指し、PTEが物理page frameを指します。
 
@@ -627,7 +627,7 @@ page tableは、仮想addressから物理page frameへの変換と、変換に�
 
 CR3から始まるwalkで、説明用にPDEが物理address `0x00111000`のpage tableを指し、そのtableのPTEがframe base `0x00abc000`を指すとします。このとき最終的な物理addressは`0x00abc000 + 0x678 = 0x00abc678`です。PDE/PTEの値は計算を示すための仮定であり、Linuxの実mappingを表すものではありません。
 
-##### Linux 6.18のページテーブル階層
+###### Linux 6.18のページテーブル階層
 
 この32-bit例の「addressをindexに分けて段階的にたどる」という原理は現在も有効ですが、表の段数やentryの幅はarchitectureとpaging modeで異なります。x86-64ではpage-table entryは64 bitで、4 KiB pageを用いる標準的な4-level pagingでは、各levelに9-bit indexを使い、下位12 bitをpage offsetとして扱います。CPUとkernelが5-level pagingを有効にする構成では、さらに上位levelが加わり、利用できるlinear-address幅も広がります。どちらのmodeかは対象のCPU・起動構成を確認します。
 
@@ -756,7 +756,7 @@ Linux 6.18 LTSのソースを追う入口:
 
 ここでは原文と同じ非PAE・32-bit x86の通常ページングを使い、addressからdirectory index、table index、offsetを取り出して、仮定したpage-table entryを順にたどります。これはhardware walkの仕組みを追うための例であり、Linux 6.18のx86-64で実際に使われるpage-table構成ではありません。
 
-#### 原文の範囲を使った例
+##### 原文の範囲を使った例
 
 仮想範囲`0x20000000`から`0x2003ffff`は256 KiB、4 KiB pageで64 page分です。非PAEの32-bit pagingでは、この全範囲のdirectory indexは`0x080`で同じになり、table indexは`0x000`から`0x03f`までを使います。したがって、この例では一つのPDEが一つのpage tableを参照し、そのtableの先頭64個のentryが範囲に対応します。
 
@@ -780,7 +780,7 @@ PDEが指すpage tableが物理address`0x00111000`にあり、PTE`0x021`がframe
 
 Linux 6.18のx86-64で4 KiB pageを使う場合は、indexの段数と幅がこの例とは異なります。4-level pagingなら4つの9-bit indexと12-bit offset、5-level pagingならさらに上位のindexが加わります。変換の考え方は同じですが、32-bit例の`0x080`や`0x021`を64-bitのtable indexと混同しないようにします。
 
-#### ページテーブルにentryがないとき
+##### ページテーブルにentryがないとき
 
 このアドレスが属する範囲のpage tableが存在しない、または対象PTEがpresentでない場合、MMUのwalkはpage faultになります。しかし、faultの発生だけでは「物理RAMにデータが存在しない」「プロセスが不正アクセスした」とは決められません。Linuxはfault addressがVMAの範囲と権限に合うか、匿名memory・file mapping・COW・swap等の状態がどうなっているかを調べ、mappingを作って命令を再実行できるか判断します。VMAの範囲外や権限違反なら解決できず、通常ユーザープロセスにはsignalとして通知されます。
 
@@ -1011,7 +1011,7 @@ virtual address
 
 indexの考え方は共通です。level `X`のentry indexは概念上、addressをそのlevelのshift量だけ右へ移動し、levelのentry数から求めるmaskを適用して得ます。page offsetは`PAGE_SHIFT`未満のbitです。Linux 6.18の`include/linux/pgtable.h`には`pte_index()`、`pmd_index()`、`pud_index()`、`pgd_index()`等があり、generic codeがaddressの該当fieldからentryを選ぶために使います。architecture固有のshift、entry数、型定義は`asm/pgtable*`側で提供されます。
 
-#### アドレスのビット分割を抽象化する意味
+##### アドレスのビット分割を抽象化する意味
 
 代表的な定義の役割は次のとおりです。
 
@@ -1314,49 +1314,88 @@ Linux 6.18 LTSのソースを追う入口:
 
 #### 2.5.7 ハードウェアキャッシュと TLB の制御
 
-Linux は、キャッシュラインや局所性を考慮してデータを配置し、必要なアーキテクチャでは cache maintenance 操作を使います。
-x86 の通常の cache coherence と、DMA のために必要となる cache synchronization は同じ話ではありません。
-デバイスがメモリを直接読む/書くときは、DMA API を通じて CPU cache と device の可視性を整える必要があり、非 coherent なアーキテクチャでは特に重要です。
+CPU cacheとTLBは、どちらも性能を上げるためにCPUが利用するcacheですが、保持する情報と整合性の契約が異なります。CPU cacheは命令やデータを保持し、TLBは仮想addressから物理addressへの変換とpermissionを保持します。page tableを変更したときに問題となるのはTLBの古いtranslationであり、デバイスDMAで問題となるのはCPUとdevice間のデータ可視性やownershipです。この二つを同じ「cache flush」として扱わないことが出発点です。
 
 ##### 2.5.7.1 ハードウェアキャッシュの制御
 
-CPU cache の一貫性はアーキテクチャが担う部分が大きく、Linux がどの場面でも一律に cache を flush するわけではありません。
-通常の x86 CPU の cache coherence と、DMA buffer の ownership 変更や device mapping に必要な同期処理を区別します。
-Linux では architecture-specific な cache 操作と DMA API の契約を確認し、CPU と device のどちらが buffer を使う段階かを把握します。
+通常のCPU同士がcache-coherentなメモリを読み書きする場合、同一メモリに対するcache-lineの整合性は多くの場合hardwareのcoherence機構が担います。これはメモリアクセスの順序や、複数CPU間のraceを自動的に解決するという意味ではありません。必要な排他やmemory orderingはlockやatomic operation、barrier等で別に保証します。また、cache line sizeやaliasingの条件はarchitecture依存なので、原文のPentium世代別の数値をLinux 6.18共通の定数として使いません。
+
+deviceがDMAで同じメモリを読む・書く場合は、CPUのcache coherenceだけではdeviceとの可視性を保証できません。DMA addressはCPU virtual addressやCPU physical addressと別のaddress spaceであり、IOMMU等による変換もあり得ます。driverはDMA APIでbufferをmapし、deviceへ渡すDMA addressを使い、transfer完了後はunmapするか、再利用するstreaming mappingなら`dma_sync_*_for_cpu()` / `dma_sync_*_for_device()`でownershipを切り替えます。coherent DMA memoryとstreaming DMA mappingでは同期の契約が異なるため、各APIの説明に従います。driverが独自にCPU cacheをflushして帳尻を合わせる設計にはしません。
+
+```text
+CPUがbufferを使う ── DMA APIでdevice向けにmap/sync ──> deviceがDMA
+       ^                                                   │
+       └──────────── sync/unmap後にCPUへ返す ──────────────┘
+```
+
+Linux VM内部にも、architectureのcache特性に応じた`flush_cache_*()`等のinterfaceがあります。これはmappingの置換、実行可能page、cache aliasing等の必要条件を満たすためのkernel/MM向け契約です。一般のdriverが任意のcache flush関数を呼ぶ代わりに、DMA APIや適切なmemory mapping APIを使います。
+
+Linux 6.18 LTSのソースと文書を追う入口:
+
+- VMのcache/TLB flush interfaceと呼び出し順: `Documentation/core-api/cachetlb.rst`
+- DMA bufferのaddress spaceとmapping・同期契約: `Documentation/core-api/dma-api-howto.rst`、`Documentation/core-api/dma-api.rst`
+- DMA同期API: `include/linux/dma-mapping.h`
+- memory orderingとCPU間同期: `Documentation/memory-barriers.txt`
+
+この小節で固定したいこと:
+
+- CPU data/instruction cacheとTLBは保持する情報が異なり、別々の整合性問題として扱う
+- CPU cache coherenceは排他制御やmemory orderingの代わりではない
+- DMA addressはCPU virtual/physical addressと同一とは限らず、device accessはDMA APIを通す
+- streaming DMAではmap/sync/unmapとCPU/deviceのownership移行をAPI契約どおりに行う
+- cache maintenanceはarchitecture・用途依存であり、driverが独自のflushで代替しない
 
 ##### 2.5.7.2 TLB の制御
 
-元の本文の最後で強く出てくるのが、TLB の無効化制御です。
-ここは、現代 Linux 6.18 LTS でも非常に重要です。
-ページテーブルを書き換えても、CPU 内部に古い変換結果が残っていれば、システムは正しく動きません。
-だからカーネルは、どの範囲の変換が古くなったのかを見極め、必要な TLB flush を行います。
+page table entryを変更しても、CPUが古いtranslationや古いpermissionをTLBに保持していれば、そのCPUは変更前のmappingを使い続ける可能性があります。unmapや物理pageの再利用では特に危険です。page tableの更新とTLB invalidationは一組の整合性処理として考え、必要な範囲・対象CPU・無効化の完了時点をcall siteから追います。
 
-ここで重要なのは、TLB 無効化が単なる後始末ではないことです。
-これは仮想記憶の正しさを維持するための本体処理の一部です。
-しかも SMP 環境では、自 CPU だけでなく他 CPU の TLB も問題になります。
-そのため shootdown、IPI、lazy TLB といった仕組みが必要になります。
+Linuxは用途に応じて、address space全体、仮想address範囲、単一page、kernel mappingなど異なる範囲のTLB flush interfaceを用意します。代表的なAPIには`flush_tlb_mm()`、`flush_tlb_range()`、`flush_tlb_page()`、`flush_tlb_kernel_range()`がありますが、実装方法やcostはarchitecture依存です。小さい範囲を個別に無効化するか、広い範囲をまとめてflushするかはhardwareとkernelの判断に委ねられます。
 
-研究ノートとしては、この節を通して「ページテーブル更新 = それで終わり」ではないと掴めれば十分大きいです。
-正しい仮想記憶とは、メモリ上の表、CPU 内部の TLB、複数 CPU 間の整合性まで含めて成立しているのです。
+SMPでは、同じ`mm`を実行した可能性のある他CPUのTLBも考慮します。Linuxは必要なCPUへTLB shootdownを伝達しますが、すべてのCPUへ常に無条件のIPIを送るわけではありません。どのCPUがそのaddress spaceを使用しているか、CPUごとのTLB contextやgenerationがどうなっているかを記録し、不要なflushを省く最適化を行います。x86ではPCID等によりaddress spaceの切り替えをまたいでTLB entryを保持できるため、process switchのたびに全TLBをflushする、という説明は現行の一般則ではありません。
+
+複数pageを解除する経路では、`mmu_gather`を使ってTLB flushとpage-table/pageの解放をまとめて処理する場合があります。これは、古いtranslationが使われ得る間に、その物理pageやpage-table pageを再利用しないという寿命管理と密接に関係します。個々のPTEを見ただけでは完結せず、呼び出し側のlock、mapping更新、flush・解放の順序まで読みます。
+
+```text
+page tableを変更
+       │
+       v
+影響範囲・対象mm/CPUを決定
+       │
+       v
+必要なCPUでTLB invalidation完了
+       │
+       v
+古いmapping/page-table/pageを安全に再利用
+```
+
+原文のLinux 2.6のAPI一覧やPentium向けCR3/INVLPGの説明は、当時のinterfaceとhardware機能の例です。Linux 6.18でもarchitecture向けTLB interfaceの概念は続きますが、関数の実装、PCID、世代管理、範囲のまとめ方は変化しています。古い関数表をそのまま現在の呼び出し規約とみなさず、generic MMの契約とarchitecture実装を併せて確認します。
+
+Linux 6.18 LTSのソースを追う入口:
+
+- VMから呼び出すTLB flush契約: `Documentation/core-api/cachetlb.rst`
+- generic TLB gatherとpage解放の連携: `include/asm-generic/tlb.h`、`mm/mmu_gather.c`
+- x86のTLB context、PCID、flush実装: `arch/x86/include/asm/tlbflush.h`、`arch/x86/mm/tlb.c`
+- unmap等のページテーブル変更とTLB処理: `mm/memory.c`、`mm/mmap.c`
+
+この小節で固定したいこと:
+
+- page table変更後も古いTLB translationが残り得るため、必要なinvalidationが正しさの一部となる
+- flushの範囲はmm全体、address range、single page、kernel mappingなどから選ばれ、architectureで実装が異なる
+- SMPでは対象CPUとの同期が必要だが、Linuxは利用状況等を追跡して無駄なshootdownを避ける
+- PCID等のcontext保持があるため、process switchごとに全TLBをflushするとは限らない
+- `mmu_gather`等によりflush完了とpage再利用・page-table解放の順序を一体として追う
 
 #### この節を Linux 6.18 LTS の研究へつなぐ
 
-2.5 の本質は、Linux がハードウェアページングをそのまま受け身で使うのではなく、
-汎用的な多段モデル、型、安全な操作マクロ、プロセスごとの空間管理、カーネル共有領域、TLB 制御という形で、
-かなり体系立てて扱っていることを見せてくれる点にあります。
+2.5のページング機構を読む際は、仮想addressからpage-table階層をたどるtranslationだけでなく、物理pageの状態、VMA、hardware permission、TLBに残るtranslationの寿命を結び付けます。generic MMのhelperはarchitecture差を隠す一方、entryの形式・更新条件・flush実装のすべてを抽象化しきるものではありません。Linux 6.18を調べるときは、呼び出し側の目的を`mm/`で追い、必要な契約をgeneric headerとarchitecture実装で確かめるのが基本です。
 
-この節の要点を短く言えば、Linux 6.18 LTS のページング機構は、
-アーキテクチャ依存のハードウェア仕様を、カーネル全体で使える汎用モデルへ持ち上げたものです。
-だからこそ、ページフォルト、mmap()、fork()、copy-on-write、page cache、slab、NUMA といった後続の話題が、
-同じ土台の上に並んで見えてきます。
+この土台は、page fault、`mmap()`、`fork()`、copy-on-write、page cache、slab、NUMA、DMAなどの理解へつながります。ページテーブルの一行だけで結論を出さず、mappingの作成から利用、無効化、物理page再利用までのライフサイクルとして追います。
 
-次に読むべき入口としては、mm/ 配下のメモリ管理コード全体、とくに page fault、VMA、匿名メモリ、page allocator が自然です。
-アーキテクチャ実装側では、arch/x86/include/asm/pgtable.h 系や arch/x86/mm/ の初期化経路を合わせて追うと、
-この節で見た抽象化と実装の対応が見えてきます。
+次の入口は、`mm/memory.c`のfault処理と`mm/mmap.c`のVMA操作です。必要に応じて`mm/page_alloc.c`の物理page割り当てや、`arch/x86/mm/`のpage-table・TLB実装へ降りて対応を確認します。
 
 ### UmuOS の観点で見るとどう役立つか
 
-この 2 章全体を UmuOS の観点で見ると、いちばん大きい学びは「アドレス空間は自然に存在するものではなく、
+この 2 章全体を UmuOS の観点で見ると、重要なのは「アドレス空間は自然に存在するものではなく、
 OS が設計して見せるものだ」という点です。
 最初は物理メモリへほぼそのまま触る単純な世界から始めた方が実装しやすいですし、UmuOS でもそれは正しい出発点だと思います。
 しかし、Linux 6.18 LTS が見せているのは、その先にある本格的な世界です。
