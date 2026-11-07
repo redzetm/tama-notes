@@ -1846,14 +1846,45 @@ vmalloc(size)
 
 割り当て時のAPIに対応する解放APIを選ぶには、仮想mappingの解除と、mapping先の物理pageの所有権を分けて考えます。Linux 6.18では、通常の`vmalloc()`で得た領域には`vfree()`を使い、`vmap()`で既存pageをmappingした領域には、page群の所有権に応じて`vunmap()`または`vfree()`を使います。
 
-```c
-/* vmalloc()が確保したpageも含めて解放 */
-vfree(buf);
+`vmalloc()`で確保した領域の解放は、8.3.3の例のように`vfree()`で行います。一方、次の例では、呼び出し側が確保したpageを`vmap()`でmappingし、`vunmap()`でmappingだけを解除した後、呼び出し側がpageを解放します。
 
-/* callerが所有し続けるpage群をvmap()した場合 */
-vunmap(mapped);
-/* caller側で各pageの参照・寿命を別途管理する */
+```c
+#include <linux/errno.h>
+#include <linux/gfp.h>
+#include <linux/mm.h>
+#include <linux/vmalloc.h>
+
+static int example_vmap(void)
+{
+	struct page *pages[2];
+	void *mapped;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		pages[i] = alloc_page(GFP_KERNEL);
+		if (!pages[i])
+			goto free_pages;
+	}
+
+	mapped = vmap(pages, 2, VM_MAP, PAGE_KERNEL);
+	if (!mapped)
+		goto free_pages;
+
+	/* mappedを通じて2 page分の仮想連続領域を利用する */
+
+	vunmap(mapped);
+	for (i = 0; i < 2; i++)
+		__free_page(pages[i]);
+	return 0;
+
+free_pages:
+	while (--i >= 0)
+		__free_page(pages[i]);
+	return -ENOMEM;
+}
 ```
+
+この例では、`vmap()`失敗時も、すでに確保したpageだけを解放します。成功時は`vunmap()`でmappingを外してからpageを解放します。`VM_MAP_PUT_PAGES`は指定していないため、page配列とpageの寿命は引き続き呼び出し側が管理します。
 
 #### `vfree()`と`vunmap()`の違い
 
