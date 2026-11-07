@@ -659,6 +659,48 @@ fork() 直後の親子は、すぐに巨大な物理コピーを持つのでは�
 親では fork 系呼び出しの戻り値が子 PID になり、子では 0 になります。
 この「同じコードを流れるが分岐点が違う」という性質が、UNIX のプロセスモデルをかなり特徴付けています。
 
+#### fork() と waitpid() を観測する短い例
+
+次のプログラムは、fork() の戻り値の違いと、親が子の終了状態を waitpid() で回収する関係を確認するためのものです。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(void)
+{
+	pid_t child = fork();
+	int status;
+
+	if (child == -1) {
+		perror("fork");
+		return EXIT_FAILURE;
+	}
+
+	if (child == 0)
+		_exit(23);
+
+	if (waitpid(child, &status, 0) == -1) {
+		perror("waitpid");
+		return EXIT_FAILURE;
+	}
+
+	if (WIFEXITED(status))
+		printf("child %ld exited with status %d\n",
+		       (long)child, WEXITSTATUS(status));
+
+	return 0;
+}
+```
+
+`fork()` の戻り値が 0 の子は `_exit(23)` で終了し、親は子の PID を受け取って `waitpid()` を呼びます。
+正常終了時には `child <PID> exited with status 23` と表示されます。
+これはユーザー空間から見える親子関係と終了状態の受け渡しを確認する例であり、
+`copy_process()` の内部や copy-on-write の物理ページ共有を直接観測するものではありません。
+
 #### wake_up_new_task() と最初のスケジューリング
 
 新しい task は copy_process() が終わった瞬間にユーザーモードへ飛ぶわけではありません。
@@ -791,6 +833,38 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 親が先に終了した場合は、孤児を適切な reaper へ再親化します。これは常にホスト全体の PID 1 とは限らず、
 より近い subreaper や、その PID namespace の init が受け皿になる場合があります。
 
+#### task の終了と回収をソースで追う
+
+通常の子プロセスについて、終了から回収までを大づかみにすると次の流れになります。
+これは関数の責務を示す読解用の図であり、すべての分岐を含む単一の固定経路ではありません。
+
+```text
+子 task が終了
+    |
+    v
+do_exit()
+    |  task 固有・共有資源の参照を外す
+    v
+exit_notify()
+    |  親子関係を処理し、通知する
+    +---- 自動回収の条件に該当 ----------------------+
+    |                                                 |
+    v                                                 v
+EXIT_ZOMBIE                                      release_task()
+    |                                                 ^
+    | 親が wait()/waitpid()/waitid()                  |
+    v                                                 |
+wait_task_zombie() -----------------------------------+
+                                                      |
+                                                      v
+                                  task/PID の関連付け解除と後続解放
+```
+
+実際の Linux 6.18 の読解では、`kernel/exit.c` の `do_exit()`、`exit_notify()`、
+wait 系処理の `wait_task_zombie()`、`release_task()` を順に見ます。
+孤児の再親化、ptrace、スレッドグループの最後の task、SIGCHLD の設定によって分岐するため、
+この図をすべての終了ケースに当てはまる一本道とは考えません。
+
 #### 3.5.2 プロセスの削除
 
 元の 3.5.2 では release_task() が最終回収を行うと説明されています。
@@ -849,4 +923,3 @@ CPU は消費しませんが、PID と最小限の台帳を保持するので、
 この章を足場にすると、Linux 6.18 LTS を読むときに「これは task のどの共有関係の話か」「これは task のどの状態遷移か」
 という軸で見られるようになります。そこまで見えると、プロセス管理は個別機能の寄せ集めではなく、
 カーネル全体を貫く骨格として見えてきます。
-
