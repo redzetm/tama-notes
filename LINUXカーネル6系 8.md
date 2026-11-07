@@ -26,9 +26,9 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」、8.3.2「非連続メモリ領域のディスクリプタ」
-- 今回の主題: Linux 6.18の`vm_struct`と`vmap_area`の責務分担、descriptor fieldと仮想領域管理の関係
-- 現在の進捗: 8.1〜8.2.15、8.3〜8.3.2を作成済み。8.3.3以降は未着手
+- 原文対応: 8.1「ページフレームの管理」、8.1.1「ページディスクリプタ」、8.1.2「不均等メモリアクセスアーキテクチャ（NUMA）」、8.1.3「メモリゾーン」、8.1.4「空きページフレームの予約」、8.1.5「ゾーンごとのページフレームアロケータ」、8.1.6「高位メモリのページフレームのカーネルマッピング」、8.1.7「バディシステム」、8.1.7.1〜8.1.7.3、8.1.8「CPUごとのページフレームキャッシュ」、8.1.8.1〜8.1.8.2、8.1.9「ゾーンアロケータ」、8.1.9.1「ページフレームの解放」、8.2「メモリ領域の管理」、8.2.1「スラブアロケータ」、8.2.2「キャッシュディスクリプタ」、8.2.3「スラブディスクリプタ」、8.2.4「汎用キャッシュと特定用途のキャッシュ」、8.2.5「スラブアロケータとゾーンごとのページフレームアロケータ間のインタフェース」、8.2.6「キャッシュへのスラブの割り当て」、8.2.7「キャッシュからのスラブの解放」、8.2.8「オブジェクトディスクリプタ」、8.2.9「メモリ上でのオブジェクトの境界合わせ」、8.2.10「スラブの色付け」、8.2.11「空きスラブオブジェクトのローカルキャッシュ」、8.2.12「スラブオブジェクトの割り当て」、8.2.13「スラブオブジェクトの解放」、8.2.14「汎用オブジェクト」、8.2.15「メモリプール」、8.3「非連続メモリ領域の管理」、8.3.1「非連続メモリ領域のリニアアドレス」、8.3.2「非連続メモリ領域のディスクリプタ」、8.3.3「非連続メモリ領域の割り当て」
+- 今回の主題: `vmalloc()`における仮想領域予約、物理page確保、page table mappingと失敗時の後始末
+- 現在の進捗: 8.1〜8.2.15、8.3〜8.3.3を作成済み。8.3.4以降は未着手
 
 ## 第8章の見取り図
 
@@ -60,7 +60,8 @@ title: "LINUXカーネル6系の研究８　メモリ管理"
 | 8.3 | 非連続ページを仮想アドレス上で連続させる領域管理の概観 | 作成済み |
 | 8.3.1 | vmalloc領域の仮想アドレス空間 | 作成済み |
 | 8.3.2 | `vm_struct`と`vmap_area`による領域・mapping管理 | 作成済み |
-| 8.3.3〜8.3.4 | 領域の割り当てと解放 | 未着手 |
+| 8.3.3 | `vmalloc()`の仮想領域・物理page確保とmapping | 作成済み |
+| 8.3.4 | 非連続メモリ領域の解放 | 未着手 |
 
 ## 8.1 ページフレームの管理
 
@@ -1764,3 +1765,79 @@ Linux 6.18の`struct vm_struct`には、次のような情報があります。m
 - descriptor初期化、guard size、`get_vm_area()`、lookup: `mm/vmalloc.c` (`__get_vm_area_node()`、`setup_vmalloc_vm()`、`find_vm_area()`)
 - busy/free virtual intervalのtree/list管理: `mm/vmalloc.c` (`alloc_vmap_area()`、`find_vmap_area()`、`free_vmap_area()`)
 - page arrayとmapping flagsの設定・解放: `mm/vmalloc.c` (`__vmalloc_node_range_noprof()`、`vmap()`、`__vunmap()`)
+
+### 8.3.3 非連続メモリ領域の割り当て
+
+Linux 6.18の`vmalloc(size)`は、要求byte数を収める物理page群を確保し、それらを連続したkernel virtual addressへmappingします。返るポインタの仮想addressは連続しますが、裏付ける物理pageのPFNが隣接するとは限りません。物理的に連続した領域が必要なDMA等の用途を`vmalloc()`で代用できる、という意味ではありません。
+
+```c
+#include <linux/errno.h>
+#include <linux/mm.h>
+#include <linux/string.h>
+#include <linux/vmalloc.h>
+
+static int example_vmalloc(void)
+{
+	size_t size = 3 * PAGE_SIZE + 17;
+	char *buf;
+
+	buf = vmalloc(size);
+	if (!buf)
+		return -ENOMEM;
+
+	memset(buf, 0, size);
+	/* bufはsize byteの仮想連続領域として利用できる */
+
+	vfree(buf);
+	return 0;
+}
+```
+
+この例では、`vmalloc()`の戻り値を検査し、使用後に対応する`vfree()`で解放します。通常の`vmalloc()`はsleep可能な文脈で呼び出し、割り込み禁止中などsleepできない文脈では使いません。また、得られるのは仮想addressの連続性であり、物理連続性ではありません。
+
+```text
+vmalloc(size)
+    |
+    +-- vm_struct / vmap_area を作成し、仮想範囲を予約
+    |       +-- 末尾にguard page（通常のvmalloc）
+    |
+    +-- struct page *配列を用意
+    |
+    +-- 必要な物理pageを割り当てる
+    |       page[0]   page[1]   page[2]   ...
+    |       PFN 0x... PFN 0x... PFN 0x...   (非連続でもよい)
+    |
+    +-- page tableに仮想address -> 各pageの対応を設定
+            |
+            +-- 連続したkernel virtual addressとして返す
+```
+
+#### 現行の割り当て経路
+
+通常の`vmalloc()`は`GFP_KERNEL`を使い、`__vmalloc_node_noprof()`を経由して`__vmalloc_node_range_noprof()`へ進みます。細部はconfigやarchitecture、呼び出すAPIによって変わりますが、処理の骨格は次のとおりです。
+
+1. **仮想範囲を予約する。** `__get_vm_area_node()`が`VM_ALLOC`付きの`vm_struct`を用意し、vmalloc用範囲から`vmap_area`を確保します。通常はguard pageを含む管理範囲ですが、実際にmappingする長さは`get_vm_area_size(area)`で取得し、guardを除外します。
+2. **page pointer arrayを用意する。** `__vmalloc_area_node()`はmapping対象のpage数に応じて`area->pages`を確保します。配列自体が大きい場合、その配列用メモリにもvmallocを使う経路があります。これは配列用のvmallocが際限なく再帰する構造ではなく、配列サイズが1 pageを超えるときの割り当てに限られます。
+3. **物理pageを確保する。** 通常のorder-0 pageではbulk page allocatorを使い、1回あたり最大100 pageずつ取得します。NUMA nodeが明示されない場合はNUMA memory policyを考慮する経路を使います。要求したpage数に足りなければ単一page単位の確保へfallbackします。GFP制約に反しない範囲で`__GFP_HIGHMEM`も加わるため、呼び出し側は返却ポインタを通常のdirect mapにある物理連続領域とみなせません。
+4. **仮想addressへmappingする。** `vmap_pages_range()`が`area->pages`の各pageを予約範囲へ対応づけます。page table階層の詳細な割り当てとentry設定はarchitecture対応のgeneric/arch処理に委ねられ、成功後には必要なcache flushも行われます。通常の`vmalloc()`ではkernel用の保護属性が使われます。
+5. **補助状態を整える。** mapping成功後にKASAN向けの領域状態を設定し、kmemleakが有効な場合は割り当てを登録してから、利用可能なポインタを返します。
+
+重要なのは、旧版の`map_vm_area()`例にある固定の`__pgprot(0x63)`や、特定の`pgd/pud/pmd/pte`階層をそのまま現在の全architectureに当てはめないことです。Linux 6.18では`vmap_pages_range()`等の層を通じてmappingされ、page tableの階層や大きなpage mappingの可否はarchitectureとconfigにも依存します。
+
+#### サイズ、guard、失敗処理
+
+要求サイズはpage単位に切り上げられます。管理上の`vm_struct.size`には通常guard page分も含まれますが、page arrayに記録されるのはmappingする実pageです。したがって、次の3つを区別して読む必要があります。
+
+- 呼び出し側が要求したbyte数
+- page境界にround upされたmapping範囲
+- guardを含み得る仮想領域の予約範囲
+
+物理pageを要求数だけ確保できない場合や、page table mappingに失敗した場合、途中まで確保したpageを含めて`vfree()`経路へ渡し、仮想領域と関連資源を後始末します。従って成功時の返却addressだけでなく、部分失敗時に`area->nr_pages`と`area->pages`を使って何を解放するかも追うと、割り当て全体の所有関係が分かります。通常の`vmalloc()`は失敗時に`NULL`を返します。GFPを指定できる低層APIには使用可能なflagの制限があるため、任意のGFP maskが使えるとは限りません。
+
+**Linux 6.18のソースを追う入口**
+
+- `vmalloc()`からrange allocatorへの経路: `mm/vmalloc.c` (`vmalloc_noprof()`、`__vmalloc_node_noprof()`、`__vmalloc_node_range_noprof()`)
+- 仮想範囲・descriptorの予約: `mm/vmalloc.c` (`__get_vm_area_node()`、`alloc_vmap_area()`)
+- page arrayと実pageの割り当て: `mm/vmalloc.c` (`__vmalloc_area_node()`、`vm_area_alloc_pages()`)
+- page table mappingとcache flush: `mm/vmalloc.c` (`vmap_pages_range()`、`__vmap_pages_range_noflush()`)
+- `vmalloc()`の返却値と契約: `include/linux/vmalloc.h`、`mm/vmalloc.c`内の`vmalloc_noprof()`
