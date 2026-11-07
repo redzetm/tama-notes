@@ -21,10 +21,10 @@ UmuOS-0.1.7-base-stable は Linux 6.18.1 を QEMU/KVM 上で動かす観測用�
 
 ## 今回扱う範囲
 
-- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」
-- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ control の役割と実行文脈上の制約
+- 原文対応: 5.1「カーネルは要求をどのように処理するか」、5.1.1「カーネル内プリエンプション」、5.1.2「同期の必要がある場合」、5.1.3「同期の必要がない場合」、5.2「同期プリミティブ」、5.2.1「CPUごとの変数」、5.2.2「アトミック操作」、5.2.3「最適化処理とメモリバリア」、5.2.4「スピンロック」、5.2.4.1「カーネル内プリエンプションを伴う spin_lock マクロ」、5.2.4.2「カーネル内プリエンプションを伴わない spin_lock マクロ」、5.2.4.3「spin_unlock マクロ」、5.2.5「読み書き用スピンロック」、5.2.5.1「読み込み用ロックの取得と解除」、5.2.5.2「書き出し用ロックの取得と解除」、5.2.6「順次ロック」、5.2.7「Read-Copy Update（RCU）」、5.2.8「セマフォ」、5.2.8.1「セマフォの取得と解放」、5.2.9「読み書き用セマフォ」、5.2.10「完了通知」、5.2.11「ローカル割り込み禁止」、5.2.12「遅延処理の禁止と許可」
+- 今回の主題: 実行文脈の入れ子、per-CPU データ、atomic / memory ordering、spinlock / rwlock / seqlock / RCU / semaphore / rw_semaphore / completion / local IRQ / bottom-half control の役割と実行文脈上の制約
 - 6.18 LTS の視点: 各同期 API の保証を実行文脈とカーネル構成に結び付ける。`spinlock_t`、`raw_spinlock_t`、`rwlock_t`、`seqcount_t`、`seqlock_t`、RCU、`rw_semaphore` の役割と PREEMPT_RT による意味の違いを確認する
-- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.11 を作成。続きは 5.2.12 以降を小節単位で追加する
+- 現在の進捗: 5.1、5.1.1〜5.1.3、5.2、5.2.1〜5.2.12 を作成。続きは 5.3 以降を小節単位で追加する
 
 ## 5.1 カーネルは要求をどのように処理するか
 
@@ -1196,3 +1196,50 @@ PREEMPT_RT では `spinlock_t` が RT-mutex ベースとなるため、`local_ir
 - IRQ 禁止区間は短くし、sleep する処理を置かない。NMI や他 CPU のアクセスも別に考える
 - CPU 間排他はロックが担い、ローカル IRQ 制御は同一 CPU 上の IRQ 再入を防ぐなど別の役割を担う
 - PREEMPT_RT では IRQ 制御と `spinlock_t` の組み合わせを非 RT の感覚で流用せず、lock type の契約を確認する
+
+### 5.2.12 遅延処理の禁止と許可
+
+#### bottom half 制御の対象
+
+`local_bh_disable()` / `local_bh_enable()` は、呼び出した CPU における bottom half（主に softirq）の処理を一時的に抑止・再許可する API です。softirq として実行される tasklet もこの制御の対象になります。一方、ハード IRQ を禁止する API ではなく、workqueue のような独立した task context の処理すべてを止めるものでもありません。
+
+```c
+static LIST_HEAD(packet_queue);
+
+static void inspect_queue_from_task(void)
+{
+	local_bh_disable();
+	/* ローカル softirq と同時に実行させたくない短い参照 */
+	inspect_packet_queue(&packet_queue);
+	local_bh_enable();
+}
+```
+
+bottom half の無効化はローカル CPU に対する制御です。他 CPU では同じ種類の softirq が並行して動く場合があり、同じデータを共有するなら CPU 間排他も必要です。また、この API だけで通常のデータロックやメモリ順序保証が得られるわけではありません。共有相手が task と softirq であるロック保護では、用途に応じて `spin_lock_bh()` / `spin_unlock_bh()` の組を使います。
+
+#### 入れ子と再許可時の処理
+
+`local_bh_disable()` は入れ子で呼べます。呼び出し回数と対応する `local_bh_enable()` を対にし、外側の無効化が残っている間に内側の enable が処理を再許可したと誤解しないようにします。状態管理の内部表現は Linux 6.18 では旧本文にある単純な `thread_info` のカウンタ説明に固定せず、`include/linux/bottom_half.h` と `kernel/softirq.c` の実装を参照します。
+
+最後の `local_bh_enable()` で抑止を解除すると、その CPU に保留 softirq があれば、その場で処理される場合があります。呼び出し元がプリエンプト不可の文脈なら、実装は softirq daemon を起こすなど別経路へ回すこともあります。したがって enable の直後に「softirq が必ず実行済み」と仮定せず、長い処理やsleepを許可する API ともみなしません。`local_bh_enable()` はハード IRQ handler 内から使う API ではなく、Linux 6.18 実装も hardirq 文脈での呼び出しを警告します。
+
+#### PREEMPT_RT で再確認すること
+
+非 PREEMPT_RT では bottom-half disable はプリエンプション制御と結び付いた実装ですが、PREEMPT_RT では softirq 実行がプリエンプト可能になり、`local_bh_disable()` の内部管理も変わります。したがって、「softirq 文脈だからプリエンプトされない」「ローカル BH を無効にすればあらゆる実行経路に対して per-CPU データが直列化される」という前提は置きません。
+
+とくに softirq context だけでアクセスする per-CPU データは、非 RT の非プリエンプト性に暗黙に依存しないようにします。Linux 6.18 の locking 文書は、必要に応じて `local_lock_t` と `local_lock_nested_bh()` / `local_unlock_nested_bh()` で保護範囲を明示し、lockdep の検証対象にする方法を説明しています。データが task、softirq、別 CPU のどこから参照・更新されるかを洗い出し、構成に適した保護を選びます。
+
+#### Linux 6.18 LTS のソースを追う入口
+
+- bottom-half API: `include/linux/bottom_half.h`
+- softirq の pending 状態、実行、BH disable/enable の実装: `kernel/softirq.c`
+- `local_bh_disable()` と PREEMPT_RT、per-CPU softirq データの保護: `Documentation/locking/locktypes.rst` の CPU local scope / bottom-half の項
+- tasklet と softirq の関係: `include/linux/interrupt.h`、`kernel/softirq.c`
+
+#### この小節で固定したいこと
+
+- `local_bh_disable()` はローカル CPU の softirq 等の bottom-half 実行を抑止する。hard IRQ や workqueue 全般を止めるものではない
+- 入れ子の disable / enable を対にし、最後の enable で保留 softirq が実行される可能性を見込む
+- bottom-half 制御はSMP全体のロックではない。別 CPU との共有や一般のデータ競合は別途保護する
+- PREEMPT_RT では BH 制御と softirq の実行・プリエンプション特性が変わる。暗黙の非プリエンプト性に依存しない
+- softirq 専用の per-CPU データなどでは、必要に応じて `local_lock_nested_bh()` 系と lockdep の契約を確認する
