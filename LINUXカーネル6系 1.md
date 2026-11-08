@@ -1088,11 +1088,14 @@ signal frame を整えてからユーザーモードへ戻します。
 
 #### IPC は共有方法と同期方法で選ぶ
 
-- pipe / FIFO: 主に一方向の byte stream をプロセス間で渡す。pipe は通常、関連するプロセス間で使い、FIFO はファイルシステム上の名前を介して接続する
-- UNIX domain socket: 同一ホスト内の双方向通信に使い、byte stream または datagram としてデータを渡せる。必要に応じて file descriptor も受け渡せる
+- pipe / FIFO: 主に一方向の byte stream をプロセス間で渡す。pipe は通常、関連するプロセス間で使い、
+FIFO はファイルシステム上の名前を介して接続する
+- UNIX domain socket: 同一ホスト内の双方向通信に使い、byte stream または datagram としてデータを渡せる。
+必要に応じて file descriptor も受け渡せる
 - message queue: メッセージ境界を保ってデータを送り、受信側がメッセージ単位で取り出す
 - semaphore: データ本体を運ばず、共有資源へのアクセス順序や同時実行数を調整する
-- shared memory: 複数プロセスのアドレス空間に同じ記憶領域を対応付ける。コピーを減らせる一方、排他やデータ構造の整合性は別の同期手段で設計する
+- shared memory: 複数プロセスのアドレス空間に同じ記憶領域を対応付ける。コピーを減らせる一方、排他やデータ構造の
+整合性は別の同期手段で設計する
 
 System V IPC は、`semget()`、`msgget()`、`shmget()` などで識別子を取得して操作する方式です。
 Linux 6.18 にも互換性のため実装が残っています。
