@@ -1114,7 +1114,8 @@ System V IPC では明示的な削除操作が必要な資源があり、Linux �
 - pipe と UNIX domain socket: `fs/pipe.c`、`net/unix/`
 
 UmuOS では、`kill` や shell の Ctrl+C による signal の結果を観察できます。
-ただし、コマンドの終了結果だけでは signal の保留・mask・handler frame の内部処理までは分からないため、必要に応じて `strace` や tracing とソースを照合します。
+ただし、コマンドの終了結果だけでは signal の保留・mask・handler frame の内部処理までは分からないため、
+必要に応じて `strace` や tracing とソースを照合します。
 
 ### 1.6.7 プロセス管理
 
