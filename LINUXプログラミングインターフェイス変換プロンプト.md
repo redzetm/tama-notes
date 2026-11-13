@@ -21,6 +21,7 @@
 
 まずは、
 /home/tama/tama-notes/umuOSの為のC言語（上級）4.md
+/home/tama/tama-notes/umuOSの為のC言語（上級）5.md
 を参考にフォーマットを理解してください。
 同じようなイメージで作成をお願いします。
 
