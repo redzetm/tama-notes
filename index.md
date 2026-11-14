@@ -69,6 +69,7 @@ Linux、C言語、Bash、システムプログラミング、低レイヤ技術�
 - [UmuOSの為のC言語５（上級）　5章　ファイルI/O：その詳細]({{ '/umuOSの為のC言語（上級）5.html' | relative_url }})
 - [UmuOSの為のC言語６（上級）　6章　プロセス]({{ '/umuOSの為のC言語（上級）6.html' | relative_url }})
 - [UmuOSの為のC言語７（上級）　7章　メモリ割り当て]({{ '/umuOSの為のC言語（上級）7.html' | relative_url }})
+- [UmuOSの為のC言語８（上級）　8章　ユーザとグループ]({{ '/umuOSの為のC言語（上級）8.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　1章　ポインタの復習]({{ '/UmuOSの為のC言語（現代ポインタ）1.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　2章　C言語の動的メモリ管理]({{ '/UmuOSの為のC言語（現代ポインタ）2.html' | relative_url }})
 - [UmuOSの為のC言語（現代ポインタ）　3章　ポインタと関数]({{ '/UmuOSの為のC言語（現代ポインタ）3.html' | relative_url }})
