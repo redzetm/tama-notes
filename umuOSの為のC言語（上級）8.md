@@ -6,8 +6,8 @@ title: "UmuOSの為のC言語８（上級）　8章　ユーザとグループ"
 
 このノートでは、Linuxプログラミングインターフェイス第8章のユーザとグループを、現在の Linux / POSIX / C17 を前提に
 研究します。一度に章全体を扱わず、節ごとに整理します。現在は原文 8.1「パスワードファイル：/etc/passwd」、
-8.2「shadow パスワードファイル：/etc/shadow」、8.3「グループファイル：/etc/group」を扱い、8.4〜8.6 は後続の作業で扱います。
-8.7 の演習問題は対象外です。
+8.2「shadow パスワードファイル：/etc/shadow」、8.3「グループファイル：/etc/group」、
+8.4「ユーザ情報とグループ情報の参照」を扱い、8.5〜8.6 は後続の作業で扱います。8.7 の演習問題は対象外です。
 
 ユーザ名やグループ名は人が扱いやすい表記であり、Linux カーネルがアクセス権の判定に使うのは主に UID / GID などの
 数値識別子です。また、`/etc/passwd` に記載されたアカウント情報と、プロセスが実際に保持する資格情報は別のものです。
@@ -15,10 +15,10 @@ title: "UmuOSの為のC言語８（上級）　8章　ユーザとグループ"
 
 ## 今回扱う範囲
 
-- 原文対応: 8.1 `passwd` ファイル、8.2 shadow パスワードファイル、8.3 グループファイル
-- 今回の主題: ユーザの主グループと追加グループ、`/etc/group` の形式、ファイル情報と実行中プロセスの資格情報の違いを整理すること
-- C17 の着眼点: C17 は UID / GID や passwd / shadow / group ファイルを定義しないことを確認し、POSIX / Linux の仕様と区別すること
-- UmuOS視点の着眼点: rootfs 内のグループ定義と、プロセスが保持する主・追加グループ資格情報を分けて観察すること
+- 原文対応: 8.1 `passwd` ファイル、8.2 shadow パスワードファイル、8.3 グループファイル、8.4 アカウント情報 API
+- 今回の主題: UID / GID と名前の相互参照、passwd / group / shadow データの取得 API、返却領域の寿命と再入可能性を整理すること
+- C17 の着眼点: C17 の標準機能と POSIX / Linux のアカウントデータベース API を区別し、返却ポインタの寿命を正しく扱うこと
+- UmuOS視点の着眼点: rootfs のローカルファイルだけでなく、実行環境の NSS 設定や利用可能な API を確認すること
 
 ## 8章の研究観点
 
@@ -279,3 +279,161 @@ UmuOS の rootfs では、`/etc/group` に定義された名前と GID、ユー�
 - アカウントデータベースの内容と、実行中プロセスが現在保持する資格情報は異なる
 - GID 0 や `root` というグループ名だけで特権が生じるわけではない
 - `/etc/gshadow` やグループパスワード欄は環境依存の管理情報として慎重に扱う
+
+## 8.4 ユーザ情報とグループ情報の参照
+
+### 8.4.1 名前または数値 ID で個別に検索する
+
+POSIX のアカウントデータベース API には、ログイン名からユーザ情報を検索する `getpwnam()`、
+UID から検索する `getpwuid()`、グループ名・GID をキーにする `getgrnam()` / `getgrgid()` があります。
+これらは `passwd` / `group` ファイルを直接読む API ではなく、NSS の設定に応じたアカウント情報源を検索します。
+
+成功すると、関数は `struct passwd` または `struct group` へのポインタを返します。
+`struct passwd` にはログイン名、UID、主 GID、ホームディレクトリ、ログインシェルなどが含まれ、
+`struct group` にはグループ名、GID、メンバー名の配列などが含まれます。
+フィールドの一部は規格や実装によって差があるため、対象環境のヘッダとマニュアルを確認します。
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <inttypes.h>
+#include <pwd.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int print_user(const char *name)
+{
+    size_t capacity = 1024;
+
+    for (;;) {
+        char *buffer = malloc(capacity);
+        if (buffer == NULL) {
+            perror("malloc");
+            return -1;
+        }
+
+        struct passwd pwd;
+        struct passwd *result = NULL;
+        int error = getpwnam_r(name, &pwd, buffer, capacity, &result);
+
+        if (error == ERANGE) {
+            free(buffer);
+            if (capacity > SIZE_MAX / 2) {
+                fputs("アカウント情報のバッファが大きすぎます\n", stderr);
+                return -1;
+            }
+            capacity *= 2;
+            continue;
+        }
+
+        if (error != 0 &&
+            !(result == NULL && (error == ENOENT || error == ESRCH))) {
+            fprintf(stderr, "getpwnam_r: %s\n", strerror(error));
+            free(buffer);
+            return -1;
+        }
+
+        if (result == NULL) {
+            printf("ユーザが見つかりません: %s\n", name);
+            free(buffer);
+            return 0;
+        }
+
+        printf("name=%s uid=%ju gid=%ju\n",
+               result->pw_name,
+               (uintmax_t)result->pw_uid,
+               (uintmax_t)result->pw_gid);
+        free(buffer);
+        return 0;
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s login-name\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    return print_user(argv[1]) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+```
+
+この例は POSIX.1-2008 の `getpwnam_r()` を使います。関数の戻り値はエラー番号であり、
+`errno` を戻り値として判定する形ではありません。POSIX の規定では戻り値 0 かつ `result == NULL` が未発見を示します。
+一方、Linux の実装文書では未発見時に `ENOENT` / `ESRCH` が返る場合も記載されているため、
+対象環境の仕様を確認します。例では Linux で文書化されている未発見コードも区別して扱います。
+バッファが小さい場合の `ERANGE` では、一時バッファを拡張して再試行します。
+`sysconf(_SC_GETPW_R_SIZE_MAX)` は初期バッファサイズの目安になりますが、値が不定の場合もあるため、
+返された値だけを上限と見なさず、`ERANGE` 時の再試行を考慮します。
+
+`result` と構造体内の文字列ポインタは、呼び出し側が用意した `buffer` に依存します。
+そのため、例では内容を表示し終えるまでバッファを保持し、最後に解放します。
+`getpwuid_r()`、`getgrnam_r()`、`getgrgid_r()` も同様に呼び出し側の構造体と文字列用バッファを使います。
+
+### 8.4.2 静的領域を返す関数の注意点
+
+従来の `getpwnam()`、`getpwuid()`、`getgrnam()`、`getgrgid()` は、
+内部の静的領域を指すポインタを返す実装があります。次の同種 API 呼び出しで構造体や文字列が
+上書きされる可能性があるため、戻り値のポインタを長期保存したり、複数の結果を並行して保持したりしません。
+
+```c
+struct passwd *first = getpwnam("guest");
+struct passwd *second = getpwnam("daemon");
+```
+
+このように取得した `first` が、2回目の呼び出し後も最初の結果を指しているとは限りません。
+構造体だけを別変数へ代入しても、内部の文字列ポインタまでは複製されないため、単純な構造体コピーでは
+この問題を解決できません。並行利用や再入可能性が必要な場面では、`_r` 付き API と呼び出し側バッファを使います。
+
+### 8.4.3 エントリを順次走査する API
+
+`getpwent()` / `setpwent()` / `endpwent()` はユーザエントリを順次参照し、
+`getgrent()` / `setgrent()` / `endgrent()` はグループエントリを順次参照します。
+shadow 用には Linux などが `getspnam()`、`getspent()`、`setspent()`、`endspent()` を提供します。
+
+これらの走査 API は内部の列挙位置や返却領域を共有するため、独立した反復器のように複数の走査を
+同時に管理できるとは限りません。走査が終わったら対応する `end*ent()` を呼び、
+返却されたポインタを次の呼び出し後も使う場合は、必要な情報を自分の領域へコピーします。
+NSS が有効な環境では、走査対象もローカルファイルだけとは限りません。
+
+shadow 用 API は POSIX の共通 API ではなく、利用可能性やヘッダ、リンク条件は libc / OS に依存します。
+また返される shadow 情報は機密性が高いため、通常のユーザ表示やログ出力へ含めてはいけません。
+このノートでは API の存在と仕様境界を押さえ、認証データを読み出して扱うコードは作りません。
+
+### 8.4.4 見つからない場合と API エラーを区別する
+
+旧来のポインタ返却 API は、見つからない場合もエラー時も `NULL` を返すため、
+`errno` の扱いだけで両者を移植可能に区別できないことがあります。
+実装ごとの歴史的な差もあるため、`errno = 0` としてから呼び出すだけで完全な可搬性が得られるとは限りません。
+
+POSIX の `_r` 付き関数では、戻り値のエラー番号と、出力引数の結果ポインタを組み合わせて判定します。
+規格上は結果ポインタが `NULL` で戻り値が 0 なら未発見です。Linux では未発見に `ENOENT` / `ESRCH` を
+使う実装もあるため、対象システムのマニュアルに従って扱います。見つからない状態と失敗状態を成功扱いにしないようにします。
+
+数値 ID を文字列から独自に変換する場合も、`strtol()` の戻り値をそのまま `uid_t` / `gid_t` に変換してはいけません。
+`errno`、終端位置、符号、型の範囲を確認し、変換可能性を検証する必要があります。
+単に「数字らしい文字列か」を見るだけでは、オーバーフローや範囲外の ID を検出できません。
+
+### 8.4.5 UmuOS での観察点
+
+UmuOS のユーザー空間でアカウント情報を参照する場合は、ビルド環境と実行環境の libc が
+どの POSIX API を提供するか、NSS などの名前解決設定があるかを確認します。
+`/etc/passwd` や `/etc/group` を直接読む場合と、`getpwnam()` / `getgrnam()` を使う場合では、
+参照対象と返却データの寿命が異なる点に注意します。
+
+最小構成の rootfs で `_r` API や NSS モジュールが利用できるかは、実際の libc と設定に依存します。
+プロセスの UID / GID を調べる場合は、アカウント名の検索結果だけでなく、
+実行中プロセスが保持している資格情報も別途確認します。
+
+### 8.4.6 この節で固定したいこと
+
+- `getpwnam()` / `getpwuid()` と `getgrnam()` / `getgrgid()` は名前または数値 ID から情報を検索する
+- 従来 API の返却ポインタは静的領域を指す場合があり、後続呼び出しで上書きされ得る
+- `_r` 付き API は呼び出し側の構造体とバッファを使い、返却データの有効期間を明確にする
+- `_r` API は戻り値のエラー番号と結果ポインタを組み合わせて判定し、`errno` だけに依存しない
+- passwd / group の列挙 API は内部状態を共有し得るため、終了処理とポインタの寿命に注意する
+- shadow 参照 API は非標準であり、返却される認証データをログや通常出力へ含めない
+- 数値文字列から `uid_t` / `gid_t` へ変換する際は、終端・範囲・オーバーフローを検査する
