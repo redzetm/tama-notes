@@ -220,6 +220,43 @@ Linux では、孤児プロセスは最も近い生存中の child subreaper に
 一時ファイルには、名前の選択とファイルの作成を一度に行う `mkstemp()` などの API を使います。
 このような API は、別のプロセスが先に同じファイルを作る競合を避けてファイルを作成します。
 
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(void)
+{
+    char path[] = "/tmp/app-XXXXXX";
+    int fd = mkstemp(path);
+
+    if (fd == -1) {
+        perror("mkstemp");
+        return EXIT_FAILURE;
+    }
+
+    printf("一時ファイルを作成しました: %s\n", path);
+    /* ファイルの読み書きには、返された fd を使う */
+
+    if (close(fd) == -1) {
+        perror("close");
+        if (unlink(path) == -1)
+            perror("unlink");
+        return EXIT_FAILURE;
+    }
+    if (unlink(path) == -1) {
+        perror("unlink");
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+```
+
+`XXXXXX` は `mkstemp()` が置き換えます。関数はファイルを作成したうえで、開いた状態のファイル記述子 `fd` を返します。
+ファイルを使うときは、パス名から開き直すのではなく、この `fd` を使います。
+
 ### 6.2.5 UmuOS の起動時に見る PID 1
 
 UmuOS の起動では、initramfs の `/init` が PID 1 として動き、`exec` により `switch_root` へ実行イメージを置き換える構成が記録されています。
