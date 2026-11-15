@@ -181,8 +181,8 @@ int main(void)
 }
 ```
 
-`pid_t` は POSIX がプロセス ID 用に定める型です。具体的な整数型を決め打ちせず、PID / PPID の変数には `pid_t` を
-使います。
+`pid_t` は POSIX がプロセス ID 用に定める型です。具体的な整数型を決め打ちせず、PID / PPID の変数には 
+`pid_t` を使います。
 表示では `intmax_t` に変換して `%jd` で出力し、`pid_t` の実装上の型と `printf()` の書式指定子を
 直接結びつけないようにしています。
 
@@ -201,7 +201,8 @@ PID namespace 内の init
 ```
 
 親プロセスが子プロセスより先に終了すると、子は孤児プロセスになります。
-Linux では、孤児プロセスは最も近い生存中の child subreaper に引き取られ、該当するプロセスがなければ、その PID namespace の init プロセスに引き取られます。
+Linux では、孤児プロセスは最も近い生存中の child subreaper に引き取られ、該当するプロセスがなければ、
+その PID namespace の init プロセスに引き取られます。
 そのため「常にシステム全体の PID 1 が親になる」とは限らず、PID namespace と subreaper の有無を考慮します。
 
 また Linux では、親プロセスが別の PID namespace にいる場合、`getppid()` が `0` を返すことがあります。
