@@ -456,6 +456,48 @@ int main(void)
 外部入力をそのままサイズに使うこと、大きな領域を必要とすること、確保失敗を通常のエラーとして処理したいことの
 いずれかに当てはまるなら、`malloc()` など戻り値で失敗を扱える方法を選びます。
 
+`alloca()` を必ず使わなければならない場面は、通常の C プログラムではほとんどありません。
+例えば、関数の中だけで使う一時領域を、実行時に決まるサイズで用意したい場合にも `malloc()` を使えます。
+サイズが固定されているなら、通常の配列も選択肢です。
+
+先ほどの `print_values()` と同じように、1 から 16 個の `int` を確保して表示する場合、
+`malloc()` を使う部分は次のように書けます。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+static void print_values(size_t count)
+{
+    if (count == 0 || count > 16) {
+        fputs("要素数は1から16の範囲で指定してください\n", stderr);
+        return;
+    }
+
+    int *values = malloc(count * sizeof *values);
+    if (values == NULL) {
+        fputs("メモリを確保できませんでした\n", stderr);
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        values[i] = (int)(i + 1);
+        if (printf("values[%zu] = %d\n", i, values[i]) < 0) {
+            fputs("表示に失敗しました\n", stderr);
+            free(values);
+            return;
+        }
+    }
+
+    free(values);
+}
+```
+
+`malloc()` では確保に失敗した場合を戻り値で確認できます。
+その一方、確保に成功した領域は、関数から戻るだけでは解放されません。
+この例では、表示に失敗して途中で戻る場合も、最後まで表示できた場合も、戻る前に `free(values)` を呼びます。
+自動的に解放される `alloca()` とは、この点が異なります。
+
 ### 7.2.4 `alloca()`・VLA・`malloc()` の違い
 
 | 手段 | 規格上の位置づけ | 主な寿命・解放 | 主な注意点 |
