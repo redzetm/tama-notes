@@ -15,6 +15,34 @@ Linux カーネル内部では、これらの情報は `struct cred` という�
 「プロセスが資格情報を持つ」といっても、アプリケーションのメモリ内にこの構造体があるという意味ではありません。
 アプリケーションは通常、構造体を直接読むのではなく、`getuid()` などの関数を使って情報を取得します。
 
+`struct cred` がどのような情報をまとめているか、イメージをつかむための簡略化した例を示します。
+これは実際のカーネルの構造体定義ではなく、アプリケーションから資格情報を取得するためのコードでもありません。
+
+```c
+struct group_info_example;  /* 追加グループ情報を表す構造体 */
+
+struct credential_example {
+    unsigned int uid;    /* 実ユーザ ID */
+    unsigned int euid;   /* 実効ユーザ ID */
+    unsigned int suid;   /* saved set-user-ID */
+    unsigned int fsuid;  /* filesystem user ID */
+
+    unsigned int gid;    /* 実グループ ID */
+    unsigned int egid;   /* 実効グループ ID */
+    unsigned int sgid;   /* saved set-group-ID */
+    unsigned int fsgid;  /* filesystem group ID */
+
+    struct group_info_example *groups;  /* 追加グループ情報へのポインタ */
+};
+```
+
+この例の `groups` は、追加グループの一覧そのものではなく、別の場所にある情報を指すポインタです。
+先頭の `struct group_info_example;` は、その参照先となる構造体の名前を知らせる宣言であり、
+ここでは構造体の中身を省略しています。
+実際の `struct cred` にはケーパビリティなども含まれ、メンバの型や構成はこの例と異なります。
+また、カーネルのバージョンや設定などによって構造体のサイズは変わります。
+構造体本体のサイズには、ポインタの参照先にあるデータのサイズは含まれません。
+
 プロセスの資格情報には、実ユーザ ID・実グループ ID、実効ユーザ ID・実効グループ ID、saved set-ID、
 Linux 固有の filesystem user/group ID、追加グループ ID があります。これらは役割が異なり、
 プロセスの起動元を表す ID、操作時の権限判定に関わる ID、ファイルアクセスに使われる ID を区別する必要があります。
