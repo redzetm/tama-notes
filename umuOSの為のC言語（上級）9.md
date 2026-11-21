@@ -16,8 +16,8 @@ Linux 固有の filesystem user/group ID、追加グループ ID があります
 
 ## 今回扱う範囲
 
-- 参考文献対応: 9.1〜9.6 の資格情報と、9.7.1〜9.7.2 の ID の参照と変更
-- 今回の主題: 資格情報の役割に加え、実 ID・実効 ID・saved set-ID と filesystem user/group ID を扱う API の違いを整理すること
+- 参考文献対応: 9.1〜9.6 の資格情報と、9.7.1〜9.7.3 の ID・追加グループの参照と変更
+- 今回の主題: 資格情報の役割に加え、各種 ID と追加グループを扱う API の違いを整理すること
 - C17 の着眼点: C17 はプロセスや UID / GID を定義しない。資格情報を扱うインタフェースは POSIX や Linux の仕様と区別すること
 - UmuOS 視点の着眼点: アカウント情報や実行ファイルの属性だけで資格情報を決めつけず、実行中の状態を確認すること
 
@@ -694,3 +694,135 @@ UmuOS の調査では、これらの API が libc に用意されているか、
 - Linux システムコールの戻り値は成功・失敗のどちらでも変更前の ID であり、それだけで結果は判定できない
 - `setfsuid(0)` は条件によって ID を変更するため、単なる取得操作として使わない
 - 現在値の観察には、利用可能なら `/proc/PID/status` を使い、読み取り側の名前空間も考慮する
+
+### 9.7.3 追加グループ ID の参照と変更
+
+#### `getgroups()` で追加グループを取得する
+
+`getgroups()` は、呼び出したプロセスの追加グループ ID を取得する POSIX のインタフェースです。
+追加グループの意味や、ファイルアクセスでの役割は 9.6 で説明しました。
+
+```c
+#include <sys/types.h>
+#include <unistd.h>
+
+int getgroups(int size, gid_t list[]);
+```
+
+`size` は `list` に格納できる **要素数**であり、バイト数ではありません。成功すると格納された
+ID の個数が返り、失敗すると `-1` が返って `errno` が設定されます。
+`size` が `0` の場合は一覧を書き込まず、必要な要素数を返します。
+この場合は `list` に `NULL` を指定できます。
+
+実効 GID が結果に含まれるかは、移植先の実装により異なり得ます。実効 GID を確実に知る必要がある場合は、
+`getegid()` も別に呼びます。`getgroups()` だけで実効 GID の有無を決めつけません。
+
+#### 必要な大きさの配列を用意する
+
+次の例は、必要な個数を調べて `gid_t` の配列を確保し、追加グループ ID を表示します。
+資格情報を変更しない参照用プログラムです。
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int capacity = getgroups(0, NULL);
+    if (capacity == -1) {
+        perror("getgroups count");
+        return EXIT_FAILURE;
+    }
+
+    printf("effective GID: %ju\n", (uintmax_t)getegid());
+    if (capacity == 0) {
+        puts("supplementary groups: none");
+        return EXIT_SUCCESS;
+    }
+
+    if ((size_t)capacity > SIZE_MAX / sizeof(gid_t)) {
+        fputs("group list is too large\n", stderr);
+        return EXIT_FAILURE;
+    }
+    gid_t *groups = malloc((size_t)capacity * sizeof(*groups));
+    if (groups == NULL) {
+        perror("malloc");
+        return EXIT_FAILURE;
+    }
+
+    int count = getgroups(capacity, groups);
+    if (count == -1) {
+        perror("getgroups list");
+        free(groups);
+        return EXIT_FAILURE;
+    }
+
+    printf("supplementary groups (%d):", count);
+    for (int i = 0; i < count; i++) {
+        printf(" %ju", (uintmax_t)groups[i]);
+    }
+    putchar('\n');
+    free(groups);
+    return EXIT_SUCCESS;
+}
+```
+
+処理の順序は次のとおりです。
+
+1. `getgroups(0, NULL)` で必要な要素数を取得する。
+2. 要素数が `0` なら、空の一覧として表示して終了する。
+3. 要素数と `sizeof(gid_t)` の積が `size_t` の範囲に収まることを確認し、`malloc()` で配列を確保する。
+4. `getgroups()` で実際の一覧を取得し、返された要素数だけ表示して `free()` で解放する。
+
+実行例です。数値や個数は実行環境により異なります。
+
+```text
+effective GID: 1000
+supplementary groups (2): 1000 1200
+```
+
+個数を確認してから一覧を取得するまでに追加グループが増えると、確保した配列が足りず、
+2回目の `getgroups()` が `EINVAL` で失敗する場合があります。この例はエラーを表示して終了します。
+自動的に再試行する設計では、個数の取得からやり直し、再試行回数や最終的なエラー処理も考慮します。
+また、個数が `0` の場合を含め、結果は取得した時点の状態であり、その後も不変とは限りません。
+
+#### `setgroups()` と `initgroups()`
+
+`setgroups()` は、指定した GID の配列で、呼び出したプロセスの追加グループ一覧を**置き換えます**。
+現在の一覧へ単に追加する関数ではありません。`initgroups()` は指定したユーザのグループ情報を検索し、
+指定された GID も含めて追加グループ一覧を初期化します。ログイン機構などが、ユーザの主 GID を
+この追加の GID として渡す構成があります。
+
+両関数は成功時に `0`、失敗時に `-1` を返し、失敗時には `errno` を設定します。
+Linux の `setgroups()` には通常、呼び出し側のユーザ名前空間で `CAP_SETGID` が必要です。
+さらに、その名前空間で `setgroups()` 自体が禁止されている場合もあり、条件によって `EPERM` で失敗します。
+`initgroups()` も一覧を設定するため、必要な権限や設定を確認し、失敗を見逃してはいけません。
+
+`initgroups()` の検索先は、対象 libc や名前サービスの設定によって異なります。
+`/etc/group` だけを直接読んでいると決めつけず、実行環境の構成を確認します。
+これらの関数は POSIX 共通 API ではなく、利用可否や宣言を公開する条件は環境依存です。
+たとえば glibc では `<grp.h>` を使用し、現在のバージョンでは `_DEFAULT_SOURCE` が必要です。
+参考文献にある `_BSD_SOURCE` は古い glibc の指定です。
+
+これらの API は追加グループの一覧を設定するもので、ユーザを認証する処理ではありません。
+実際のプログラムでは、資格情報を変更する順序や、UID / GID・ケーパビリティなど他の権限も含めて設計します。
+
+#### UmuOS での観察点
+
+UmuOS の libc が `getgroups()`、`setgroups()`、`initgroups()` を提供するかを確認します。
+また、ログイン機構が実際に追加グループを初期化しているかは、設計メモだけでは断定せず、
+実行中のシェルや子プロセスの資格情報と実装を調べます。
+`/etc/group` を編集しても、すでに動作しているプロセスの一覧が自動更新されるわけではありません。
+
+#### この小節で固定したいこと
+
+- `getgroups()` はプロセスの追加グループを取得し、`size` には配列の要素数を指定する
+- `getgroups(0, NULL)` で必要な個数を取得できるが、その後に一覧が変化する可能性がある
+- 実効 GID が一覧に含まれるかを決めつけず、必要なら `getegid()` でも確認する
+- `setgroups()` は一覧を置き換え、`initgroups()` はユーザのグループ情報を基に一覧を初期化する
+- 一覧の変更には権限と環境上の条件があり、失敗時には処理を続行せずエラーを確認する
