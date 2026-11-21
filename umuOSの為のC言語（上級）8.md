@@ -526,9 +526,11 @@ telnetd -p 23 -l /bin/login
 ```
 
 したがって通常ログインの経路は、シリアル端末では `getty` から `login` へ、telnet では
-`telnetd` から `/bin/login` へ進みます。設計書では、アカウント情報を `/etc/passwd` と
-`/etc/shadow` に置き、rootfs 作成時に shadow の検証データを手動で設定します。認証データの実値はここには載せません。
-BusyBox の shadow 対応設定は、この通常ログインの構成を示すものであり、C17 のプログラムが認証処理を実装する例ではありません。
+`telnetd` から `/bin/login` へ進みます。
+設計書では、アカウント情報を `/etc/passwd` と`/etc/shadow` に置き、rootfs 作成時に shadow の検証データを
+手動で設定します。認証データの実値はここには載せません。
+BusyBox の shadow 対応設定は、この通常ログインの構成を示すものであり、C17 のプログラムが認証処理を
+実装する例ではありません。
 
 通常ログインとは別に、設計書には自作の SUID `su` も記載されています。この `su` は `/etc/shadow` の root
 エントリを直接読み、`getpass()` と `crypt()` で入力を照合してから root の資格情報へ切り替え、シェルを起動します。
