@@ -16,8 +16,8 @@ Linux 固有の filesystem user/group ID、追加グループ ID があります
 
 ## 今回扱う範囲
 
-- 参考文献対応: 9.1〜9.6 の資格情報と、9.7.1〜9.7.4 の ID・追加グループの参照と変更
-- 今回の主題: 資格情報の役割に加え、各種 ID と追加グループを扱う API の違いと変更時の注意点を整理すること
+- 参考文献対応: 9.1〜9.6 の資格情報と、9.7.1〜9.7.5 の参照・変更 API および資格情報の表示
+- 今回の主題: 資格情報の役割、各種 ID と追加グループの参照・変更、実行中の状態を観察する方法を整理すること
 - C17 の着眼点: C17 はプロセスや UID / GID を定義しない。資格情報を扱うインタフェースは POSIX や Linux の仕様と区別すること
 - UmuOS 視点の着眼点: アカウント情報や実行ファイルの属性だけで資格情報を決めつけず、実行中の状態を確認すること
 
@@ -893,3 +893,126 @@ UmuOS で使用する場合は、対象の libc とカーネル、ログイン�
 - filesystem ID と追加グループは別の資格情報であり、UID / GID の変更だけですべては整理されない
 - 変更できる値や処理順序は、ケーパビリティ、ユーザ名前空間、対象 API の規則に依存する
 - 変更の成功・失敗と変更後の状態を確認し、想定外の資格情報で処理を続けない
+
+### 9.7.5 サンプルプログラム：プロセス権限の表示
+
+#### 自分自身の資格情報をまとめて観察する
+
+この例では Linux の `/proc/self/status` を読み、プログラム自身の UID、GID、追加グループ ID を表示します。
+`Uid` / `Gid` 行にはそれぞれ実 ID、実効 ID、saved set-ID、filesystem user/group ID が並びます。
+`Groups` 行には追加グループ ID の一覧が並びます。
+
+9.7.1 と 9.7.3 では、`getresuid()` / `getresgid()` と `getgroups()` を使って ID を取得しました。
+ここでは filesystem user/group ID も含めて読み取り専用で観察するため、Linux 固有の `/proc` を使います。
+参考文献の `setfsuid(0)` / `setfsgid(0)` は、実行条件によって実際に ID を変更し得るため使用しません。
+
+```c
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+    FILE *status = fopen("/proc/self/status", "r");
+    if (status == NULL) {
+        perror("fopen /proc/self/status");
+        return EXIT_FAILURE;
+    }
+
+    char *line = NULL;
+    size_t capacity = 0;
+    int found = 0;
+    int result = EXIT_FAILURE;
+
+    while (getline(&line, &capacity, status) != -1) {
+        int field = 0;
+
+        if (strncmp(line, "Uid:", 4) == 0) {
+            field = 1;
+        } else if (strncmp(line, "Gid:", 4) == 0) {
+            field = 2;
+        } else if (strncmp(line, "Groups:", 7) == 0) {
+            field = 4;
+        }
+
+        if (field != 0) {
+            if (fputs(line, stdout) == EOF) {
+                perror("fputs");
+                goto cleanup;
+            }
+            found |= field;
+        }
+    }
+
+    if (ferror(status) || !feof(status)) {
+        perror("getline /proc/self/status");
+        goto cleanup;
+    }
+    if (found != 7) {
+        fputs("missing credential fields in /proc/self/status\n", stderr);
+        goto cleanup;
+    }
+    if (fflush(stdout) == EOF) {
+        perror("fflush stdout");
+        goto cleanup;
+    }
+    result = EXIT_SUCCESS;
+
+cleanup:
+    free(line);
+    if (fclose(status) == EOF) {
+        perror("fclose /proc/self/status");
+        result = EXIT_FAILURE;
+    }
+    return result;
+}
+```
+
+`getline()` は1行を読み、必要に応じて `line` が指す領域を確保・拡張します。`capacity` には確保領域の
+大きさが保持され、使い終えた領域は `free()` で解放します。追加グループが多くても、
+固定長の配列で行を途中までしか読めないという問題を避けられます。
+`getline()` は POSIX のインタフェースで、C17 の標準ライブラリには含まれません。
+
+`found` は、3種類の行を見つけたかを記録するための整数です。`Uid`、`Gid`、`Groups` にそれぞれ
+`1`、`2`、`4` を割り当て、ビット演算 `|=` で記録します。3種類すべてを見つけると `7` になります。
+読み取りや出力が失敗した場合、または必要な行が見つからない場合は、エラーを表示して失敗終了します。
+
+#### コンパイルと実行
+
+コードを `idshow.c` という名前で保存した場合の例です。コンパイルには `getline()` を提供する libc が、
+実行には Linux の `/proc` が必要です。
+
+```sh
+cc -std=c17 -Wall -Wextra -Wpedantic idshow.c -o idshow
+./idshow
+```
+
+表示例です。数値や追加グループの個数は実行環境によって変わります。
+
+```text
+Uid:    1000    1000    1000    1000
+Gid:    1000    1000    1000    1000
+Groups: 1000 1200
+```
+
+この例は名前を検索せず、カーネルが表示する数値 ID をそのまま出力します。
+ユーザ名やグループ名が必要な場合の検索は、上級8で扱ったアカウントデータベース API と区別して考えます。
+また、表示されるのは `idshow` 自身の資格情報であり、親シェルや別プロセスの状態と必ず同一とは限りません。
+
+#### UmuOS での観察点と限界
+
+UmuOS 上で動かす場合は、対象環境の libc が `getline()` を提供することと、`/proc` が利用できることを確認します。
+利用できない場合はエラーを表示して終了します。ホストで得た結果を UmuOS の結果として扱いません。
+
+このプログラムは UID / GID と追加グループを表示しますが、ケーパビリティや開いたファイルなど、
+権限に関係する情報のすべてを示すものではありません。異なるユーザ名前空間のプロセスを別途調べる場合は、
+表示される ID と名前空間の関係にも注意します。
+
+#### この小節で固定したいこと
+
+- `/proc/self/status` の `Uid` / `Gid` / `Groups` 行で、このプログラム自身の各 ID と追加グループを観察できる
+- `getline()` で長さの異なる行を読み、確保された領域は `free()` で解放する
+- 読み取り・出力のエラーや必要な行の欠落を成功扱いにしない
+- `/proc` は Linux 固有であり、UmuOS での利用可否は実環境で確認する
+- この表示だけでプロセスのすべての権限を判断しない
