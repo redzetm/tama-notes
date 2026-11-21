@@ -16,8 +16,8 @@ Linux 固有の filesystem user/group ID、追加グループ ID があります
 
 ## 今回扱う範囲
 
-- 参考文献対応: 9.1〜9.6 の実 ID、実効 ID、set-user-ID / set-group-ID、saved set-ID、filesystem user/group ID、追加グループ ID
-- 今回の主題: プロセスの資格情報の役割と、set-ID による変化、保存された ID、ファイルアクセスに使われる ID や追加グループを整理すること
+- 参考文献対応: 9.1〜9.6 の資格情報と、9.7.1「実 ID、実効 ID、saved set ID の参照と変更」
+- 今回の主題: 資格情報の役割に加え、実 ID・実効 ID・saved set-ID を参照・変更する API の違いを整理すること
 - C17 の着眼点: C17 はプロセスや UID / GID を定義しない。資格情報を扱うインタフェースは POSIX や Linux の仕様と区別すること
 - UmuOS 視点の着眼点: アカウント情報や実行ファイルの属性だけで資格情報を決めつけず、実行中の状態を確認すること
 
@@ -483,3 +483,143 @@ UmuOS での観察では `/proc` の利用可否を確認し、対象のログ�
 - ログイン機構などがグループ情報を参照して初期化するが、情報源と実行中プロセスの一覧は別である
 - 追加グループは `fork()` と `exec()` で引き継がれ、グループ情報の変更だけでは実行中プロセスに自動反映されない
 - `/proc/PID/status` の `Groups` 行で Linux のプロセスが保持する追加グループを観察できる
+
+## 9.7 プロセス権限の参照と変更
+
+### 9.7.1 実 ID、実効 ID、saved set-ID の参照と変更
+
+この小節では、プロセスの UID / GID を参照・変更するインタフェースを扱います。
+以下の変更規則は Linux の説明です。OS や libc によって提供される API や細かい動作が異なるため、
+他の環境に移植する際は対象の仕様を確認します。
+
+#### 実 ID・実効 ID の参照
+
+9.1 と 9.2 で扱ったように、`getuid()` / `getgid()` は実 UID / GID を、
+`geteuid()` / `getegid()` は実効 UID / GID を返します。これらの POSIX インタフェースは、
+値を直接返し、失敗を表す戻り値を持ちません。
+
+#### saved set-ID を含む参照
+
+Linux などが提供する `getresuid()` / `getresgid()` は、それぞれ実 ID・実効 ID・saved set-ID を
+まとめて取得します。これらは POSIX 共通のインタフェースではありません。glibc では宣言を利用するために
+ヘッダを含める前に `_GNU_SOURCE` を定義します。
+
+次は UID と GID の各3種類を表示する、参照だけのプログラムです。資格情報は変更しません。
+
+```c
+#define _GNU_SOURCE
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int main(void)
+{
+    uid_t real_uid, effective_uid, saved_uid;
+    gid_t real_gid, effective_gid, saved_gid;
+
+    if (getresuid(&real_uid, &effective_uid, &saved_uid) == -1) {
+        perror("getresuid");
+        return EXIT_FAILURE;
+    }
+    if (getresgid(&real_gid, &effective_gid, &saved_gid) == -1) {
+        perror("getresgid");
+        return EXIT_FAILURE;
+    }
+
+    printf("UID: real=%ju effective=%ju saved=%ju\n",
+           (uintmax_t)real_uid, (uintmax_t)effective_uid, (uintmax_t)saved_uid);
+    printf("GID: real=%ju effective=%ju saved=%ju\n",
+           (uintmax_t)real_gid, (uintmax_t)effective_gid, (uintmax_t)saved_gid);
+    return EXIT_SUCCESS;
+}
+```
+
+各関数は成功時に `0`、失敗時に `-1` を返し、失敗時には `errno` を設定します。
+引数の `&real_uid` などは、結果を書き込む変数のアドレスです。たとえば
+`getresuid()` は1番目から順に実 UID、実効 UID、saved set-user-ID を書き込みます。
+`perror()` は失敗の原因を標準エラー出力へ表示します。
+
+実行例です。値は実行した環境とプロセスの資格情報によって変わります。
+
+```text
+UID: real=1000 effective=1000 saved=1000
+GID: real=1000 effective=1000 saved=1000
+```
+
+これらの関数は filesystem user/group ID や追加グループを返しません。
+Linux の `/proc/PID/status` では、これらも含めて確認できます。
+また、UmuOS の libc が `getresuid()` / `getresgid()` を提供するかは実際の環境で確認します。
+
+#### `setuid()` / `setgid()` と `seteuid()` / `setegid()`
+
+変更系 API は成功時に `0`、失敗時に `-1` を返し、失敗時には `errno` を設定します。
+権限を変更できなかった場合、その後の処理を想定どおりの資格情報で続けてはいけません。
+UID 0 で実行していても失敗し得るため、戻り値を必ず確認します。
+
+| API | Linux での主な役割 |
+|---|---|
+| `setuid(uid)` / `setgid(gid)` | 実効 ID を設定する。対応する権限を持つ場合、実 ID と saved set-ID も同じ値に設定する |
+| `seteuid(uid)` / `setegid(gid)` | 実効 ID を設定する。保存された ID は変更しない |
+
+Linux では、任意の UID を設定する権限に `CAP_SETUID`、GID には `CAP_SETGID` が関係します。
+これらはケーパビリティと呼ばれる、特権を細分化した仕組みの一部です。権限の有無はユーザ名前空間などにも
+左右されるため、実効 UID が `0` かどうかだけで判断しません。
+
+対応するケーパビリティを持たない場合、`setuid()` / `setgid()` で実効 ID を変更できるのは、
+原則として現在の実 ID または saved set-ID の値です。`seteuid()` / `setegid()` も実 ID や
+saved set-ID への切り替えに使えますが、許可される値や細部は対象 OS の仕様を確認します。
+
+たとえば、`CAP_SETUID` を持つプロセスが `setuid(1000)` に成功すると、Linux では実 UID・実効 UID・
+saved set-user-ID がすべて `1000` になります。saved set-user-ID の `0` も残らないため、
+単に実効 UID を一時的に変える操作とは異なります。ただし、これだけで追加グループや開いたファイルなどを含む
+すべての権限が取り除かれたとは限りません。
+
+#### `setreuid()` / `setregid()` の注意点
+
+`setreuid()` は実 UID と実効 UID をそれぞれ指定して変更します。`setregid()` は GID に対応します。
+引数に `(uid_t)-1` または `(gid_t)-1` を指定した項目は変更しません。
+
+Linux では、実 ID の引数が `-1` でない場合、または実効 ID に変更前の実 ID と異なる値を指定した場合、
+saved set-ID も新しい実効 ID に設定されます。実 ID の引数に現在と同じ値を指定した場合も、
+`-1` ではないため保存値が更新され得ます。実効 ID だけを変更するつもりでも saved set-ID に影響することが
+あるため、呼び出し前後の全 ID を考える必要があります。
+
+対応するケーパビリティを持たない場合、Linux で実 ID に指定できるのは現在の実 ID または実効 ID、
+実効 ID に指定できるのは現在の実 ID・実効 ID・saved set-ID のいずれかです。許可される値や
+saved set-ID への影響は OS 間で差があるため、Linux の規則をそのまま他の環境に適用しません。
+
+#### `setresuid()` / `setresgid()` の注意点
+
+`setresuid()` / `setresgid()` は、実 ID・実効 ID・saved set-ID をそれぞれ指定して変更します。
+変更しない引数には、それぞれ `(uid_t)-1` / `(gid_t)-1` を指定します。
+これらは Linux などが提供するインタフェースで、POSIX 共通ではありません。
+
+Linux では、対応するケーパビリティを持たない場合でも、変更後の各 ID に現在の実 ID・実効 ID・
+saved set-ID のいずれかを指定できます。権限を持つ場合も、指定できる ID や実行結果はユーザ名前空間などの
+条件に依存します。
+
+また Linux では、これらの呼び出しが成功すると、実効 ID の値を変えない場合も含めて
+fsuid / fsgid が対応する実効 ID と同じ値になります。filesystem user/group ID を別に設定していた場合には、
+この副作用も確認する必要があります。
+
+#### 安全に扱うための境界
+
+プロセスが UID と GID の両方を変更する設計では、UID の変更によって GID や追加グループの変更に必要な
+権限を先に失わないよう、処理順序も重要です。変更が途中で失敗した場合は想定外の資格情報で続行せず、
+エラーを通知して処理を中止します。
+
+さらに、ID 以外の資格情報や、すでに開いたファイルディスクリプタも権限に関係します。
+特権プログラムの安全性は一つの API の呼び出しだけでは保証されません。
+ここでは仕組みを整理し、UmuOS の自作 `su` を含む既存実装の動作は別途実環境とコードで確認します。
+
+#### この小節で固定したいこと
+
+- `getuid()` / `getgid()` と `geteuid()` / `getegid()` は実 ID・実効 ID を直接返す
+- `getresuid()` / `getresgid()` は saved set-ID も取得するが、POSIX 共通 API ではない
+- `setuid()` / `setgid()` は権限によって実 ID と saved set-ID も変更し、`seteuid()` / `setegid()` は実効 ID を変更する
+- `setreuid()` / `setregid()` は saved set-ID も変更し得る
+- `setresuid()` / `setresgid()` は3種類の ID を個別に指定でき、Linux では filesystem ID も実効 ID に合わせる
+- 資格情報の変更は成功・失敗を必ず確認し、権限と処理順序を含めて設計する
