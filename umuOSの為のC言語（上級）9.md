@@ -173,6 +173,7 @@ UID 0 を「常にシステム全体のあらゆる操作が可能」と読み�
 
 実効 UID は `geteuid()`、実効 GID は `getegid()` で取得できます。いずれも POSIX のインタフェースで、
 実 ID を返す `getuid()` / `getgid()` と同様、失敗を示す戻り値はありません。
+※geteuid()の e は、  effective（実効）の意味です。
 
 ```c
 uid_t effective_uid = geteuid();
